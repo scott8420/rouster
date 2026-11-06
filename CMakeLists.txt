@@ -23,6 +23,8 @@ add_library(rouster_core STATIC
     # THE ONE DOOR (s004): the only file that changes a user's files. The
     # selftest's source gate fails if any other file makes a write call.
     src/core/Door.cpp
+    # Sweep (s006): finds and plans, read-only; the door acts.
+    src/core/Sweep.cpp
     # The SHORTCUT-REGISTRY paradigm: one list, two consumers (App wires accels
     # from it, ShortcutsDialog renders from it) so a key and its advertised row
     # can't drift. GTK-free, so it lives in core and the selftest guards it

@@ -28,6 +28,21 @@ Shell::Shell()
       m_res_where("shell.scan.res_where"),
       m_cards("shell.scan.cards"),
       m_detail("shell.scan.detail", Gtk::Orientation::VERTICAL, 4),
+      m_sw_page("shell.sweep.page", Gtk::Orientation::VERTICAL),
+      m_sw_states("shell.sweep.states"),
+      m_sw_sub("shell.sweep.sub"),
+      m_sw_find("shell.sweep.find"),
+      m_sw_spinner("shell.sweep.spinner"),
+      m_sw_run_big("shell.sweep.run_big"),
+      m_sw_run_caption("shell.sweep.run_caption"),
+      m_sw_cancel("shell.sweep.cancel"),
+      m_sw_big("shell.sweep.big"),
+      m_sw_caption("shell.sweep.caption"),
+      m_sw_list("shell.sweep.list", Gtk::Orientation::VERTICAL, 8),
+      m_sw_go("shell.sweep.go"),
+      m_sw_gate("shell.sweep.gate"),
+      m_sw_done_big("shell.sweep.done_big"),
+      m_sw_done_caption("shell.sweep.done_caption"),
       m_pf_page("shell.preflight.page", Gtk::Orientation::VERTICAL, 10),
       m_pf_summary("shell.preflight.summary"),
       m_pf_rows("shell.preflight.rows", Gtk::Orientation::VERTICAL, 10),
@@ -42,7 +57,7 @@ Shell::Shell()
 
 // The worker must be gone before the members it touches (m_report, the
 // dispatcher). close-request does this too; the dtor is the backstop.
-Shell::~Shell() { stop_scan(); }
+Shell::~Shell() { stop_scan(); stop_sweep(); }
 
 void Shell::build_ui() {
     m_home = home_dir();
@@ -58,8 +73,9 @@ void Shell::build_ui() {
     paint_preflight();
     paint_activity();
 
-    signal_close_request().connect([this] { stop_scan(); return false; }, false);
+    signal_close_request().connect([this] { stop_scan(); stop_sweep(); return false; }, false);
     m_scan_finished.connect(sigc::mem_fun(*this, &Shell::on_scan_done));
+    m_sweep_finished.connect(sigc::mem_fun(*this, &Shell::on_sweep_found));
 
     if (auto lg = log::get(log::Area::Shell)) lg->info("ready -- home is {}", m_home);
 }

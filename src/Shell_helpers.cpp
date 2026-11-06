@@ -4,6 +4,8 @@
 #include "Log.hpp"
 
 #include <gtkmm/label.h>
+#include <gtkmm/checkbutton.h>
+#include <gtkmm/listboxrow.h>
 #include <gtkmm/expander.h>
 #include <gtkmm/image.h>
 #include <gtkmm/flowboxchild.h>
@@ -328,7 +330,140 @@ void Shell::paint_preflight() {  // helper: gather + evaluate + repaint the card
     }
     m_pf_summary.set_text(std::to_string(green) + " of " + std::to_string(checks.size()) + " checks green" +
                           (red ? ", " + std::to_string(red) + " red" : std::string{}) +
-                          ". From the first clean on, a red check stops it.");
+                          ". A red check stops Sweep until it clears.");
+    m_pf_red = red > 0;
+    sweep_gate();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sweep (s006). The worker runs core::sweep::find (read-only); the list it
+// paints is the preview; checks are kept in m_sw_shown, the UI thread's copy.
+// ─────────────────────────────────────────────────────────────────────────────
+void Shell::stop_sweep() {  // helper: cancel + join (close, dtor)
+    if (m_sw_progress) m_sw_progress->cancel = true;
+    if (m_sw_worker.joinable()) m_sw_worker.join();
+    m_sw_tick.disconnect();
+}
+
+bool Shell::tick_sweep() {  // helper: the live counters while looking
+    if (!m_sw_progress) return false;
+    m_sw_run_big.set_text(scan::human_bytes(m_sw_progress->bytes.load()));
+    m_sw_run_caption.set_text(m_sw_progress->cancel.load()
+        ? "Stopping…"
+        : with_commas(m_sw_progress->files.load()) + " files in " + with_commas(m_sw_progress->dirs.load()) +
+          " folders looked at");
+    return true;
+}
+
+void Shell::paint_sweep() {  // helper: groups, rows with checks, the Trash line
+    namespace sw = core::sweep;
+    while (auto* c = m_sw_list.get_first_child()) m_sw_list.remove(*c);
+    const auto& items = m_sw_shown.items;
+
+    for (int gi = 0; gi < sw::kGroupCount; ++gi) {
+        const auto g = static_cast<sw::Group>(gi);
+        std::uint64_t gbytes = 0;
+        std::size_t n = 0;
+        for (const auto& c : items) if (c.group == g) { gbytes += c.bytes; ++n; }
+        if (!n) continue;
+
+        auto card = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 4);
+        card->add_css_class("card");
+        auto head = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        auto dot = Gtk::make_managed<Gtk::Box>();
+        dot->add_css_class("dot");
+        dot->add_css_class(g == sw::Group::Logs ? "kind-state" : "kind-regenerable");
+        dot->set_valign(Gtk::Align::CENTER);
+        head->append(*dot);
+        auto title = text(sw::group_name(g), "card-title");
+        title->set_hexpand(true);
+        head->append(*title);
+        head->append(*text(scan::human_bytes(gbytes) + " · " + with_commas(n) + (n == 1 ? " item" : " items"),
+                           "card-sub", 1.0f));
+        card->append(*head);
+        auto why = text(sw::group_why(g), "dim");
+        why->set_wrap(true);
+        why->set_margin_bottom(4);
+        card->append(*why);
+
+        for (std::size_t i = 0; i < items.size(); ++i) {
+            const auto& c = items[i];
+            if (c.group != g) continue;
+            auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 12);
+            row->add_css_class("sweep-row");
+            auto cb = Gtk::make_managed<Gtk::CheckButton>();
+            cb->set_active(c.checked);
+            cb->signal_toggled().connect([this, cb, i] {
+                if (i < m_sw_shown.items.size()) m_sw_shown.items[i].checked = cb->get_active();
+                sweep_gate();
+            });
+            auto sz = text(scan::human_bytes(c.bytes), "detail-size", 1.0f);
+            sz->set_width_chars(9);
+            auto path = text("~/" + c.rel, "detail-path");
+            path->set_hexpand(true);
+            path->set_ellipsize(Pango::EllipsizeMode::MIDDLE);
+            path->set_tooltip_text(m_home + "/" + c.rel + "  —  " + with_commas(c.files) +
+                                   (c.files == 1 ? " file" : " files") + (c.note.empty() ? "" : "\n" + c.note));
+            row->append(*cb);
+            row->append(*sz);
+            row->append(*path);
+            if (!c.note.empty()) row->append(*text(c.note, "dim", 1.0f));
+            card->append(*row);
+        }
+        m_sw_list.append(*card);
+    }
+    if (items.empty())
+        m_sw_list.append(*text("Nothing to sweep -- caches and logs are already clean.", "hero-caption", 0.5f));
+
+    // The Trash: measured, never offered (the one irreversible step).
+    auto trash = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 4);
+    trash->add_css_class("detail");
+    auto th = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+    auto dot = Gtk::make_managed<Gtk::Box>();
+    dot->add_css_class("dot");
+    dot->add_css_class("kind-trash");
+    dot->set_valign(Gtk::Align::CENTER);
+    th->append(*dot);
+    th->append(*text("Trash · " + scan::human_bytes(m_sw_shown.trash_bytes) + " in " +
+                     with_commas(m_sw_shown.trash_files) + " files", "card-title"));
+    trash->append(*th);
+    auto tw = text("Already thrown away. Emptying the Trash is the one step that can't be undone, "
+                   "so Rouster leaves it to you (Files -> Trash -> Empty).", "dim");
+    tw->set_wrap(true);
+    trash->append(*tw);
+    m_sw_list.append(*trash);
+
+    std::string foot;
+    if (m_sw_shown.cancelled) foot += "Stopped early -- the list is partial. ";
+    if (m_sw_shown.errors) foot += with_commas(m_sw_shown.errors) + " folders could not be read. ";
+    if (!foot.empty()) m_sw_list.append(*text(foot, "dim"));
+    sweep_gate();
+}
+
+void Shell::sweep_gate() {  // helper: the act button's label + whether it may act
+    std::uint64_t bytes = 0, all = 0;
+    std::size_t n = 0;
+    for (const auto& c : m_sw_shown.items) {
+        all += c.bytes;
+        if (c.checked) { bytes += c.bytes; ++n; }
+    }
+    m_sw_big.set_text(scan::human_bytes(bytes));
+    m_sw_caption.set_text("chosen, of " + scan::human_bytes(all) + " found · " + with_commas(n) + " of " +
+                          with_commas(m_sw_shown.items.size()) + " items checked");
+    m_sw_go.set_label(n ? "Move " + scan::human_bytes(bytes) + " to the Trash" : "Move to the Trash");
+    const bool busy = m_sw_worker.joinable();
+    if (m_pf_red)
+        m_sw_gate.set_text("Preflight has a red check. Sweep waits until it clears -- see Preflight.");
+    else if (!n)
+        m_sw_gate.set_text("Nothing checked.");
+    else
+        m_sw_gate.set_text("Everything goes to the Trash as one step; Undo brings it all back.");
+    if (m_act_sw_run) m_act_sw_run->set_enabled(n > 0 && !m_pf_red && !busy);
+}
+
+void Shell::go_to(const std::string& page) {  // helper: select a module's sidebar row
+    for (int i = 0; auto* row = m_nav.get_row_at_index(i); ++i)
+        if (std::string(row->get_name()) == "nav." + page) { m_nav.select_row(*row); return; }
 }
 
 std::string Shell::recents_file() const {  // helper: XDG path (UI-side resolution)

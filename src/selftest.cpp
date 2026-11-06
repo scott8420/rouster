@@ -7,6 +7,8 @@
 //   * Recents  -- move-to-front + trim + the JSON round-trip with stale-prune;
 //   * Scan     -- the read-only walker over a generated fixture home: kinds,
 //                 sizes, thread-invariance, nothing written, refusals.
+//   * Sweep    -- find is read-only; the plan is only what is checked; the
+//                 plan through the door and back leaves the tree exact.
 //
 //   cmake --build build --target rouster_selftest && ./build/rouster_selftest
 
@@ -17,8 +19,10 @@
 #include "core/Scan.hpp"
 #include "core/Preflight.hpp"
 #include "core/Door.hpp"
+#include "core/Sweep.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <cctype>
@@ -28,6 +32,7 @@
 #include <set>
 #include <utility>
 
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <filesystem>
@@ -824,6 +829,141 @@ int main(int argc, char** argv) {
             }
         }
         fs::remove_all(home, ec);
+    }
+
+
+    // -- Sweep: find (read-only) -> plan -> the door -> undo (s006) ----------
+    {
+        std::cout << "\n-- sweep --\n";
+        namespace sw = core::sweep;
+        namespace dr = core::door;
+        const fs::path home = fs::temp_directory_path() / "rouster_selftest_sweep";
+        const fs::path outside = fs::temp_directory_path() / "rouster_selftest_sweep_out";
+        std::error_code ec;
+        fs::remove_all(home, ec);
+        fs::remove_all(outside, ec);
+        make_fixture(home);
+        const std::string H = home.string();
+        const std::int64_t now = 2000000000;                       // pinned clock
+        const auto age = [&](const std::string& rel, int days) {   // set a file's mtime
+            struct timespec ts[2] = {{now - days * 86400, 0}, {now - days * 86400, 0}};
+            ::utimensat(AT_FDCWD, (home / rel).c_str(), ts, AT_SYMLINK_NOFOLLOW);
+        };
+        // Sweep's own extras on top of the shared fixture.
+        put(home, ".cache/huggingface/model.bin", 9000);           // slow to rebuild: unchecked
+        put(home, ".cache/fixes/keep.diff", 100);                  // any fixes/: never offered
+        put(home, ".local/state/app/old.log", 4000);    age(".local/state/app/old.log", 60);
+        put(home, ".local/state/app/new.log", 4000);    age(".local/state/app/new.log", 2);
+        put(home, ".local/share/app2/x.log.1", 4000);   age(".local/share/app2/x.log.1", 90);
+        put(home, ".local/share/app2/catalog", 4000);   age(".local/share/app2/catalog", 90);
+        put(home, ".local/share/keyrings/k.log", 100);  age(".local/share/keyrings/k.log", 90);
+        put(home, ".local/share/Trash/files/t.log", 100); age(".local/share/Trash/files/t.log", 90);
+        put(outside, "far/far.log", 100);
+        ::utimensat(AT_FDCWD, (outside / "far/far.log").c_str(),
+                    std::array<timespec, 2>{timespec{now - 99 * 86400, 0}, timespec{now - 99 * 86400, 0}}.data(), 0);
+        fs::create_directory_symlink(outside / "far", home / ".local/state/far", ec);   // never followed
+
+        check("sweep: is_log_name",
+              sw::is_log_name("a.log") && sw::is_log_name("Xorg.0.log.old") && sw::is_log_name("a.log.1") &&
+              sw::is_log_name("a.log.gz") && !sw::is_log_name(".log") && !sw::is_log_name("catalog") &&
+              !sw::is_log_name("a.logx") && !sw::is_log_name("a.log."));
+
+        const std::string before = tree_snapshot(home);
+        core::scan::Progress prog;
+        const sw::Found f = sw::find(H, prog, now);
+        check("sweep: find changes nothing", tree_snapshot(home) == before);
+        check("sweep: find finishes, not cancelled, not refused", prog.done && !f.cancelled && f.refused.empty());
+
+        const auto get = [&](const std::string& rel) -> const sw::Candidate* {
+            for (const auto& c : f.items) if (c.rel == rel) return &c;
+            return nullptr;
+        };
+        std::string listed;
+        for (const auto& c : f.items) listed += c.rel + (c.checked ? "+ " : "- ");
+        const auto* moz = get(".cache/mozilla");
+        const auto* th  = get(".cache/thumbnails");
+        const auto* hf  = get(".cache/huggingface");
+        const auto* fl  = get(".var/app/org.example.Y/cache");
+        const auto* ol  = get(".local/state/app/old.log");
+        const auto* rl  = get(".local/share/app2/x.log.1");
+        check("sweep: a cache is offered, pre-checked", moz && moz->checked && moz->group == sw::Group::Caches, listed);
+        check("sweep: thumbnails are their own group, pre-checked", th && th->checked && th->group == sw::Group::Thumbnails);
+        check("sweep: a slow-to-rebuild cache is offered UNchecked, with why", hf && !hf->checked && !hf->note.empty());
+        check("sweep: a Flatpak app cache is offered, pre-checked", fl && fl->checked && fl->group == sw::Group::AppCaches);
+        check("sweep: old logs are offered UNchecked (state + share, rotated name)",
+              ol && rl && !ol->checked && !rl->checked && ol->group == sw::Group::Logs);
+        check("sweep: never offered -- ~/.cache itself, a fixes/ in it, a build dir",
+              !get(".cache") && !get(".cache/fixes") && !get("Develop/proj/rouster/build"));
+        check("sweep: never offered -- a fresh log, a non-log, a log in keyrings or the Trash, a symlinked log dir",
+              !get(".local/state/app/new.log") && !get(".local/share/app2/catalog") &&
+              !get(".local/share/keyrings/k.log") && !get(".local/share/Trash/files/t.log") &&
+              !get(".local/state/far/far.log"));
+        bool ordered = true;
+        for (std::size_t i = 1; i < f.items.size(); ++i) {
+            const auto &a = f.items[i - 1], &b = f.items[i];
+            if (a.group > b.group || (a.group == b.group && a.bytes < b.bytes)) ordered = false;
+        }
+        check("sweep: grouped in order, biggest first within a group", ordered);
+        check("sweep: the Trash is measured (2 files), never offered", f.trash_files == 2 && f.trash_bytes > 0,
+              std::to_string(f.trash_files) + " files");
+
+        // Plan: only what is checked; unpreviewed until the UI says otherwise.
+        sw::Found g = f;
+        for (auto& c : g.items) if (c.rel == ".local/state/app/old.log") c.checked = true;   // the user ticks one log
+        dr::Plan p = sw::plan(H, g.items);
+        std::size_t want = 0;
+        for (const auto& c : g.items) want += c.checked;
+        bool shape = p.actions.size() == want && !p.previewed && p.label.rfind("Sweep: ", 0) == 0;
+        for (const auto& a : p.actions)
+            shape &= a.verb == dr::Verb::Trash && a.from.rfind(H + "/", 0) == 0 && a.to.empty() &&
+                     a.from != H + "/.cache/huggingface" && a.from != H + "/.local/share/app2/x.log.1";
+        check("sweep: the plan is exactly the checked items, as Trash, unpreviewed", shape, p.label);
+
+        // Through the door and back.
+        const std::string files_before = files_snapshot(home);
+        dr::Door door(H, H + "/.local/share/rouster");
+        door.load();
+        const auto r0 = door.run(p);
+        check("sweep: the door refuses the plan until it is previewed", !r0.ok && r0.done == 0 &&
+              files_snapshot(home) == files_before);
+        p.previewed = true;
+        const auto r = door.run(p);
+        bool gone = true, intrash = true;
+        for (const auto& a : p.actions) {
+            struct stat st{};
+            gone &= ::lstat(a.from.c_str(), &st) != 0;
+        }
+        intrash = fs::exists(home / ".local/share/Trash/files/mozilla") &&
+                  fs::exists(home / ".local/share/Trash/files/thumbnails") &&
+                  fs::exists(home / ".local/share/Trash/files/old.log") &&
+                  fs::exists(home / ".local/share/Trash/info/mozilla.trashinfo");
+        check("sweep: run -- every checked item is in the Trash, one batch", r.ok && r.done == want && gone && intrash,
+              std::to_string(r.done) + " done" + (r.messages.empty() ? "" : ", " + r.messages.front()));
+        check("sweep: run -- the unchecked stayed", fs::exists(home / ".cache/huggingface/model.bin") &&
+              fs::exists(home / ".local/share/app2/x.log.1") && fs::exists(home / ".cache/fixes/keep.diff") &&
+              fs::is_directory(home / ".cache"));
+        check("sweep: undo label names the sweep", door.can_undo() && door.undo_label() == p.label, door.undo_label());
+        const auto u = door.undo();
+        check("sweep: undo puts every file back exactly", u.ok && files_snapshot(home) == files_before,
+              std::to_string(u.done) + " back");
+
+        // A second find after undo sees the same thing again.
+        core::scan::Progress prog2;
+        const sw::Found f2 = sw::find(H, prog2, now);
+        check("sweep: after undo, find offers the same items", f2.items.size() == f.items.size());
+
+        // Cancel.
+        core::scan::Progress prog3;
+        prog3.cancel = true;
+        const sw::Found f3 = sw::find(H, prog3, now);
+        check("sweep: a cancelled find says so", f3.cancelled && prog3.done);
+
+        // A home that isn't there.
+        core::scan::Progress prog4;
+        check("sweep: refuses a missing home", !sw::find(H + "/nope", prog4, now).refused.empty() && prog4.done);
+
+        fs::remove_all(home, ec);
+        fs::remove_all(outside, ec);
     }
 
     // -- The source gate: no write call outside the door (s004) --------------

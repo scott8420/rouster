@@ -15,6 +15,12 @@ void Shell::bind_actions() {  // bindings: actions + recents group
     m_act_cancel = add_action("scan-cancel", sigc::mem_fun(*this, &Shell::on_scan_cancel));
     m_act_pick   = add_action("pick-folder", sigc::mem_fun(*this, &Shell::on_pick_folder));
     m_act_undo_action = add_action("undo", sigc::mem_fun(*this, &Shell::on_undo));
+    m_act_sw_find   = add_action("sweep-find",   sigc::mem_fun(*this, &Shell::on_sweep_find));
+    m_act_sw_cancel = add_action("sweep-cancel", sigc::mem_fun(*this, &Shell::on_sweep_cancel));
+    m_act_sw_run    = add_action("sweep-run",    sigc::mem_fun(*this, &Shell::on_sweep_run));
+    m_act_sw_cancel->set_enabled(false);
+    m_act_sw_run->set_enabled(false);
+    add_action("go-sweep",      [this]() { go_to("sweep"); });
     add_action("preflight",     sigc::mem_fun(*this, &Shell::on_preflight));
     add_action("dump-registry", sigc::mem_fun(*this, &Shell::on_dump_registry));
     add_action("about",         sigc::mem_fun(*this, &Shell::on_about));
