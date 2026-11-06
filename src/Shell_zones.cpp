@@ -88,6 +88,7 @@ void Shell::build_sidebar() {  // zone: brand + sections + module rows
     section("CLEANUP");
     item("scan", "rouster-scan-symbolic", "Smart Scan");
     item("sweep", "rouster-sweep-symbolic", "Sweep");
+    item("dev", "rouster-dev-symbolic", "Dev projects");
     section("SAFETY");
     item("preflight", "rouster-preflight-symbolic", "Preflight");
     item("activity", "rouster-activity-symbolic", "Activity");
@@ -104,6 +105,7 @@ void Shell::build_sidebar() {  // zone: brand + sections + module rows
 void Shell::build_pages() {  // zone: the module pages
     build_scan_page();
     build_sweep_page();
+    build_dev_page();
     build_preflight_page();
     build_activity_page();
 }
@@ -361,6 +363,144 @@ void Shell::build_sweep_page() {  // zone: Sweep
 
     m_sw_page.append(m_sw_states);
     m_stack.add(m_sw_page, "sweep", "Sweep");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Dev projects (s007) -- the Sweep shape, one card per project:
+//   start   : hero, one line, the orb ("Look").
+//   running : spinner, projects checked, build output found; Stop.
+//   results : the checked build output; a card per workspace / repo with its
+//             verdict (Backed up / Not clean / No remote), the failing checks,
+//             template drift, and its build folders with a check each. The
+//             cards ARE the preview; the act bar moves only build output.
+//   done    : what went to the Trash, Undo, Activity, Look again.
+// ─────────────────────────────────────────────────────────────────────────────
+void Shell::build_dev_page() {  // zone: Dev projects
+    m_dv_states.set_transition_type(Gtk::StackTransitionType::CROSSFADE);
+    m_dv_states.set_transition_duration(220);
+    m_dv_states.set_vexpand(true);
+
+    // start
+    auto start = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 14);
+    start->set_valign(Gtk::Align::CENTER);
+    start->set_halign(Gtk::Align::CENTER);
+    start->set_margin(40);
+    start->append(*hero("rouster-hero-dev", 128));
+    start->append(*label("Dev projects", "hero-title"));
+    m_dv_sub.add_css_class("hero-sub");
+    m_dv_sub.set_wrap(true);
+    m_dv_sub.set_justify(Gtk::Justification::CENTER);
+    m_dv_sub.set_max_width_chars(56);
+    m_dv_sub.set_text("Your workspaces and repos under ~/Develop: is each one safely on its remote, "
+                      "does it match the template, and how much build output is lying around. "
+                      "Build folders go to the Trash; Undo brings them back.");
+    start->append(m_dv_sub);
+    m_dv_find.set_label("Look");
+    m_dv_find.add_css_class("orb");
+    m_dv_find.set_halign(Gtk::Align::CENTER);
+    m_dv_find.set_margin_top(18);
+    m_dv_find.set_action_name("win.dev-find");
+    start->append(m_dv_find);
+    m_dv_states.add(*start, "start");
+
+    // running
+    auto run = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 12);
+    run->set_valign(Gtk::Align::CENTER);
+    run->set_halign(Gtk::Align::CENTER);
+    m_dv_spinner.add_css_class("big");
+    m_dv_spinner.set_halign(Gtk::Align::CENTER);
+    run->append(m_dv_spinner);
+    m_dv_run_big.add_css_class("hero-big");
+    run->append(m_dv_run_big);
+    m_dv_run_caption.add_css_class("hero-caption");
+    run->append(m_dv_run_caption);
+    m_dv_cancel.set_label("Stop");
+    m_dv_cancel.add_css_class("ghost");
+    m_dv_cancel.set_halign(Gtk::Align::CENTER);
+    m_dv_cancel.set_margin_top(12);
+    m_dv_cancel.set_action_name("win.dev-cancel");
+    run->append(m_dv_cancel);
+    m_dv_states.add(*run, "running");
+
+    // results
+    auto res_page = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 0);
+    auto scroll = Gtk::make_managed<Gtk::ScrolledWindow>();
+    scroll->set_policy(Gtk::PolicyType::NEVER, Gtk::PolicyType::AUTOMATIC);
+    scroll->set_vexpand(true);
+    auto res = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 14);
+    res->set_margin_start(32);
+    res->set_margin_end(32);
+    res->set_margin_top(12);
+    res->set_margin_bottom(16);
+    auto head = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 20);
+    head->append(*hero("rouster-hero-dev", 88));
+    auto words = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 2);
+    words->set_valign(Gtk::Align::CENTER);
+    words->set_hexpand(true);
+    m_dv_big.add_css_class("hero-big");
+    m_dv_big.set_xalign(0.0f);
+    m_dv_caption.add_css_class("hero-caption");
+    m_dv_caption.set_xalign(0.0f);
+    m_dv_caption.set_wrap(true);
+    words->append(m_dv_big);
+    words->append(m_dv_caption);
+    head->append(*words);
+    auto again = Gtk::make_managed<Gtk::Button>("Look again");
+    again->add_css_class("ghost");
+    again->set_valign(Gtk::Align::CENTER);
+    again->set_action_name("win.dev-find");
+    head->append(*again);
+    res->append(*head);
+    res->append(m_dv_list);
+    scroll->set_child(*res);
+    res_page->append(*scroll);
+
+    auto bar = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 16);
+    bar->add_css_class("act-bar");
+    m_dv_gate.add_css_class("dim");
+    m_dv_gate.set_xalign(0.0f);
+    m_dv_gate.set_hexpand(true);
+    m_dv_gate.set_wrap(true);
+    bar->append(m_dv_gate);
+    m_dv_go.add_css_class("act");
+    m_dv_go.set_action_name("win.dev-run");
+    bar->append(m_dv_go);
+    res_page->append(*bar);
+    m_dv_states.add(*res_page, "results");
+
+    // done
+    auto done = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 12);
+    done->set_valign(Gtk::Align::CENTER);
+    done->set_halign(Gtk::Align::CENTER);
+    done->set_margin(40);
+    done->append(*hero("rouster-hero-done", 112));
+    m_dv_done_big.add_css_class("hero-big");
+    done->append(m_dv_done_big);
+    m_dv_done_caption.add_css_class("hero-sub");
+    m_dv_done_caption.set_wrap(true);
+    m_dv_done_caption.set_justify(Gtk::Justification::CENTER);
+    m_dv_done_caption.set_max_width_chars(58);
+    done->append(m_dv_done_caption);
+    auto btns = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 12);
+    btns->set_halign(Gtk::Align::CENTER);
+    btns->set_margin_top(12);
+    auto undo = Gtk::make_managed<Gtk::Button>("Undo");
+    undo->add_css_class("ghost");
+    undo->set_action_name("win.undo");
+    auto act = Gtk::make_managed<Gtk::Button>("Activity");
+    act->add_css_class("ghost");
+    act->signal_clicked().connect([this] { go_to("activity"); });
+    auto more = Gtk::make_managed<Gtk::Button>("Look again");
+    more->add_css_class("ghost");
+    more->set_action_name("win.dev-find");
+    btns->append(*undo);
+    btns->append(*act);
+    btns->append(*more);
+    done->append(*btns);
+    m_dv_states.add(*done, "done");
+
+    m_dv_page.append(m_dv_states);
+    m_stack.add(m_dv_page, "dev", "Dev projects");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

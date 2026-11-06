@@ -7,6 +7,8 @@
 //   * Recents  -- move-to-front + trim + the JSON round-trip with stale-prune;
 //   * Scan     -- the read-only walker over a generated fixture home: kinds,
 //                 sizes, thread-invariance, nothing written, refusals.
+//   * Dev      -- find/verify/lint are read-only (even .git is untouched); every
+//                 repo state told apart; the light clean through the door and back.
 //   * Sweep    -- find is read-only; the plan is only what is checked; the
 //                 plan through the door and back leaves the tree exact.
 //
@@ -20,9 +22,11 @@
 #include "core/Preflight.hpp"
 #include "core/Door.hpp"
 #include "core/Sweep.hpp"
+#include "core/Dev.hpp"
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cctype>
@@ -170,12 +174,114 @@ std::string tree_snapshot(const fs::path& root) {
     for (auto& r : rows) out += r + "\n";
     return out;
 }
+
+// ── The dev fixture (s007) ──────────────────────────────────────────────────
+// Real git repos under <home>/Develop, their "GitHub" a folder of bare repos
+// OUTSIDE home (remotes). Every repo state Dev projects must tell apart:
+//   rouster_ws/  Scott's workspace, all pushed            -> Backed, 2 build dirs
+//   baker/       a drifted workspace, dirty every way     -> NotClean, lint drift
+//   slate/       a plain repo with no remote              -> NoRemote, build/ left alone
+//   tools/scratch/  remote path that doesn't exist        -> Unreachable
+//   behind/      the remote moved on, fetched here        -> Backed (nothing local is missing)
+//   stale/       the remote moved on, NOT fetched         -> NotClean ("fetch, then look again")
+//   misc/notes/  just a folder                            -> not a project
+// Git runs isolated from the machine's config (GIT_CONFIG_GLOBAL=/dev/null).
+void git_isolate() {
+    ::setenv("GIT_CONFIG_GLOBAL", "/dev/null", 1);
+    ::setenv("GIT_CONFIG_NOSYSTEM", "1", 1);
+    ::setenv("GIT_AUTHOR_NAME", "Fixture", 1);
+    ::setenv("GIT_AUTHOR_EMAIL", "fixture@example.invalid", 1);
+    ::setenv("GIT_COMMITTER_NAME", "Fixture", 1);
+    ::setenv("GIT_COMMITTER_EMAIL", "fixture@example.invalid", 1);
+}
+bool sh(const std::string& dir, const std::string& cmd) {
+    const std::string full = "cd '" + dir + "' && { " + cmd + " ; } >/dev/null 2>&1";
+    return std::system(full.c_str()) == 0;
+}
+bool make_dev_fixture(const fs::path& home, const fs::path& remotes) {
+    git_isolate();
+    std::error_code ec;
+    fs::create_directories(remotes, ec);
+    const std::string R = remotes.string();
+    const std::string init = "git -c init.defaultBranch=main init -q";
+    bool ok = true;
+    const auto bare = [&](const std::string& name) { return sh(R, init + " --bare " + name + ".git"); };
+
+    // rouster_ws: the template, clean and pushed, with a tag.
+    const fs::path ws = home / "Develop/rouster_ws";
+    ok &= put(ws, "docs/RULES.md", 100);
+    ok &= put(ws, "scripts/rouster_backup.sh", 100);
+    fs::create_directories(ws / "backups/Old", ec);
+    ok &= put(ws, "fixes/patch.diff", 200);
+    ok &= put(ws, "rouster/CMakeLists.txt", 0);
+    { std::ofstream(ws / "rouster/CMakeLists.txt") << "project(rouster)\nset(APP_ID io.github.scott8420.Rouster)\n"; }
+    { std::ofstream(ws / "rouster/.gitignore") << "build/\n"; }
+    ok &= put(ws, "rouster/build.sh", 50);
+    ok &= put(ws, "rouster/include/a.hpp", 50);
+    ok &= put(ws, "rouster/src/main.cpp", 300);
+    ok &= put(ws, "rouster/resources/r.css", 50);
+    ok &= put(ws, "rouster/data/io.github.scott8420.Rouster.desktop.in", 50);
+    ok &= put(ws, "rouster/libs/foo/CMakeLists.txt", 20);
+    ok &= put(ws, "rouster/build/obj/main.o", 90000);
+    ok &= put(ws, "rouster/libs/foo/build/foo.o", 30000);
+    ok &= bare("rouster");
+    ok &= sh((ws / "rouster").string(), init + " && git add -A && git commit -qm one && git tag -a v1 -m v1 && "
+             "git remote add origin '" + R + "/rouster.git' && git push -q -u origin main && git push -q origin v1");
+
+    // baker: drift, and not clean in every way the checks know.
+    const fs::path bk = home / "Develop/baker";
+    ok &= put(bk, "docs/RULES.md", 100);
+    ok &= put(bk, "scripts/backup.sh", 100);
+    { fs::create_directories(bk / "baker", ec); std::ofstream(bk / "baker/CMakeLists.txt") << "set(ID io.github.example.Baker)\n"; }
+    ok &= put(bk, "baker/build.sh", 50);
+    ok &= put(bk, "baker/src/main.cpp", 300);                       // no include/: required, missing
+    ok &= put(bk, "baker/resources/io.github.example.Baker.desktop.in", 50);
+    ok &= put(bk, "baker/notes/todo.txt", 50);                      // unknown folder
+    ok &= put(bk, "baker/build/README", 10);                        // a TRACKED build/: not build output
+    ok &= put(bk, "stray.txt", 10);                                 // unknown at the workspace top
+    ok &= bare("baker");
+    ok &= sh((bk / "baker").string(), init + " && git add -A && git commit -qm one && "
+             "git remote add origin '" + R + "/baker.git' && git push -q -u origin main && "
+             "echo two >> src/main.cpp && git commit -qam two && "              // unpushed commit
+             "git branch side && "                                             // local-only branch
+             "git tag v0 && "                                                  // unpushed tag
+             "echo stash >> build.sh && git stash -q && "                      // a stash
+             "echo dirty >> build.sh");                                        // uncommitted
+
+    // slate: no remote at all.
+    const fs::path sl = home / "Develop/slate";
+    ok &= put(sl, "main.cpp", 100);
+    { fs::create_directories(sl, ec); std::ofstream(sl / ".gitignore") << "build/\n"; }
+    ok &= put(sl, "build/slate.o", 40000);
+    ok &= sh(sl.string(), init + " && git add -A && git commit -qm one");
+
+    // tools/scratch: the remote isn't there.
+    const fs::path sc = home / "Develop/tools/scratch";
+    ok &= put(sc, "x.txt", 10);
+    ok &= sh(sc.string(), init + " && git add -A && git commit -qm one && git remote add origin '" + R + "/gone.git'");
+
+    // behind / stale: someone else pushed; one fetched, one didn't.
+    ok &= bare("shared");
+    const fs::path other = remotes / "other_clone";
+    ok &= sh(R, "git clone -q shared.git other_clone");
+    ok &= put(other, "a.txt", 10);
+    ok &= sh(other.string(), "git add -A && git commit -qm a && git push -q origin HEAD:main");
+    for (const char* n : {"behind", "stale"})
+        ok &= sh((home / "Develop").string(), std::string("git clone -q '") + R + "/shared.git' " + n);
+    ok &= put(other, "b.txt", 10);
+    ok &= sh(other.string(), "git add -A && git commit -qm b && git push -q origin HEAD:main");
+    ok &= sh((home / "Develop/behind").string(), "git fetch -q");
+
+    ok &= put(home, "Develop/misc/notes/n.txt", 10);
+    return ok;
+}
 }  // namespace
 
 int main(int argc, char** argv) {
     // `--make-fixture DIR`: build the fixture home for an Xvfb drive, then stop.
     if (argc == 3 && std::string(argv[1]) == "--make-fixture") {
-        const bool ok = make_fixture(argv[2]);
+        const bool ok = make_fixture(argv[2]) &&
+                        make_dev_fixture(argv[2], std::string(argv[2]) + "_remotes");   // s007
         std::cout << (ok ? "fixture: " : "fixture FAILED (exists and not empty?): ") << argv[2] << "\n";
         return ok ? 0 : 1;
     }
@@ -964,6 +1070,199 @@ int main(int argc, char** argv) {
 
         fs::remove_all(home, ec);
         fs::remove_all(outside, ec);
+    }
+
+    // -- Dev projects: find / verify / lint (read-only) -> plan -> door (s007) --
+    {
+        std::cout << "\n-- dev projects --\n";
+        namespace dv = core::dev;
+        namespace dr = core::door;
+        const fs::path home = fs::temp_directory_path() / "rouster_selftest_dev";
+        const fs::path remotes = fs::temp_directory_path() / "rouster_selftest_dev_remotes";
+        std::error_code ec;
+        fs::remove_all(home, ec);
+        fs::remove_all(remotes, ec);
+        fs::create_directories(home, ec);
+        const bool made = make_dev_fixture(home, remotes);
+        check("dev: the fixture's repos were made (git ran)", made);
+        const std::string H = home.string();
+
+        {
+            const auto v = dv::git(H, {"--version"}, 10);
+            check("dev: git runs as a child, output captured", v.code == 0 && v.out.rfind("git version", 0) == 0, v.out);
+            std::atomic<bool> stop{true};
+            const auto c = dv::git(H, {"--version"}, 10, &stop);
+            check("dev: a cancelled git call is killed, code -1", c.code == -1 && !c.timed_out);
+        }
+        check("dev: url_host",
+              dv::url_host("git@github.com:scott8420/rouster.git") == "github.com" &&
+              dv::url_host("https://github.com/scott8420/rouster") == "github.com" &&
+              dv::url_host("ssh://git@gitlab.com:22/a/b.git") == "gitlab.com" &&
+              dv::url_host("https://user@codeberg.org/a/b") == "codeberg.org" &&
+              dv::url_host("/srv/git/x.git") == "this computer" && dv::url_host("file:///x") == "this computer",
+              dv::url_host("ssh://git@gitlab.com:22/a/b.git"));
+        {
+            std::string app;
+            const bool ws = dv::is_workspace(H + "/Develop/rouster_ws", app);
+            std::string app2;
+            const bool bk = dv::is_workspace(H + "/Develop/baker", app2);
+            std::string app3;
+            check("dev: the workspace signature (docs/RULES.md + scripts/*backup.sh + <app>/CMakeLists.txt)",
+                  ws && app == "rouster" && bk && app2 == "baker" && !dv::is_workspace(H + "/Develop/slate", app3));
+        }
+
+        const std::string before = tree_snapshot(home) + tree_snapshot(remotes);
+        core::scan::Progress prog;
+        const dv::Found f = dv::find(H, prog);
+        check("dev: find changes nothing -- not a file, not even .git/index", tree_snapshot(home) + tree_snapshot(remotes) == before);
+        check("dev: find finishes, not cancelled, not refused", prog.done && !f.cancelled && f.refused.empty());
+        check("dev: the dev roots that exist are listed", f.roots == std::vector<std::string>{"Develop"});
+
+        const auto get = [&](const std::string& rel) -> const dv::Project* {
+            for (const auto& p : f.projects) if (p.rel == rel) return &p;
+            return nullptr;
+        };
+        std::string listed;
+        for (const auto& p : f.projects) listed += p.rel + "=" + dv::status_name(p.repo.status) + " ";
+        const auto* rw = get("Develop/rouster_ws");
+        const auto* bk = get("Develop/baker");
+        const auto* sl = get("Develop/slate");
+        const auto* sc = get("Develop/tools/scratch");
+        const auto* be = get("Develop/behind");
+        const auto* st = get("Develop/stale");
+        check("dev: six projects found, a plain folder is not one", f.projects.size() == 6 && rw && bk && sl && sc && be && st &&
+              !get("Develop/misc/notes") && !get("Develop/misc"), listed);
+        check("dev: kinds -- two workspaces, four repos", rw && bk && sl && rw->kind == dv::Kind::Workspace &&
+              bk->kind == dv::Kind::Workspace && sl->kind == dv::Kind::Repo && rw->name == "rouster");
+
+        const auto chk = [](const dv::Project* p, const std::string& n) -> const dv::Check* {
+            if (!p) return nullptr;
+            for (const auto& c : p->repo.checks) if (c.name == n) return &c;
+            return nullptr;
+        };
+        if (rw) {
+            bool all = rw->repo.checks.size() == 6;
+            for (const auto& c : rw->repo.checks) all &= c.ok;
+            check("dev: a clean, pushed workspace is Backed -- six checks, all green",
+                  rw->repo.status == dv::Status::Backed && all && rw->repo.remote == "origin" &&
+                  rw->repo.host == "this computer" && rw->repo.head.size() == 40 && rw->repo.branch == "main",
+                  std::string(dv::status_name(rw->repo.status)) + (rw->repo.checks.empty() ? "" : " " + rw->repo.checks.front().detail));
+            check("dev: ignored-but-present is listed (build/), not judged",
+                  std::find(rw->repo.ignored.begin(), rw->repo.ignored.end(), "build/") != rw->repo.ignored.end());
+        }
+        if (bk) {
+            const auto *c = chk(bk, "committed"), *p = chk(bk, "pushed"), *b = chk(bk, "branches"),
+                       *s = chk(bk, "stashes"), *t = chk(bk, "tags"), *l = chk(bk, "live");
+            check("dev: dirty every way -> NotClean, and each check says which",
+                  bk->repo.status == dv::Status::NotClean && c && !c->ok && p && !p->ok && b && !b->ok && s && !s->ok &&
+                  t && !t->ok && l && l->ok,
+                  p ? p->detail + " | " + (b ? b->detail : "") : "");
+            check("dev: ...the details name the culprits",
+                  c && c->detail.find("build.sh") != std::string::npos && p && p->detail.find("main (1 ahead)") != std::string::npos &&
+                  b && b->detail.find("side") != std::string::npos && t && t->detail.find("v0") != std::string::npos);
+        }
+        check("dev: no remote -> NoRemote (not backed up)", sl && sl->repo.status == dv::Status::NoRemote);
+        check("dev: a remote that won't answer -> Unreachable, with why",
+              sc && sc->repo.status == dv::Status::Unreachable && !sc->repo.error.empty(), sc ? sc->repo.error : "");
+        check("dev: the remote moved on and it was fetched -> Backed (nothing here is missing)",
+              be && be->repo.status == dv::Status::Backed, be ? std::string(dv::status_name(be->repo.status)) : "");
+        {
+            const auto* p = chk(st, "pushed");
+            check("dev: the remote moved on, NOT fetched -> NotClean, 'fetch, then look again'",
+                  st && st->repo.status == dv::Status::NotClean && p && !p->ok && p->detail.find("fetch") != std::string::npos,
+                  p ? p->detail : "");
+        }
+
+        // Lint.
+        const auto has = [](const dv::Project* p, dv::Tier t, const std::string& s) {
+            if (!p) return false;
+            for (const auto& d : p->drift) if (d.tier == t && d.what.find(s) != std::string::npos) return true;
+            return false;
+        };
+        if (rw) {
+            bool only_note = true;
+            for (const auto& d : rw->drift) only_note &= d.tier == dv::Tier::Note;
+            check("dev: lint -- the template workspace has no drift, fixes/ reported as a note",
+                  only_note && has(rw, dv::Tier::Note, "fixes/ holds 1 file") && rw->fixes_files == 1,
+                  rw->drift.empty() ? "" : rw->drift.front().what);
+        }
+        check("dev: lint -- Baker's drift: missing include/, backup.sh, .desktop.in in resources/, example id",
+              has(bk, dv::Tier::Required, "baker/include/") && has(bk, dv::Tier::Naming, "scripts/backup.sh") &&
+              has(bk, dv::Tier::Naming, "resources/io.github.example.Baker.desktop.in") &&
+              has(bk, dv::Tier::Naming, "app id io.github.example.Baker"));
+        check("dev: lint -- unknowns: baker/notes/ in the app, stray.txt at the top",
+              has(bk, dv::Tier::Unknown, "baker/notes/") && has(bk, dv::Tier::Unknown, "stray.txt") &&
+              !has(bk, dv::Tier::Unknown, "build"));
+
+        // Build output.
+        const auto build = [](const dv::Project* p, const std::string& rel) -> const dv::BuildDir* {
+            if (!p) return nullptr;
+            for (const auto& b : p->builds) if (b.rel == rel) return &b;
+            return nullptr;
+        };
+        const auto* b1 = build(rw, "Develop/rouster_ws/rouster/build");
+        const auto* b2 = build(rw, "Develop/rouster_ws/rouster/libs/foo/build");
+        const auto* b3 = build(sl, "Develop/slate/build");
+        check("dev: build output -- <app>/build and libs/*/build, offered, pre-checked, measured",
+              b1 && b2 && b1->offered && b1->checked && b2->offered && b2->checked && b1->bytes >= 90000 && b2->bytes >= 30000 &&
+              b1->bytes == du(home / "Develop/rouster_ws/rouster/build").bytes,
+              b1 ? std::to_string(b1->bytes) + " vs du " + std::to_string(du(home / "Develop/rouster_ws/rouster/build").bytes) : "");
+        check("dev: no remote -> its build/ is shown, never offered", b3 && !b3->offered && !b3->checked && !b3->note.empty());
+        check("dev: a build/ git tracks is not build output", bk && bk->builds.empty());
+
+        // Plan, door, undo.
+        dr::Plan p = dv::plan(H, f.projects);
+        bool shape = p.actions.size() == 2 && !p.previewed && p.label == "Dev projects: build output of 1 project";
+        for (const auto& a : p.actions) shape &= a.verb == dr::Verb::Trash && a.from.rfind(H + "/Develop/rouster_ws/rouster/", 0) == 0;
+        check("dev: the plan is the offered + checked build dirs, as Trash, unpreviewed", shape, p.label);
+        {
+            dv::Found g = f;
+            for (auto& pr : g.projects) for (auto& b : pr.builds) b.checked = true;   // even ticked, slate's stays out
+            check("dev: an un-offered dir never reaches the plan, even checked", dv::plan(H, g.projects).actions.size() == 2);
+        }
+        fs::create_directories(home / ".local/share/Trash/files", ec);   // a real home has one
+        fs::create_directories(home / ".local/share/Trash/info", ec);
+        const std::string files_before = files_snapshot(home);
+        dr::Door door(H, H + "/.local/share/rouster");
+        door.load();
+        check("dev: the door refuses it unpreviewed", !door.run(p).ok && files_snapshot(home) == files_before);
+        p.previewed = true;
+        const auto r = door.run(p);
+        check("dev: light clean -- both build dirs in the Trash, the sources stay",
+              r.ok && r.done == 2 && !fs::exists(home / "Develop/rouster_ws/rouster/build") &&
+              !fs::exists(home / "Develop/rouster_ws/rouster/libs/foo/build") &&
+              fs::exists(home / ".local/share/Trash/files/build") && fs::exists(home / "Develop/rouster_ws/rouster/src/main.cpp") &&
+              fs::exists(home / "Develop/rouster_ws/fixes/patch.diff"),
+              r.messages.empty() ? "" : r.messages.front());
+        {
+            core::scan::Progress pg;
+            const dv::Found after = dv::find(H, pg);
+            const dv::Project* a = nullptr;
+            for (const auto& x : after.projects) if (x.rel == "Develop/rouster_ws") a = &x;
+            check("dev: ...and the repo is still Backed after the clean", a && a->repo.status == dv::Status::Backed && a->builds.empty());
+        }
+        const auto u = door.undo();
+        {
+            const std::string now_s = files_snapshot(home);
+            std::string diff;
+            std::istringstream a(files_before), b(now_s);
+            std::set<std::string> sa, sb;
+            for (std::string l; std::getline(a, l);) sa.insert(l);
+            for (std::string l; std::getline(b, l);) sb.insert(l);
+            for (const auto& l : sa) if (!sb.count(l)) { diff = "-" + l; break; }
+            if (diff.empty()) for (const auto& l : sb) if (!sa.count(l)) { diff = "+" + l; break; }
+            check("dev: undo puts the build output back exactly", u.ok && now_s == files_before,
+                  std::to_string(u.done) + " back " + diff);
+        }
+
+        core::scan::Progress pc;
+        pc.cancel = true;
+        check("dev: a cancelled find says so", dv::find(H, pc).cancelled && pc.done);
+        core::scan::Progress pm;
+        check("dev: refuses a missing home", !dv::find(H + "/nope", pm).refused.empty() && pm.done);
+
+        fs::remove_all(home, ec);
+        fs::remove_all(remotes, ec);
     }
 
     // -- The source gate: no write call outside the door (s004) --------------

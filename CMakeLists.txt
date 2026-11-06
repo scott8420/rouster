@@ -25,6 +25,8 @@ add_library(rouster_core STATIC
     src/core/Door.cpp
     # Sweep (s006): finds and plans, read-only; the door acts.
     src/core/Sweep.cpp
+    # Dev projects (s007): find, verify (git, read-only), lint, plan; the door acts.
+    src/core/Dev.cpp
     # The SHORTCUT-REGISTRY paradigm: one list, two consumers (App wires accels
     # from it, ShortcutsDialog renders from it) so a key and its advertised row
     # can't drift. GTK-free, so it lives in core and the selftest guards it

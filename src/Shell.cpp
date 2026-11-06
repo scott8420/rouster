@@ -43,6 +43,21 @@ Shell::Shell()
       m_sw_gate("shell.sweep.gate"),
       m_sw_done_big("shell.sweep.done_big"),
       m_sw_done_caption("shell.sweep.done_caption"),
+      m_dv_page("shell.dev.page", Gtk::Orientation::VERTICAL),
+      m_dv_states("shell.dev.states"),
+      m_dv_sub("shell.dev.sub"),
+      m_dv_find("shell.dev.find"),
+      m_dv_spinner("shell.dev.spinner"),
+      m_dv_run_big("shell.dev.run_big"),
+      m_dv_run_caption("shell.dev.run_caption"),
+      m_dv_cancel("shell.dev.cancel"),
+      m_dv_big("shell.dev.big"),
+      m_dv_caption("shell.dev.caption"),
+      m_dv_list("shell.dev.list", Gtk::Orientation::VERTICAL, 12),
+      m_dv_go("shell.dev.go"),
+      m_dv_gate("shell.dev.gate"),
+      m_dv_done_big("shell.dev.done_big"),
+      m_dv_done_caption("shell.dev.done_caption"),
       m_pf_page("shell.preflight.page", Gtk::Orientation::VERTICAL, 10),
       m_pf_summary("shell.preflight.summary"),
       m_pf_rows("shell.preflight.rows", Gtk::Orientation::VERTICAL, 10),
@@ -57,7 +72,7 @@ Shell::Shell()
 
 // The worker must be gone before the members it touches (m_report, the
 // dispatcher). close-request does this too; the dtor is the backstop.
-Shell::~Shell() { stop_scan(); stop_sweep(); }
+Shell::~Shell() { stop_scan(); stop_sweep(); stop_dev(); }
 
 void Shell::build_ui() {
     m_home = home_dir();
@@ -73,9 +88,10 @@ void Shell::build_ui() {
     paint_preflight();
     paint_activity();
 
-    signal_close_request().connect([this] { stop_scan(); stop_sweep(); return false; }, false);
+    signal_close_request().connect([this] { stop_scan(); stop_sweep(); stop_dev(); return false; }, false);
     m_scan_finished.connect(sigc::mem_fun(*this, &Shell::on_scan_done));
     m_sweep_finished.connect(sigc::mem_fun(*this, &Shell::on_sweep_found));
+    m_dev_finished.connect(sigc::mem_fun(*this, &Shell::on_dev_found));
 
     if (auto lg = log::get(log::Area::Shell)) lg->info("ready -- home is {}", m_home);
 }

@@ -3,6 +3,7 @@
 #include "core/Scan.hpp"     // s002: the read-only walker
 #include "core/Door.hpp"     // s004: the one door
 #include "core/Sweep.hpp"    // s006: the first module that acts
+#include "core/Dev.hpp"      // s007: dev projects
 
 #include <gtkmm/applicationwindow.h>
 #include <giomm/menu.h>
@@ -41,6 +42,8 @@
 //   "What thread does the walking?"      -> Shell_helpers.cpp (start_scan: m_worker)
 //   "Where is the Sweep page?"           -> Shell_zones.cpp   (build_sweep_page: start / running / results / done)
 //   "Where does Sweep act?"              -> Shell_handlers.cpp (on_sweep_run -> m_door->run)
+//   "Where is the Dev projects page?"    -> Shell_zones.cpp   (build_dev_page); cards: Shell_helpers.cpp (paint_dev)
+//   "Where does the light clean act?"    -> Shell_handlers.cpp (on_dev_run -> m_door->run)
 //   "Where does a write go?"             -> core/Door.* -- nowhere else (the selftest's source gate)
 // ─────────────────────────────────────────────────────────────────────────────
 namespace rouster {
@@ -62,6 +65,7 @@ private:
     void build_pages();                          // category: zone: the module pages
     void build_scan_page();                      // category: zone: Smart Scan (s002; look s005)
     void build_sweep_page();                     // category: zone: Sweep (s006)
+    void build_dev_page();                       // category: zone: Dev projects (s007)
     void build_preflight_page();                 // category: zone: Preflight (s003)
     void build_activity_page();                  // category: zone: Activity (s004)
     Glib::RefPtr<Gio::Menu> build_menu();        // category: zone: hamburger model
@@ -79,6 +83,10 @@ private:
     void on_sweep_cancel();                      // category: handler: stop looking
     void on_sweep_found();                       // category: handler: the worker finished (Dispatcher, UI thread)
     void on_sweep_run();                         // category: handler: the checked items -> a plan -> the door
+    void on_dev_find();                          // category: handler: find + verify the dev projects (worker)
+    void on_dev_cancel();                        // category: handler: stop looking
+    void on_dev_found();                         // category: handler: the worker finished (Dispatcher, UI thread)
+    void on_dev_run();                           // category: handler: the checked build dirs -> a plan -> the door
     void on_preflight();                         // category: handler: run the checklist again
     void on_pick_folder();                       // category: handler: folder chooser -> scan it
     void on_recent_open(const std::string& p);   // category: handler: scan a recent folder again
@@ -102,6 +110,10 @@ private:
     bool tick_sweep();                           // category: helper: the live counters while looking
     void paint_sweep();                          // category: helper: groups, rows with checks, the Trash line
     void sweep_gate();                           // category: helper: the act button's label + whether it may act
+    void stop_dev();                             // category: helper: cancel + join (close, dtor)
+    bool tick_dev();                             // category: helper: the live counters while looking
+    void paint_dev();                            // category: helper: one card per project: verdict, checks, lint, build rows
+    void dev_gate();                             // category: helper: the light-clean button's label + whether it may act
     void go_to(const std::string& page);         // category: helper: select a module's sidebar row
     void note_recent(const std::string& path);   // category: helper: push onto the list + persist
     void rebuild_recents_menu();                 // category: helper: repaint the submenu
@@ -169,6 +181,31 @@ private:
     core::sweep::Found                    m_sw_found;   // written by the worker, read after done
     sigc::connection                      m_sw_tick;
     Glib::RefPtr<Gio::SimpleAction>       m_act_sw_find, m_act_sw_cancel, m_act_sw_run;
+
+    // Dev projects (s007): start | running | results | done.
+    widgets::Box     m_dv_page;
+    widgets::Stack   m_dv_states;
+    widgets::Label   m_dv_sub;
+    widgets::Button  m_dv_find;       // the orb
+    widgets::Spinner m_dv_spinner;
+    widgets::Label   m_dv_run_big;
+    widgets::Label   m_dv_run_caption;
+    widgets::Button  m_dv_cancel;
+    widgets::Label   m_dv_big;        // the checked build output
+    widgets::Label   m_dv_caption;
+    widgets::Box     m_dv_list;       // one card per project
+    widgets::Button  m_dv_go;         // "Move 1.2 GB of build output to the Trash"
+    widgets::Label   m_dv_gate;
+    widgets::Label   m_dv_done_big;
+    widgets::Label   m_dv_done_caption;
+    core::dev::Found m_dv_shown;      // what the cards show; checks live here (UI thread only)
+    Glib::Dispatcher                      m_dev_finished;
+    std::shared_ptr<core::scan::Progress> m_dv_progress;
+    std::thread                           m_dv_worker;
+    std::mutex                            m_dv_mx;
+    core::dev::Found                      m_dv_found;   // written by the worker, read after done
+    sigc::connection                      m_dv_tick;
+    Glib::RefPtr<Gio::SimpleAction>       m_act_dv_find, m_act_dv_cancel, m_act_dv_run;
 
     // Preflight (s003).
     bool            m_pf_red = true;  // a red check stops every act button; true until the first run

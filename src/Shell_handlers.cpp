@@ -23,7 +23,7 @@ void Shell::on_nav(const std::string& page) {  // handler: a sidebar row was cho
     m_page = page;
     add_css_class("page-" + page);   // the window's gradient follows the module (rouster.css)
     m_stack.set_visible_child(page);
-    if (page == "preflight" || page == "sweep") paint_preflight();   // fresh gate on arrival
+    if (page == "preflight" || page == "sweep" || page == "dev") paint_preflight();   // fresh gate on arrival
     if (page == "activity") paint_activity();
 }
 
@@ -60,6 +60,10 @@ void Shell::on_undo() {  // handler: undo the last batch, through the door
     if (m_sw_states.get_visible_child_name() == "done") {
         m_sw_sub.set_text("Undone -- everything is back where it was. Look again to see it.");
         m_sw_states.set_visible_child("start");
+    }
+    if (m_dv_states.get_visible_child_name() == "done") {
+        m_dv_sub.set_text("Undone -- the build output is back where it was. Look again to see it.");
+        m_dv_states.set_visible_child("start");
     }
 }
 
@@ -153,6 +157,105 @@ void Shell::on_sweep_run() {  // handler: the checked items -> a plan -> the doo
     }
     m_sw_states.set_visible_child("done");
     sweep_gate();
+    paint_activity();
+}
+
+// ── Dev projects (s007) ──────────────────────────────────────────────────────
+void Shell::on_dev_find() {  // handler: find + verify the dev projects (worker)
+    if (m_dv_worker.joinable()) return;
+    m_dv_progress = std::make_shared<core::scan::Progress>();
+    m_dv_run_big.set_text("0 projects");
+    m_dv_run_caption.set_text("Looking under ~/Develop and asking each remote");
+    if (m_act_dv_find)   m_act_dv_find->set_enabled(false);
+    if (m_act_dv_cancel) m_act_dv_cancel->set_enabled(true);
+    dev_gate();
+    m_dv_spinner.start();
+    m_dv_states.set_visible_child("running");
+    if (auto lg = log::get(log::Area::Dev)) lg->info("find (home '{}')", m_home);
+
+    m_dv_worker = std::thread([this, prog = m_dv_progress, home = m_home] {
+        const auto t0 = std::chrono::steady_clock::now();
+        core::dev::Found f = core::dev::find(home, *prog);
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - t0).count();
+        if (auto lg = log::get(log::Area::Dev)) {
+            lg->info("found {} projects in {} roots, {} unreadable, {} ms{}{}", f.projects.size(), f.roots.size(),
+                     f.errors, ms, f.cancelled ? " (cancelled)" : "", f.refused.empty() ? "" : " REFUSED: " + f.refused);
+            for (const auto& p : f.projects) {
+                lg->info("  {} [{}] {} -- remote {} ({}), {} build dirs, {} drift", p.rel,
+                         p.kind == core::dev::Kind::Workspace ? "workspace" : "repo",
+                         core::dev::status_name(p.repo.status), p.repo.remote, p.repo.host, p.builds.size(), p.drift.size());
+                for (const auto& c : p.repo.checks)
+                    if (!c.ok) lg->info("    {}: {}", c.name, c.detail);
+                if (!p.repo.error.empty()) lg->info("    error: {}", p.repo.error);
+            }
+        }
+        {
+            std::lock_guard lk(m_dv_mx);
+            m_dv_found = std::move(f);
+        }
+        m_dev_finished.emit();
+    });
+    m_dv_tick = Glib::signal_timeout().connect(sigc::mem_fun(*this, &Shell::tick_dev), 120);
+}
+
+void Shell::on_dev_cancel() {  // handler: stop looking
+    if (m_dv_progress) m_dv_progress->cancel = true;
+    if (auto lg = log::get(log::Area::Dev)) lg->info("cancel requested");
+}
+
+void Shell::on_dev_found() {  // handler: the worker finished (Dispatcher -> UI thread)
+    if (m_dv_worker.joinable()) m_dv_worker.join();
+    m_dv_tick.disconnect();
+    m_dv_spinner.stop();
+    if (m_act_dv_find)   m_act_dv_find->set_enabled(true);
+    if (m_act_dv_cancel) m_act_dv_cancel->set_enabled(false);
+    {
+        std::lock_guard lk(m_dv_mx);
+        m_dv_shown = m_dv_found;
+    }
+    if (!m_dv_shown.refused.empty()) {
+        m_dv_sub.set_text("Not looked: " + m_dv_shown.refused);
+        m_dv_states.set_visible_child("start");
+        return;
+    }
+    paint_dev();
+    m_dv_states.set_visible_child("results");
+}
+
+void Shell::on_dev_run() {  // handler: the checked build dirs -> a plan -> the door
+    if (!m_door || m_dv_worker.joinable()) return;
+    if (m_dv_states.get_visible_child_name() != "results") return;   // the cards are the preview
+    paint_preflight();
+    if (m_pf_red) { dev_gate(); return; }
+
+    core::door::Plan plan = core::dev::plan(m_home, m_dv_shown.projects);
+    if (plan.actions.empty()) return;
+    plan.previewed = true;
+    std::uint64_t bytes = 0;
+    for (const auto& a : plan.actions) bytes += a.bytes;
+
+    const auto r = m_door->run(plan);
+    if (auto lg = log::get(log::Area::Dev)) {
+        lg->info("run '{}': {} done, {} failed", plan.label, r.done, r.failed);
+        for (const auto& m : r.messages) lg->warn("  {}", m);
+    }
+    if (r.ok) {
+        m_dv_done_big.set_text(core::scan::human_bytes(bytes));
+        m_dv_done_caption.set_text("of build output went to the Trash -- " + std::to_string(r.done) +
+            (r.done == 1 ? " folder" : " folders") + ". The next build makes it again; Undo puts it back now. "
+            "The space returns when you empty the Trash.");
+    } else if (r.done == 0) {
+        m_dv_done_big.set_text("Nothing moved");
+        m_dv_done_caption.set_text(r.messages.empty() ? std::string("The door refused the plan.") : r.messages.front());
+    } else {
+        m_dv_done_big.set_text(std::to_string(r.done) + " of " + std::to_string(plan.actions.size()));
+        m_dv_done_caption.set_text("went to the Trash; " + std::to_string(r.failed) + " could not: " +
+                                   (r.messages.empty() ? std::string("see Activity") : r.messages.front()) +
+                                   ". Undo puts back what moved.");
+    }
+    m_dv_states.set_visible_child("done");
+    dev_gate();
     paint_activity();
 }
 

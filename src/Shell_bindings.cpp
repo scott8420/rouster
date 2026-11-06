@@ -21,6 +21,11 @@ void Shell::bind_actions() {  // bindings: actions + recents group
     m_act_sw_cancel->set_enabled(false);
     m_act_sw_run->set_enabled(false);
     add_action("go-sweep",      [this]() { go_to("sweep"); });
+    m_act_dv_find   = add_action("dev-find",   sigc::mem_fun(*this, &Shell::on_dev_find));
+    m_act_dv_cancel = add_action("dev-cancel", sigc::mem_fun(*this, &Shell::on_dev_cancel));
+    m_act_dv_run    = add_action("dev-run",    sigc::mem_fun(*this, &Shell::on_dev_run));
+    m_act_dv_cancel->set_enabled(false);
+    m_act_dv_run->set_enabled(false);
     add_action("preflight",     sigc::mem_fun(*this, &Shell::on_preflight));
     add_action("dump-registry", sigc::mem_fun(*this, &Shell::on_dump_registry));
     add_action("about",         sigc::mem_fun(*this, &Shell::on_about));
