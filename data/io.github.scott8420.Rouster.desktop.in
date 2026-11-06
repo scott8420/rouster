@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Rouster
+GenericName=Home Folder Keeper
+Comment=Organize, clean and archive your home folder safely
+Exec=@BINDIR@/rouster
+Icon=io.github.scott8420.Rouster
+Terminal=false
+Categories=Utility;System;Filesystem;GTK;
+Keywords=clean;cleanup;organize;duplicates;archive;tidy;junk;
+StartupNotify=true
+StartupWMClass=io.github.scott8420.Rouster

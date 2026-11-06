@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <!-- Rouster app icon (placeholder): a crate on a warm tile, a push broom
+       leaning against it. -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3d6f8f"/>
+      <stop offset="1" stop-color="#284b62"/>
+    </linearGradient>
+    <linearGradient id="crate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#e2a65a"/>
+      <stop offset="1" stop-color="#c4833a"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="112" height="112" rx="24" fill="url(#tile)"/>
+  <!-- crate -->
+  <rect x="26" y="56" width="52" height="44" rx="4" fill="url(#crate)"/>
+  <rect x="26" y="56" width="52" height="10" rx="4" fill="#f0c07e"/>
+  <path d="M30 70 L74 96 M74 70 L30 96" stroke="#9c6229" stroke-width="5" stroke-linecap="round"/>
+  <rect x="26" y="56" width="52" height="44" rx="4" fill="none" stroke="#7d4c1e" stroke-width="3"/>
+  <!-- broom -->
+  <rect x="85" y="18" width="7" height="70" rx="3.5" fill="#f4ead8" transform="rotate(14 88 53)"/>
+  <rect x="78" y="86" width="30" height="9" rx="3" fill="#b8423a"/>
+  <path d="M79 95 h28 l2 11 h-32 z" fill="#f2d16b"/>
+  <path d="M83 97 v8 M88 97 v8 M93 97 v8 M98 97 v8 M103 97 v8" stroke="#c9a640" stroke-width="1.6"/>
+</svg>

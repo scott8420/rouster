@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+  <!-- Rouster: a push broom at work: handle on the diagonal, a wide head,
+       bristles below, and two swept-up crumbs. currentColor throughout so
+       GTK's symbolic pipeline recolours it to the theme foreground.
+       Placeholder mark; Scott may redraw. -->
+  <g fill="currentColor">
+    <rect x="7.1" y="0.6" width="1.6" height="9.2" rx="0.8" transform="rotate(28 7.9 5.2)"/>
+    <rect x="1.6" y="9.2" width="10.4" height="2.0" rx="0.9"/>
+    <path d="M2.2 11.6h9.2l0.6 3.4H1.6z"/>
+    <circle cx="13.6" cy="13.9" r="0.9"/>
+    <circle cx="14.6" cy="11.9" r="0.6"/>
+  </g>
+</svg>
