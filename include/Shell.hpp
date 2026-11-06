@@ -87,6 +87,11 @@ private:
     void on_dev_cancel();                        // category: handler: stop looking
     void on_dev_found();                         // category: handler: the worker finished (Dispatcher, UI thread)
     void on_dev_run();                           // category: handler: the checked build dirs -> a plan -> the door
+    void on_dev_retire(const std::string& rel);  // category: handler: a card's Retire... -> the preview
+    void on_dev_restore(const std::string& rel); // category: handler: a card's Restore... -> the preview
+    void on_dev_confirm();                       // category: handler: the preview's act button -> worker (verify again, door)
+    void on_dev_acted();                         // category: handler: retire / restore finished (Dispatcher, UI thread)
+    void on_dev_known(const std::string& rel, const std::string& name, bool add);  // category: handler: promote / forget a lint name
     void on_preflight();                         // category: handler: run the checklist again
     void on_pick_folder();                       // category: handler: folder chooser -> scan it
     void on_recent_open(const std::string& p);   // category: handler: scan a recent folder again
@@ -114,6 +119,9 @@ private:
     bool tick_dev();                             // category: helper: the live counters while looking
     void paint_dev();                            // category: helper: one card per project: verdict, checks, lint, build rows
     void dev_gate();                             // category: helper: the light-clean button's label + whether it may act
+    void paint_dev_confirm(const std::string& title, const std::string& sub, const std::string& go,
+                           const std::vector<std::string>& keep, const std::vector<std::string>& warn);  // category: helper: the retire / restore preview
+    bool door_busy() const;                      // category: helper: a retire / restore owns the door right now
     void go_to(const std::string& page);         // category: helper: select a module's sidebar row
     void note_recent(const std::string& path);   // category: helper: push onto the list + persist
     void rebuild_recents_menu();                 // category: helper: repaint the submenu
@@ -206,6 +214,22 @@ private:
     core::dev::Found                      m_dv_found;   // written by the worker, read after done
     sigc::connection                      m_dv_tick;
     Glib::RefPtr<Gio::SimpleAction>       m_act_dv_find, m_act_dv_cancel, m_act_dv_run;
+    // Retire / restore (s007b): the preview ("confirm" state), then a worker
+    // that owns the door until it is done (a clone takes the network's time).
+    widgets::Label   m_dv_cf_title;
+    widgets::Label   m_dv_cf_sub;
+    widgets::Box     m_dv_cf_list;    // the plan, step by step -- the preview
+    widgets::Button  m_dv_cf_go;
+    core::door::Plan m_dv_plan;       // what the preview shows, and exactly what runs
+    std::string      m_dv_cf_rel;     // the project it is for
+    bool             m_dv_cf_retire = true;
+    bool             m_dv_acting = false;   // UI thread: the act worker owns m_door
+    Glib::Dispatcher m_dev_acted;
+    std::thread      m_dv_act_worker;
+    std::mutex       m_dv_act_mx;
+    core::door::Result m_dv_act_result;   // written by the worker
+    std::string        m_dv_act_refused;  // the re-check said no (nothing ran)
+    std::vector<std::string> m_known;     // lint names promoted to known-optional (core/Known)
 
     // Preflight (s003).
     bool            m_pf_red = true;  // a red check stops every act button; true until the first run

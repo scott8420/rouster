@@ -27,6 +27,10 @@ add_library(rouster_core STATIC
     src/core/Sweep.cpp
     # Dev projects (s007): find, verify (git, read-only), lint, plan; the door acts.
     src/core/Dev.cpp
+    # git as a child process (Dev reads with it; the door's Clone verb writes with it).
+    src/core/Git.cpp
+    # Known (s007b): the names promoted to known-optional -- Rouster's own setting.
+    src/core/Known.cpp
     # The SHORTCUT-REGISTRY paradigm: one list, two consumers (App wires accels
     # from it, ShortcutsDialog renders from it) so a key and its advertised row
     # can't drift. GTK-free, so it lives in core and the selftest guards it

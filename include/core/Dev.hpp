@@ -1,5 +1,6 @@
 #pragma once
 #include "core/Door.hpp"
+#include "core/Git.hpp"
 #include "core/Scan.hpp"
 
 #include <atomic>
@@ -40,17 +41,9 @@
 // ─────────────────────────────────────────────────────────────────────────────
 namespace rouster::core::dev {
 
-// ── git, read-only ──────────────────────────────────────────────────────────
-struct Run {
-    int         code = -1;        // exit status; -1 = did not run / killed
-    std::string out, err;
-    bool        timed_out = false;
-};
-// `git -C dir args...` with prompts off and optional locks off; killed after
-// timeout_s or when *cancel turns true. The user's git config still applies
-// (url rewrites, credential helpers), so ls-remote reaches what `git push` does.
-Run git(const std::string& dir, const std::vector<std::string>& args, int timeout_s,
-        const std::atomic<bool>* cancel = nullptr);
+// ── git (core/Git.hpp) ─────────────────────────────────────────────────────
+using vcs::Run;
+using vcs::git;
 
 // "git@github.com:me/x.git" / "https://github.com/me/x" -> "github.com";
 // a local path -> "this computer".
@@ -63,6 +56,7 @@ enum class Status {
     Unreachable,   // the remote did not answer: unknown, so treated as not clean
     NoRemote,      // a repo with no remote: not backed up, never touched
     NotRepo,       // a workspace whose app folder has no .git: same
+    Retired,       // s007b: the working copy is gone; RESTORE.txt says where it lives
 };
 const char* status_name(Status s);   // "Backed up", ...
 
@@ -92,6 +86,8 @@ const char* tier_name(Tier t);       // "missing", "naming", "not in the templat
 struct Drift {
     Tier        tier = Tier::Note;
     std::string what;                // one line
+    std::string name;                // Unknown: the entry's name, promotable; Note: a promoted
+    bool        promoted = false;    //   name that is present (forgettable). "" otherwise.
 };
 // The template, as lists (one place; the selftest reads them too).
 const std::vector<std::string>& required_dirs();     // include src resources
@@ -100,8 +96,10 @@ const std::vector<std::string>& optional_dirs();     // third_party libs data cm
 const std::vector<std::string>& known_files();       // install.sh uninstall.sh README.md LICENSE .gitignore
 inline constexpr const char* kAppIdPrefix = "io.github.scott8420";
 
-// abs: the workspace root; app: its app folder name.
-std::vector<Drift> lint(const std::string& abs, const std::string& app);
+// abs: the workspace root; app: its app folder name. known: names Scott has
+// promoted to known-optional (folders or files, either level of the workspace).
+std::vector<Drift> lint(const std::string& abs, const std::string& app,
+                        const std::vector<std::string>& known = {});
 
 // ── find ───────────────────────────────────────────────────────────────────
 enum class Kind { Workspace, Repo };
@@ -123,7 +121,12 @@ struct Project {
     std::vector<BuildDir> builds;
     std::vector<Drift>    drift;     // workspace only
     std::uint64_t fixes_files = 0;   // workspace: files under fixes/ (never touched)
+    bool        retired = false;     // s007b: status Retired; `restore` holds RESTORE.txt
+    struct RestoreInfo {
+        std::string app, url, branch, commit, retired;   // retired: local "YYYY-MM-DD HH:MM"
+    } restore;
 };
+using RestoreInfo = Project::RestoreInfo;
 
 struct Found {
     std::vector<Project>     projects;   // sorted by path
@@ -132,6 +135,30 @@ struct Found {
     bool          cancelled = false;
     std::string   refused;               // home unusable
 };
+
+// ── retire / restore (s007b) ────────────────────────────────────────────────
+inline constexpr const char* kRestoreFile = "RESTORE.txt";
+// RESTORE.txt: a human paragraph, then "key: value" lines Rouster reads back.
+std::string restore_text(const RestoreInfo& r);
+bool        parse_restore(const std::string& text, RestoreInfo& out);   // needs app + url + commit
+// abs: a folder. True when it is a RETIRED workspace: docs/RULES.md +
+// scripts/*backup.sh + a readable RESTORE.txt, and its app folder gone.
+bool is_retired(const std::string& abs, RestoreInfo& out);
+
+// What retire keeps and what it sends to the Trash (Q1 lean: keep the newest zip).
+struct RetireView {
+    std::vector<std::string> keep;     // relative to the workspace: docs/, scripts/, fixes/, the newest zip ...
+    std::vector<std::string> ignored;  // ignored-but-present files leaving with the working copy (build output left out)
+};
+// The retire plan: Write RESTORE.txt; Trash <app>/; Trash every item in
+// backups/Old/; Trash every zip in backups/ but the newest. Empty + why_not
+// when it may not: a workspace, Backed up, its app folder present, no
+// RESTORE.txt yet. now: unix seconds (the date in RESTORE.txt). Unpreviewed.
+door::Plan retire_plan(const std::string& home, const Project& p, std::int64_t now,
+                       std::string& why_not, RetireView* view = nullptr);
+// The restore plan: Clone the recorded URL / branch into <app>/ (the commit
+// must be in its history); Trash RESTORE.txt. Only for a Retired project.
+door::Plan restore_plan(const std::string& home, const Project& p, std::string& why_not);
 
 // The dev roots looked for, relative to home.
 const std::vector<std::string>& roots();
@@ -142,7 +169,7 @@ bool is_workspace(const std::string& abs, std::string& app);
 // READ-ONLY. Walks the roots, verifies each repo, lints workspaces, measures
 // build output. Progress: dirs = folders walked, files = projects checked,
 // bytes = build output measured.
-Found find(const std::string& home, scan::Progress& progress);
+Found find(const std::string& home, scan::Progress& progress, const std::vector<std::string>& known = {});
 
 // The checked + offered build folders as a door plan of Trash actions.
 // previewed stays false -- only the UI, having shown the list, may set it.

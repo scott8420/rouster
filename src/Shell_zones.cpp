@@ -499,6 +499,48 @@ void Shell::build_dev_page() {  // zone: Dev projects
     done->append(*btns);
     m_dv_states.add(*done, "done");
 
+    // confirm (s007b): the retire / restore plan, step by step -- its preview.
+    auto cf_page = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 0);
+    auto cf_scroll = Gtk::make_managed<Gtk::ScrolledWindow>();
+    cf_scroll->set_policy(Gtk::PolicyType::NEVER, Gtk::PolicyType::AUTOMATIC);
+    cf_scroll->set_vexpand(true);
+    auto cf = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 12);
+    cf->set_margin_start(32);
+    cf->set_margin_end(32);
+    cf->set_margin_top(12);
+    cf->set_margin_bottom(16);
+    auto cf_head = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 20);
+    cf_head->append(*hero("rouster-hero-dev", 72));
+    auto cf_words = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 4);
+    cf_words->set_valign(Gtk::Align::CENTER);
+    cf_words->set_hexpand(true);
+    m_dv_cf_title.add_css_class("hero-title");
+    m_dv_cf_title.set_xalign(0.0f);
+    m_dv_cf_sub.add_css_class("hero-caption");
+    m_dv_cf_sub.set_xalign(0.0f);
+    m_dv_cf_sub.set_wrap(true);
+    cf_words->append(m_dv_cf_title);
+    cf_words->append(m_dv_cf_sub);
+    cf_head->append(*cf_words);
+    cf->append(*cf_head);
+    cf->append(m_dv_cf_list);
+    cf_scroll->set_child(*cf);
+    cf_page->append(*cf_scroll);
+    auto cf_bar = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 16);
+    cf_bar->add_css_class("act-bar");
+    auto back = Gtk::make_managed<Gtk::Button>("Back");
+    back->add_css_class("ghost");
+    back->signal_clicked().connect([this] { m_dv_states.set_visible_child("results"); });
+    cf_bar->append(*back);
+    auto spacer = Gtk::make_managed<Gtk::Box>();
+    spacer->set_hexpand(true);
+    cf_bar->append(*spacer);
+    m_dv_cf_go.add_css_class("act");
+    m_dv_cf_go.signal_clicked().connect(sigc::mem_fun(*this, &Shell::on_dev_confirm));
+    cf_bar->append(m_dv_cf_go);
+    cf_page->append(*cf_bar);
+    m_dv_states.add(*cf_page, "confirm");
+
     m_dv_page.append(m_dv_states);
     m_stack.add(m_dv_page, "dev", "Dev projects");
 }

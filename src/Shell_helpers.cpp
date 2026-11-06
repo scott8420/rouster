@@ -236,6 +236,11 @@ std::string Shell::data_dir() const {  // helper: where the manifest lives
 
 void Shell::paint_activity() {  // helper: the manifest's batches, newest first
     namespace dr = core::door;
+    if (door_busy()) {   // the act worker owns the door; on_dev_acted repaints
+        m_act_said.set_text("A retire / restore is running -- Activity fills in when it is done.");
+        if (m_act_undo_action) m_act_undo_action->set_enabled(false);
+        return;
+    }
     while (auto* c = m_act_list.get_first_child()) m_act_list.remove(*c);
     const bool can = m_door && m_door->can_undo();
     if (m_act_undo_action) m_act_undo_action->set_enabled(can);
@@ -469,6 +474,11 @@ void Shell::stop_dev() {  // helper: cancel + join (close, dtor)
     if (m_dv_progress) m_dv_progress->cancel = true;
     if (m_dv_worker.joinable()) m_dv_worker.join();
     m_dv_tick.disconnect();
+    if (m_dv_act_worker.joinable()) m_dv_act_worker.join();   // a clone in flight finishes; the door stays whole
+}
+
+bool Shell::door_busy() const {  // helper: a retire / restore owns the door right now
+    return m_dv_acting;
 }
 
 bool Shell::tick_dev() {  // helper: the live counters while looking
@@ -490,9 +500,9 @@ void Shell::paint_dev() {  // helper: one card per project: verdict, checks, lin
     for (std::size_t pi = 0; pi < projects.size(); ++pi) {
         const auto& p = projects[pi];
         const auto st = p.repo.status;
-        const char* tone = st == dv::Status::Backed ? "pf-green"
+        const char* tone = st == dv::Status::Backed ? "pf-green" : st == dv::Status::Retired ? "dim"
                          : (st == dv::Status::NoRemote || st == dv::Status::NotRepo) ? "pf-red" : "pf-amber";
-        const char* dotc = st == dv::Status::Backed ? "dv-backed"
+        const char* dotc = st == dv::Status::Backed ? "dv-backed" : st == dv::Status::Retired ? "dv-retired"
                          : (st == dv::Status::NoRemote || st == dv::Status::NotRepo) ? "dv-unsafe" : "dv-notclean";
 
         auto card = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 4);
@@ -513,6 +523,20 @@ void Shell::paint_dev() {  // helper: one card per project: verdict, checks, lin
         chip->add_css_class(tone);
         chip->set_valign(Gtk::Align::CENTER);
         head->append(*chip);
+        // Retire (a backed-up workspace) / Restore (a retired one): each opens a preview first.
+        if (p.kind == dv::Kind::Workspace && (st == dv::Status::Backed || st == dv::Status::Retired)) {
+            auto b = Gtk::make_managed<Gtk::Button>(st == dv::Status::Retired ? "Restore…" : "Retire…");
+            b->add_css_class("ghost");
+            b->add_css_class("small");
+            b->set_valign(Gtk::Align::CENTER);
+            b->set_tooltip_text(st == dv::Status::Retired
+                ? "Clone it back from " + p.repo.host + " -- you see the plan first"
+                : "Send the working copy and old backups to the Trash, leave RESTORE.txt -- you see the plan first");
+            const std::string rel = p.rel;
+            const bool retired = st == dv::Status::Retired;
+            b->signal_clicked().connect([this, rel, retired] { retired ? on_dev_restore(rel) : on_dev_retire(rel); });
+            head->append(*b);
+        }
         card->append(*head);
 
         // The verdict, in one line, then whatever failed.
@@ -534,6 +558,10 @@ void Shell::paint_dev() {  // helper: one card per project: verdict, checks, lin
             case dv::Status::NoRemote:
             case dv::Status::NotRepo:
                 verdict = "Not backed up: " + p.repo.error + ". Rouster leaves it alone.";
+                break;
+            case dv::Status::Retired:
+                verdict = "Retired " + p.restore.retired + " -- the working copy lives on " + p.repo.host + " at " + sha +
+                          (p.repo.branch.empty() ? "" : " (" + p.repo.branch + ")") + ". RESTORE.txt says how to get it back.";
                 break;
         }
         auto v = text(verdict, st == dv::Status::Backed ? "dim" : tone);
@@ -571,6 +599,18 @@ void Shell::paint_dev() {  // helper: one card per project: verdict, checks, lin
             w->set_wrap(true);
             w->set_hexpand(true);
             row->append(*w);
+            if (!d.name.empty() && (d.tier == dv::Tier::Unknown || d.promoted)) {
+                auto k = Gtk::make_managed<Gtk::Button>(d.promoted ? "Forget" : "Known");
+                k->add_css_class("ghost");
+                k->add_css_class("small");
+                k->set_valign(Gtk::Align::CENTER);
+                k->set_tooltip_text(d.promoted ? "Not known-optional after all: report " + d.name + " again"
+                                               : "Known-optional from now on, in every workspace: stop reporting " + d.name);
+                const std::string rel = p.rel, name = d.name;
+                const bool add = !d.promoted;
+                k->signal_clicked().connect([this, rel, name, add] { on_dev_known(rel, name, add); });
+                row->append(*k);
+            }
             card->append(*row);
         }
         // Build output: a check each (shown, unchecked and insensitive when not offered).
@@ -623,6 +663,7 @@ void Shell::dev_gate() {  // helper: the light-clean button's label + whether it
         backed   += st == dv::Status::Backed;
         unsafe   += st == dv::Status::NoRemote || st == dv::Status::NotRepo;
         notclean += st == dv::Status::NotClean || st == dv::Status::Unreachable;
+        backed   += st == dv::Status::Retired;   // retired = safely on its remote
         for (const auto& b : p.builds) {
             all += b.bytes;
             if (b.offered && b.checked) { bytes += b.bytes; ++n; }
@@ -642,6 +683,58 @@ void Shell::dev_gate() {  // helper: the light-clean button's label + whether it
     else
         m_dv_gate.set_text("Only build output moves -- sources, docs, backups and fixes/ stay. One step; Undo brings it back.");
     if (m_act_dv_run) m_act_dv_run->set_enabled(n > 0 && !m_pf_red && !busy);
+}
+
+void Shell::paint_dev_confirm(const std::string& title, const std::string& sub, const std::string& go,
+                              const std::vector<std::string>& keep, const std::vector<std::string>& warn) {  // helper: the preview
+    namespace dr = core::door;
+    m_dv_cf_title.set_text(title);
+    m_dv_cf_sub.set_text(sub);
+    m_dv_cf_go.set_label(go);
+    while (auto* c = m_dv_cf_list.get_first_child()) m_dv_cf_list.remove(*c);
+    const auto tilde = [&](const std::string& p) {
+        return p.rfind(m_home + "/", 0) == 0 ? "~/" + p.substr(m_home.size() + 1) : p;
+    };
+    auto steps = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 6);
+    steps->add_css_class("card");
+    steps->append(*text("What happens, in this order -- one step, Undo takes it all back", "card-title"));
+    for (const auto& a : m_dv_plan.actions) {
+        auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 12);
+        row->add_css_class("sweep-row");
+        const char* verb = a.verb == dr::Verb::Trash ? "To the Trash" : a.verb == dr::Verb::Write ? "Write"
+                         : a.verb == dr::Verb::Clone ? "Clone" : "Move";
+        auto v = text(verb, "drift-tag");
+        v->add_css_class(a.verb == dr::Verb::Trash ? "pf-amber" : "pf-green");
+        row->append(*v);
+        auto sz = text(a.bytes ? scan::human_bytes(a.bytes) : "", "detail-size", 1.0f);
+        sz->set_width_chars(9);
+        row->append(*sz);
+        auto words = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 0);
+        words->set_hexpand(true);
+        auto path = text(tilde(dr::creates(a.verb) ? a.to : a.from), "detail-path");
+        path->set_ellipsize(Pango::EllipsizeMode::MIDDLE);
+        words->append(*path);
+        auto why = text(a.reason, "dim");
+        why->set_wrap(true);
+        words->append(*why);
+        row->append(*words);
+        if (a.verb == dr::Verb::Write) row->set_tooltip_text(a.content);
+        steps->append(*row);
+    }
+    m_dv_cf_list.append(*steps);
+    if (!keep.empty()) {
+        std::string k;
+        for (const auto& x : keep) k += (k.empty() ? "" : ", ") + x;
+        auto l = text("Stays: " + k, "dim");
+        l->set_wrap(true);
+        m_dv_cf_list.append(*l);
+    }
+    for (const auto& w : warn) {
+        auto l = text(w, "pf-amber");
+        l->set_wrap(true);
+        m_dv_cf_list.append(*l);
+    }
+    m_dv_states.set_visible_child("confirm");
 }
 
 void Shell::go_to(const std::string& page) {  // helper: select a module's sidebar row

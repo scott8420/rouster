@@ -1,5 +1,6 @@
 #include "core/Door.hpp"
 #include "core/Scan.hpp"   // never_touch / classify_dir: the policy is the scan's policy
+#include "core/Git.hpp"    // the Clone verb
 
 #include "json.hpp"
 
@@ -25,12 +26,28 @@ namespace rouster::core::door {
 namespace fs = std::filesystem;
 using json = nlohmann::json;
 
-const char* verb_name(Verb v) { return v == Verb::Trash ? "trash" : "move"; }
+const char* verb_name(Verb v) {
+    switch (v) {
+        case Verb::Trash: return "trash";
+        case Verb::Move:  return "move";
+        case Verb::Write: return "write";
+        case Verb::Clone: return "clone";
+    }
+    return "?";
+}
+bool creates(Verb v) { return v == Verb::Write || v == Verb::Clone; }
 
 const std::vector<Verb>& verbs() {
-    static const std::vector<Verb> v = {Verb::Trash, Verb::Move};
+    static const std::vector<Verb> v = {Verb::Trash, Verb::Move, Verb::Write, Verb::Clone};
     return v;
 }
+
+namespace {
+Verb verb_of(const std::string& s) {
+    for (Verb v : verbs()) if (s == verb_name(v)) return v;
+    return Verb::Trash;
+}
+}  // namespace
 
 bool identity_of(const std::string& path, Identity& out) {
     struct stat st{};
@@ -132,7 +149,7 @@ bool Door::load() {
             Record r;
             r.id = j.value("id", 0ull);
             r.batch = j.value("batch", 0ull);
-            r.verb = j.value("verb", "") == "move" ? Verb::Move : Verb::Trash;
+            r.verb = verb_of(j.value("verb", ""));
             r.from = j.value("from", "");
             r.to = j.value("to", "");
             r.info = j.value("info", "");
@@ -172,8 +189,10 @@ std::string Door::refusal(const Action& a) const {
         return p.empty() || p[0] != '/' || fs::path(p).lexically_normal().string() != p ||
                (p.size() > 1 && p.back() == '/');
     };
-    if (bad(a.from)) return "not a clean absolute path: " + a.from;
-    if (!inside(a.from, m_home) || a.from == m_home) return "outside the home folder: " + a.from;
+    if (!creates(a.verb)) {
+        if (bad(a.from)) return "not a clean absolute path: " + a.from;
+        if (!inside(a.from, m_home) || a.from == m_home) return "outside the home folder: " + a.from;
+    }
 
     // Every component from home down: no symlinked parent, nothing Protected.
     const auto walk = [&](const std::string& p, bool last_may_be_missing) -> std::string {
@@ -199,6 +218,28 @@ std::string Door::refusal(const Action& a) const {
         }
         return {};
     };
+    if (creates(a.verb)) {
+        if (!a.from.empty()) return "a " + std::string(verb_name(a.verb)) + " has no source";
+        if (bad(a.to)) return "not a clean absolute path to create: " + a.to;
+        if (!inside(a.to, m_home) || a.to == m_home) return "outside the home folder: " + a.to;
+        if (inside(a.to, m_trash) || inside(m_trash, a.to)) return "not in the Trash: " + a.to;
+        if (inside(a.to, m_data) || inside(m_data, a.to)) return "Rouster's own records: " + a.to;
+        if (auto w = walk(a.to, true); !w.empty()) return w;
+        struct stat st{};
+        if (::lstat(a.to.c_str(), &st) == 0) return "already exists: " + a.to;
+        const std::string parent = fs::path(a.to).parent_path().string();
+        if (::stat(parent.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) return "folder missing: " + parent;
+        if (a.verb == Verb::Write) {
+            if (a.content.size() > kWriteMax) return "too big to write: " + a.to;
+            return {};
+        }
+        const auto flag = [](const std::string& s) { return !s.empty() && s[0] == '-'; };
+        if (a.url.empty() || flag(a.url)) return "no clone URL for " + a.to;
+        if (flag(a.branch)) return "not a branch name: " + a.branch;
+        for (char c : a.commit)
+            if (!std::isxdigit(static_cast<unsigned char>(c))) return "not a commit: " + a.commit;
+        return {};
+    }
     if (auto w = walk(a.from, false); !w.empty()) return w;
     if (inside(a.from, m_data) || inside(m_data, a.from)) return "Rouster's own records: " + a.from;
 
@@ -220,11 +261,12 @@ std::string Door::refusal(const Action& a) const {
     return {};
 }
 
-bool Door::do_trash(Record& r) {
+bool Door::reserve_trash(const std::string& path, std::int64_t when, std::string& dest_out,
+                         std::string& info_out, std::string& err) {
     std::error_code ec;
     fs::create_directories(m_trash + "/files", ec);
     fs::create_directories(m_trash + "/info", ec);
-    const std::string base = fs::path(r.from).filename().string();
+    const std::string base = fs::path(path).filename().string();
     // Reserve a name by creating its .trashinfo exclusively (the spec's way).
     for (int n = 1; n < 10000; ++n) {
         const std::string name = n == 1 ? base : base + "." + std::to_string(n);
@@ -233,17 +275,71 @@ bool Door::do_trash(Record& r) {
         struct stat st{};
         if (::lstat(dest.c_str(), &st) == 0) continue;
         const int fd = ::open(info.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
-        if (fd < 0) { if (errno == EEXIST) continue; r.error = std::strerror(errno); return false; }
-        const std::string body = trashinfo(r.from, r.when);
+        if (fd < 0) { if (errno == EEXIST) continue; err = std::strerror(errno); return false; }
+        const std::string body = trashinfo(path, when);
         const bool wrote = ::write(fd, body.data(), body.size()) == static_cast<ssize_t>(body.size()) && ::fsync(fd) == 0;
         ::close(fd);
-        if (!wrote) { ::unlink(info.c_str()); r.error = "could not write the trash info"; return false; }
-        r.to = dest;
-        r.info = info;
+        if (!wrote) { ::unlink(info.c_str()); err = "could not write the trash info"; return false; }
+        dest_out = dest;
+        info_out = info;
         return true;
     }
-    r.error = "no free name in the Trash";
+    err = "no free name in the Trash";
     return false;
+}
+
+bool Door::do_trash(Record& r) {
+    return reserve_trash(r.from, r.when, r.to, r.info, r.error);
+}
+
+bool Door::trash_now(const std::string& path, std::string& dest, std::string& err) {
+    std::string info;
+    if (!reserve_trash(path, now_s(), dest, info, err)) return false;
+    if (rename_noreplace(path, dest) != 0) {
+        err = std::strerror(errno);
+        ::unlink(info.c_str());
+        return false;
+    }
+    return true;
+}
+
+// Write / Clone build in a staging name the door owns -- `.rouster-<name>.<id>`
+// beside the target -- recorded as r.from. run() then renames it into place.
+// A staging clone that fails goes to the Trash, never rm -r (§1.1).
+bool Door::do_create(Record& r, const Action& a) {
+    const fs::path to(r.to);
+    r.from = (to.parent_path() / (".rouster-" + to.filename().string() + "." + std::to_string(r.id))).string();
+    struct stat st{};
+    if (::lstat(r.from.c_str(), &st) == 0) { r.error = "staging name taken: " + r.from; return false; }
+    if (r.verb == Verb::Write) {
+        const int fd = ::open(r.from.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
+        if (fd < 0) { r.error = std::strerror(errno); return false; }
+        const bool wrote = ::write(fd, a.content.data(), a.content.size()) == static_cast<ssize_t>(a.content.size()) &&
+                           ::fsync(fd) == 0;
+        ::close(fd);
+        if (!wrote) { r.error = "could not write " + r.from; ::unlink(r.from.c_str()); return false; }
+    } else {
+        const std::string parent = to.parent_path().string();
+        const auto fail = [&](const std::string& why) {
+            r.error = why;
+            std::string dest, err;
+            if (::lstat(r.from.c_str(), &st) == 0) trash_now(r.from, dest, err);
+            return false;
+        };
+        const auto c = vcs::git(parent, {"clone", "-q", "--", a.url, r.from}, 900);
+        if (c.code != 0)
+            return fail("git clone failed: " + (c.timed_out ? std::string("no answer in 15 minutes") : c.err.substr(0, c.err.find('\n'))));
+        if (!a.branch.empty()) {
+            const auto cur = vcs::git(r.from, {"symbolic-ref", "-q", "--short", "HEAD"}, 20);
+            if (cur.out.substr(0, cur.out.find('\n')) != a.branch &&
+                vcs::git(r.from, {"checkout", "-q", a.branch}, 60).code != 0)
+                return fail("the clone has no branch " + a.branch);
+        }
+        if (!a.commit.empty() && vcs::git(r.from, {"merge-base", "--is-ancestor", a.commit, "HEAD"}, 20).code != 0)
+            return fail("commit " + a.commit.substr(0, 7) + " is not in the clone's history");
+    }
+    if (!identity_of(r.from, r.ident)) { r.error = "staging vanished: " + r.from; return false; }
+    return true;
 }
 
 Result Door::run(const Plan& plan) {
@@ -273,7 +369,8 @@ Result Door::run(const Plan& plan) {
         r.from = a.from;
         r.to = a.to;
         r.when = now_s();
-        if (!identity_of(r.from, r.ident)) { r.error = "vanished before it could be moved"; }
+        if (creates(r.verb)) { if (!do_create(r, a)) { /* r.error set */ } }
+        else if (!identity_of(r.from, r.ident)) { r.error = "vanished before it could be moved"; }
         else if (r.verb == Verb::Trash && !do_trash(r)) { /* r.error set */ }
 
         if (r.error.empty()) {
@@ -296,14 +393,15 @@ Result Door::run(const Plan& plan) {
                 live.error = errno == EXDEV ? "on another filesystem -- Rouster never copies-and-deletes"
                                             : std::string(std::strerror(errno));
                 if (!live.info.empty()) ::unlink(live.info.c_str());
+                if (creates(live.verb)) { std::string d, e; trash_now(live.from, d, e); }   // the staging copy
                 live.state = State::Failed;
                 append(json{{"t", "failed"}, {"id", live.id}, {"error", live.error}}.dump());
                 ++res.failed;
-                res.messages.push_back("failed: " + live.from + " -- " + live.error);
+                res.messages.push_back("failed: " + (creates(live.verb) ? live.to : live.from) + " -- " + live.error);
             }
         } else {
             ++res.failed;
-            res.messages.push_back("failed: " + r.from + " -- " + r.error);
+            res.messages.push_back("failed: " + (creates(r.verb) ? r.to : r.from) + " -- " + r.error);
         }
     }
     res.ok = res.failed == 0 && res.done == plan.actions.size();
@@ -313,6 +411,16 @@ Result Door::run(const Plan& plan) {
 bool Door::undo_one(Record& r, std::string& why) {
     Identity now{};
     if (!identity_of(r.to, now)) { why = "no longer at " + r.to; return false; }
+    if (creates(r.verb)) {   // nothing was there before: what was made goes to the Trash
+        if (!(now.dev == r.ident.dev && now.ino == r.ident.ino && now.dir == r.ident.dir)) {
+            why = "something else is at " + r.to + " now";
+            return false;
+        }
+        std::string dest;
+        if (!trash_now(r.to, dest, why)) return false;
+        r.info = dest;
+        return true;
+    }
     if (!(now == r.ident)) {
         // A directory's mtime/size change when something inside it changes;
         // what must match is that it is the same object.

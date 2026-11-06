@@ -23,6 +23,7 @@
 #include "core/Door.hpp"
 #include "core/Sweep.hpp"
 #include "core/Dev.hpp"
+#include "core/Known.hpp"
 
 #include <algorithm>
 #include <array>
@@ -215,7 +216,7 @@ bool make_dev_fixture(const fs::path& home, const fs::path& remotes) {
     ok &= put(ws, "fixes/patch.diff", 200);
     ok &= put(ws, "rouster/CMakeLists.txt", 0);
     { std::ofstream(ws / "rouster/CMakeLists.txt") << "project(rouster)\nset(APP_ID io.github.scott8420.Rouster)\n"; }
-    { std::ofstream(ws / "rouster/.gitignore") << "build/\n"; }
+    { std::ofstream(ws / "rouster/.gitignore") << "build/\n*.local\n"; }
     ok &= put(ws, "rouster/build.sh", 50);
     ok &= put(ws, "rouster/include/a.hpp", 50);
     ok &= put(ws, "rouster/src/main.cpp", 300);
@@ -224,6 +225,14 @@ bool make_dev_fixture(const fs::path& home, const fs::path& remotes) {
     ok &= put(ws, "rouster/libs/foo/CMakeLists.txt", 20);
     ok &= put(ws, "rouster/build/obj/main.o", 90000);
     ok &= put(ws, "rouster/libs/foo/build/foo.o", 30000);
+    ok &= put(ws, "rouster/.secrets.local", 20);                    // ignored, not build output (s007b)
+    ok &= put(ws, "backups/s001_a.zip", 3000);                       // older: retire thins it
+    ok &= put(ws, "backups/s002_b.zip", 3000);                       // newest: retire keeps it (Q1)
+    ok &= put(ws, "backups/Old/s000_z.zip", 3000);
+    {
+        struct timespec ts[2] = {{1700000000, 0}, {1700000000, 0}};
+        ::utimensat(AT_FDCWD, (ws / "backups/s001_a.zip").c_str(), ts, 0);
+    }
     ok &= bare("rouster");
     ok &= sh((ws / "rouster").string(), init + " && git add -A && git commit -qm one && git tag -a v1 -m v1 && "
              "git remote add origin '" + R + "/rouster.git' && git push -q -u origin main && git push -q origin v1");
@@ -773,21 +782,75 @@ int main(int argc, char** argv) {
         // The verb table, walked: through the door, one step, undo -> the exact tree.
         check("gate: the verb table holds every verb", dr::verbs().size() == dr::kVerbCount);
         fs::create_directories(home / "Documents/archive", ec);
+        // Clone's source: a bare repo OUTSIDE home (s007b).
+        const fs::path gate_remote = fs::temp_directory_path() / "rouster_selftest_door_remote";
+        fs::remove_all(gate_remote, ec);
+        git_isolate();
+        fs::create_directories(gate_remote / "work", ec);
+        put(gate_remote, "work/a.txt", 10);
+        sh(gate_remote.string(), "git -c init.defaultBranch=main init -q --bare r.git && cd work && "
+           "git -c init.defaultBranch=main init -q && git add -A && git commit -qm a && git push -q ../r.git HEAD:main");
+        // A created thing's undo sends it to the Trash: "exactly" is judged outside the Trash.
+        const auto outside_trash = [](const std::string& snap) {
+            std::istringstream in(snap);
+            std::string out;
+            for (std::string l; std::getline(in, l);)
+                if (l.find("/.local/share/Trash/") == std::string::npos) out += l + "\n";
+            return out;
+        };
         for (Verb v : dr::verbs()) {
             const std::string name = dr::verb_name(v);
             const std::string before = files_snapshot(home);
             const std::size_t batches = door.batches().size();
-            const auto a = v == Verb::Trash ? trash(H + "/.cache/mozilla")
-                                            : move(H + "/Documents/report.pdf", H + "/Documents/archive/report.pdf");
+            dr::Action a;
+            switch (v) {
+                case Verb::Trash: a = trash(H + "/.cache/mozilla"); break;
+                case Verb::Move:  a = move(H + "/Documents/report.pdf", H + "/Documents/archive/report.pdf"); break;
+                case Verb::Write: a.verb = v; a.to = H + "/Documents/RESTORE.txt"; a.content = "url: x\n"; break;
+                case Verb::Clone: a.verb = v; a.to = H + "/Documents/clone"; a.url = (gate_remote / "r.git").string();
+                                  a.branch = "main"; break;
+            }
             const auto r = door.run(plan(name + " one", {a}));
             check("gate/" + name + ": done through the door", r.ok && r.done == 1,
                   r.messages.empty() ? "" : r.messages.front());
             check("gate/" + name + ": one step", door.batches().size() == batches + 1 && door.undo_label() == name + " one");
             check("gate/" + name + ": the tree changed", files_snapshot(home) != before);
             const auto u = door.undo();
-            check("gate/" + name + ": undo puts it back exactly", u.ok && files_snapshot(home) == before,
+            const bool exact = dr::creates(v) ? outside_trash(files_snapshot(home)) == outside_trash(before)
+                                              : files_snapshot(home) == before;
+            check("gate/" + name + ": undo puts it back exactly", u.ok && exact,
                   u.messages.empty() ? "" : u.messages.front());
         }
+        check("gate: write -- the text landed, staging gone, undo sent it to the Trash",
+              fs::exists(home / ".local/share/Trash/files/RESTORE.txt") && !fs::exists(home / "Documents/RESTORE.txt"));
+        check("gate: clone -- undo sent the clone to the Trash, no staging left behind",
+              fs::exists(home / ".local/share/Trash/files/clone/a.txt") && !fs::exists(home / "Documents/clone"));
+        {
+            bool stray = false;
+            for (const auto& e : fs::directory_iterator(home / "Documents"))
+                if (e.path().filename().string().rfind(".rouster-", 0) == 0) stray = true;
+            check("gate: no .rouster- staging names left", !stray);
+        }
+        {   // create-verb policy
+            dr::Action w; w.verb = Verb::Write; w.to = H + "/Documents/report.pdf"; w.content = "x";
+            dr::Action big; big.verb = Verb::Write; big.to = H + "/Documents/big.txt"; big.content.assign(dr::kWriteMax + 1, 'x');
+            dr::Action prot; prot.verb = Verb::Write; prot.to = H + "/.ssh/RESTORE.txt";
+            dr::Action out; out.verb = Verb::Write; out.to = "/tmp/rouster_out.txt";
+            dr::Action inj; inj.verb = Verb::Clone; inj.to = H + "/Documents/c2"; inj.url = "--upload-pack=touch /tmp/x";
+            dr::Action badc; badc.verb = Verb::Clone; badc.to = H + "/Documents/c3"; badc.url = "u"; badc.commit = "zz";
+            dr::Action src; src.verb = Verb::Write; src.from = H + "/Documents"; src.to = H + "/Documents/n.txt";
+            check("door: create verbs refuse -- an existing path, too big, protected, outside home, a flag as URL, a bad commit, a source",
+                  !door.refusal(w).empty() && !door.refusal(big).empty() && !door.refusal(prot).empty() &&
+                  !door.refusal(out).empty() && !door.refusal(inj).empty() && !door.refusal(badc).empty() &&
+                  !door.refusal(src).empty(), door.refusal(inj));
+            dr::Action gone; gone.verb = Verb::Clone; gone.to = H + "/Documents/c4"; gone.url = (gate_remote / "nope.git").string();
+            const std::string b4 = outside_trash(files_snapshot(home));
+            const auto r = door.run(plan("bad clone", {gone}));
+            check("door: a clone that fails leaves nothing behind (outside the Trash)", !r.ok && r.failed == 1 &&
+                  outside_trash(files_snapshot(home)) == b4, r.messages.empty() ? "" : r.messages.front());
+            door.undo();
+        }
+        fs::remove_all(gate_remote, ec);
         check("gate: nothing left to undo", !door.can_undo());
 
         // Trash follows the freedesktop layout.
@@ -1255,6 +1318,113 @@ int main(int argc, char** argv) {
                   std::to_string(u.done) + " back " + diff);
         }
 
+        // -- Retire / restore (s007b) ------------------------------------------
+        {
+            const auto outside_trash = [](const std::string& snap) {
+                std::istringstream in(snap);
+                std::string out;
+                for (std::string l; std::getline(in, l);)
+                    if (l.find("/.local/share/Trash/") == std::string::npos) out += l + "\n";
+                return out;
+            };
+            core::scan::Progress pg;
+            const dv::Found f1 = dv::find(H, pg);
+            const dv::Project *rp = nullptr, *bp = nullptr;
+            for (const auto& x : f1.projects) {
+                if (x.rel == "Develop/rouster_ws") rp = &x;
+                if (x.rel == "Develop/baker") bp = &x;
+            }
+            std::string why;
+            check("retire: a workspace that is not clean is never retired",
+                  bp && dv::retire_plan(H, *bp, 2000000000, why).actions.empty() && !why.empty(), why);
+            dv::RetireView view;
+            why.clear();
+            dr::Plan rt = rp ? dv::retire_plan(H, *rp, 2000000000, why, &view) : dr::Plan{};
+            const auto act = [&](std::size_t i) -> const dr::Action* { return i < rt.actions.size() ? &rt.actions[i] : nullptr; };
+            const auto in_view = [](const std::vector<std::string>& v, const std::string& s) {
+                return std::find(v.begin(), v.end(), s) != v.end();
+            };
+            check("retire: the plan -- write RESTORE.txt, Trash the app, backups/Old's items, all zips but the newest",
+                  rt.actions.size() == 4 && act(0)->verb == dr::Verb::Write && act(0)->to == H + "/Develop/rouster_ws/RESTORE.txt" &&
+                  act(1)->verb == dr::Verb::Trash && act(1)->from == H + "/Develop/rouster_ws/rouster" &&
+                  act(2)->from == H + "/Develop/rouster_ws/backups/Old/s000_z.zip" &&
+                  act(3)->from == H + "/Develop/rouster_ws/backups/s001_a.zip" && !rt.previewed && rt.label == "Retire rouster",
+                  why.empty() ? std::to_string(rt.actions.size()) + " actions" : why);
+            check("retire: keeps docs/, scripts/, fixes/, the newest zip; warns of the ignored file, not of build/",
+                  in_view(view.keep, "docs/") && in_view(view.keep, "scripts/") && in_view(view.keep, "fixes/") &&
+                  in_view(view.keep, "backups/s002_b.zip") && in_view(view.ignored, ".secrets.local") &&
+                  !in_view(view.ignored, "build/") && !in_view(view.ignored, "libs/foo/build/"));
+            dv::RestoreInfo ri;
+            check("retire: RESTORE.txt reads back -- app, url, branch, the exact commit",
+                  act(0) && dv::parse_restore(act(0)->content, ri) && ri.app == "rouster" && ri.branch == "main" &&
+                  rp && ri.commit == rp->repo.head && ri.url == rp->repo.url && act(0)->content.find("git clone ") != std::string::npos);
+
+            const std::string pre = outside_trash(files_snapshot(home));
+            dr::Door door2(H, H + "/.local/share/rouster");
+            door2.load();
+            rt.previewed = true;
+            const auto r1 = door2.run(rt);
+            check("retire: run -- the app is gone, RESTORE.txt is there, docs / scripts / fixes / newest zip stay",
+                  r1.ok && r1.done == 4 && !fs::exists(home / "Develop/rouster_ws/rouster") &&
+                  fs::exists(home / "Develop/rouster_ws/RESTORE.txt") && fs::exists(home / "Develop/rouster_ws/docs/RULES.md") &&
+                  fs::exists(home / "Develop/rouster_ws/fixes/patch.diff") && fs::exists(home / "Develop/rouster_ws/backups/s002_b.zip") &&
+                  !fs::exists(home / "Develop/rouster_ws/backups/s001_a.zip") && fs::is_empty(home / "Develop/rouster_ws/backups/Old"),
+                  r1.messages.empty() ? "" : r1.messages.front());
+            core::scan::Progress pg2;
+            const dv::Found f2 = dv::find(H, pg2);
+            const dv::Project* gone = nullptr;
+            for (const auto& x : f2.projects) if (x.rel == "Develop/rouster_ws") gone = &x;
+            check("retire: find sees a Retired workspace, its RESTORE.txt read",
+                  gone && gone->retired && gone->repo.status == dv::Status::Retired && gone->restore.commit == ri.commit &&
+                  gone->name == "rouster" && gone->builds.empty() && gone->fixes_files == 1);
+            why.clear();
+            check("retire: a retired workspace is not retired twice", gone && dv::retire_plan(H, *gone, 0, why).actions.empty());
+
+            why.clear();
+            dr::Plan rs = gone ? dv::restore_plan(H, *gone, why) : dr::Plan{};
+            check("restore: the plan -- Clone into rouster/ at the recorded branch + commit, Trash RESTORE.txt",
+                  rs.actions.size() == 2 && rs.actions[0].verb == dr::Verb::Clone &&
+                  rs.actions[0].to == H + "/Develop/rouster_ws/rouster" && rs.actions[0].commit == ri.commit &&
+                  rs.actions[0].branch == "main" && rs.actions[1].from == H + "/Develop/rouster_ws/RESTORE.txt" &&
+                  rs.label == "Restore rouster", why);
+            rs.previewed = true;
+            const auto r2 = door2.run(rs);
+            const auto head = dv::git(H + "/Develop/rouster_ws/rouster", {"rev-parse", "HEAD"}, 10);
+            check("restore: run -- the working copy is back at the commit, RESTORE.txt gone",
+                  r2.ok && r2.done == 2 && head.out.rfind(ri.commit, 0) == 0 &&
+                  fs::exists(home / "Develop/rouster_ws/rouster/src/main.cpp") && !fs::exists(home / "Develop/rouster_ws/RESTORE.txt"),
+                  r2.messages.empty() ? head.out : r2.messages.front());
+            core::scan::Progress pg3;
+            const dv::Found f3 = dv::find(H, pg3);
+            const dv::Project* back = nullptr;
+            for (const auto& x : f3.projects) if (x.rel == "Develop/rouster_ws") back = &x;
+            check("restore: and it is Backed up again", back && back->repo.status == dv::Status::Backed && !back->retired,
+                  back ? std::string(dv::status_name(back->repo.status)) : "");
+            const auto u2 = door2.undo();
+            check("restore: undo -- the clone goes to the Trash, RESTORE.txt comes back",
+                  u2.ok && !fs::exists(home / "Develop/rouster_ws/rouster") && fs::exists(home / "Develop/rouster_ws/RESTORE.txt"),
+                  u2.messages.empty() ? "" : u2.messages.front());
+            const auto u1 = door2.undo();
+            check("retire: undo -- everything back exactly (outside the Trash)",
+                  u1.ok && outside_trash(files_snapshot(home)) == pre, u1.messages.empty() ? "" : u1.messages.front());
+        }
+        // -- Lint: promote to known-optional (s007b) ---------------------------
+        {
+            const auto lb = dv::lint(H + "/Develop/baker", "baker", {"notes"});
+            bool unknown_notes = false, promoted = false, unknown_stray = false;
+            for (const auto& d : lb) {
+                if (d.tier == dv::Tier::Unknown && d.name == "notes") unknown_notes = true;
+                if (d.tier == dv::Tier::Unknown && d.name == "stray.txt") unknown_stray = true;
+                if (d.tier == dv::Tier::Note && d.promoted && d.name == "notes") promoted = true;
+            }
+            check("lint: a promoted name is known-optional, shown as yours (forgettable); others stay unknown",
+                  !unknown_notes && promoted && unknown_stray);
+            const std::string kf = H + "/.local/share/rouster/known.json";
+            check("known: save -> load round-trips, sorted and unique",
+                  core::save_known(kf, {"notes", "art", "notes"}) && core::load_known(kf) == std::vector<std::string>{"art", "notes"});
+            check("known: a missing file is an empty list", core::load_known(H + "/nope.json").empty());
+        }
+
         core::scan::Progress pc;
         pc.cancel = true;
         check("dev: a cancelled find says so", dv::find(H, pc).cancelled && pc.done);
@@ -1271,7 +1441,8 @@ int main(int argc, char** argv) {
     //   Door.cpp      -- it IS the door;
     //   Recents.cpp   -- Rouster's own recents file, in its own data dir;
     //   selftest.cpp  -- it builds and tears down fixtures;
-    //   Stones.*      -- the in-memory undo demo: its verbs are NAMED remove /
+    //   Known.cpp     -- Rouster's own setting (promoted names), in its own data dir;
+//   Stones.*      -- the in-memory undo demo: its verbs are NAMED remove /
     //                    rename and touch no disk (goes when a real model
     //                    adopts Undo.hpp);
     //   Registry.*    -- the widget address book; its remove() is a map erase.
@@ -1279,7 +1450,7 @@ int main(int argc, char** argv) {
         std::cout << "\n-- source gate --\n";
         const fs::path root = ROUSTER_SOURCE_DIR;
         const std::set<std::string> allowed = {"src/core/Door.cpp", "src/core/Recents.cpp", "src/selftest.cpp",
-            "src/core/Stones.cpp", "include/core/Stones.hpp", "src/Registry.cpp", "include/Registry.hpp"};
+            "src/core/Stones.cpp", "include/core/Stones.hpp", "src/core/Known.cpp", "src/Registry.cpp", "include/Registry.hpp"};
         const std::vector<std::string> calls = {"rename", "renameat", "renameat2", "unlink", "unlinkat", "rmdir",
             "remove", "remove_all", "copy_file", "copy", "create_directory", "create_directories", "create_symlink",
             "create_hard_link", "resize_file", "truncate", "write", "fopen", "mkdir", "symlink", "link", "chmod",

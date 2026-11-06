@@ -34,24 +34,37 @@
 //   * a Move onto an existing path, or into a missing folder;
 //   * crossing filesystems: the rename fails with EXDEV and nothing is copied.
 //
+// Two verbs CREATE (s007b, retire / restore): Write (a small text file) and
+// Clone (git clone). Each builds in a hidden staging name beside the target
+// that the door owns, then ONE rename puts it in place -- never half there.
+// Their undo is not a rename back (there was nothing before): the created
+// thing goes to the Trash, after the same identity check.
+//
 // Hard-delete does not exist here, and will not (§1.1).
 // ─────────────────────────────────────────────────────────────────────────────
 namespace rouster::core::door {
 
-enum class Verb { Trash, Move };
-const char* verb_name(Verb v);   // "trash", "move"
+enum class Verb { Trash, Move, Write, Clone };
+const char* verb_name(Verb v);   // "trash", "move", "write", "clone"
+bool creates(Verb v);            // Write, Clone: `to` is made; `from` is unused
 // THE VERB TABLE the selftest gate walks: a verb added to the enum and not
 // here fails the gate's count; every verb here is run through the door,
 // checked to be one step, and undone back to the exact tree.
 const std::vector<Verb>& verbs();
-inline constexpr int kVerbCount = 2;
+inline constexpr int kVerbCount = 4;
+inline constexpr std::size_t kWriteMax = 64 * 1024;   // Write is for small notes (RESTORE.txt)
 
 struct Action {
     Verb        verb = Verb::Trash;
     std::string from;            // absolute path
     std::string to;              // Move: absolute destination. Trash: filled in by run().
+                                 // Write / Clone: the path to create (must not exist).
     std::string reason;          // why the module proposed it (shown in preview)
     std::uint64_t bytes = 0;     // for the preview
+    std::string content;         // Write: the file's text (<= kWriteMax)
+    std::string url;             // Clone: what to clone
+    std::string branch;          // Clone: check this branch out ("" = the remote's default)
+    std::string commit;          // Clone: must be this commit or an ancestor of HEAD ("" = any)
 };
 
 struct Plan {
@@ -122,6 +135,10 @@ public:
 private:
     bool append(const std::string& line);   // O_APPEND + fdatasync
     bool do_trash(Record& r);
+    bool reserve_trash(const std::string& path, std::int64_t when, std::string& dest,
+                       std::string& info, std::string& err);   // name + .trashinfo, for `path`
+    bool trash_now(const std::string& path, std::string& dest, std::string& err);   // reserve + rename
+    bool do_create(Record& r, const Action& a);              // Write / Clone into staging (r.from)
     bool do_move(Record& r);
     bool undo_one(Record& r, std::string& why);
     Record* find(std::uint64_t id);

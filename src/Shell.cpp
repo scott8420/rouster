@@ -2,6 +2,7 @@
 #include "AboutWindow.hpp"      // complete type for ~unique_ptr<AboutWindow> in ~Shell()
 #include "ShortcutsDialog.hpp"  // ditto
 #include "Log.hpp"
+#include "core/Known.hpp"
 
 // Shell.cpp -- GLUE. The ctor/dtor and the ordered build_ui() pass live here;
 // every other method body lives in a category file (see the index in Shell.hpp).
@@ -58,6 +59,10 @@ Shell::Shell()
       m_dv_gate("shell.dev.gate"),
       m_dv_done_big("shell.dev.done_big"),
       m_dv_done_caption("shell.dev.done_caption"),
+      m_dv_cf_title("shell.dev.confirm_title"),
+      m_dv_cf_sub("shell.dev.confirm_sub"),
+      m_dv_cf_list("shell.dev.confirm_list", Gtk::Orientation::VERTICAL, 6),
+      m_dv_cf_go("shell.dev.confirm_go"),
       m_pf_page("shell.preflight.page", Gtk::Orientation::VERTICAL, 10),
       m_pf_summary("shell.preflight.summary"),
       m_pf_rows("shell.preflight.rows", Gtk::Orientation::VERTICAL, 10),
@@ -92,6 +97,8 @@ void Shell::build_ui() {
     m_scan_finished.connect(sigc::mem_fun(*this, &Shell::on_scan_done));
     m_sweep_finished.connect(sigc::mem_fun(*this, &Shell::on_sweep_found));
     m_dev_finished.connect(sigc::mem_fun(*this, &Shell::on_dev_found));
+    m_dev_acted.connect(sigc::mem_fun(*this, &Shell::on_dev_acted));
+    m_known = core::load_known(data_dir() + "/known.json");
 
     if (auto lg = log::get(log::Area::Shell)) lg->info("ready -- home is {}", m_home);
 }
