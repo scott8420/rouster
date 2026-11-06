@@ -26,7 +26,7 @@ void Shell::on_nav(const std::string& page) {  // handler: a sidebar row was cho
     m_page = page;
     add_css_class("page-" + page);   // the window's gradient follows the module (rouster.css)
     m_stack.set_visible_child(page);
-    if (page == "preflight" || page == "sweep" || page == "dev") paint_preflight();   // fresh gate on arrival
+    if (page == "preflight" || page == "sweep" || page == "dev" || page == "dups") paint_preflight();   // fresh gate on arrival
     if (page == "activity") paint_activity();
 }
 
@@ -49,9 +49,18 @@ void Shell::on_scan_done() {  // handler: the worker finished (Dispatcher -> UI 
 void Shell::on_undo() {  // handler: undo the last batch, through the door
     if (!m_door || door_busy() || !m_door->can_undo()) return;
     const std::string label = m_door->undo_label();
+    bool shared_only = false;   // a Duplicates share: nothing moved, so nothing is "put back"
+    for (auto it = m_door->batches().rbegin(); it != m_door->batches().rend(); ++it) {
+        if (it->undone) continue;
+        shared_only = !it->records.empty();
+        for (auto id : it->records)
+            if (const auto* rec = m_door->record(id); rec && rec->verb != core::door::Verb::Dedupe) shared_only = false;
+        break;
+    }
     const auto r = m_door->undo();
     std::string said = (r.ok ? "Undid \u201c" : "Partly undid \u201c") + label + "\u201d -- " +
-                       std::to_string(r.done) + " put back";
+                       (shared_only ? "closed; the files were and are identical, so nothing had to move"
+                                    : std::to_string(r.done) + " put back");
     if (r.failed) said += ", " + std::to_string(r.failed) + " could not be: " + r.messages.front();
     m_act_said.set_text(said);
     if (auto lg = log::get(log::Area::Door)) {
@@ -63,6 +72,11 @@ void Shell::on_undo() {  // handler: undo the last batch, through the door
     if (m_sw_states.get_visible_child_name() == "done") {
         m_sw_sub.set_text("Undone -- everything is back where it was. Look again to see it.");
         m_sw_states.set_visible_child("start");
+    }
+    if (m_du_states.get_visible_child_name() == "done") {
+        m_du_sub.set_text("Undone. A Trash step is back where it was; a shared step is closed -- the files were "
+                          "and are identical, so there was nothing to move. Look again to see it.");
+        m_du_states.set_visible_child("start");
     }
     if (m_dv_states.get_visible_child_name() == "done") {
         m_dv_sub.set_text("Undone -- the build output is back where it was. Look again to see it.");
@@ -160,6 +174,166 @@ void Shell::on_sweep_run() {  // handler: the checked items -> a plan -> the doo
     }
     m_sw_states.set_visible_child("done");
     sweep_gate();
+    paint_activity();
+}
+
+// ── Duplicates (s008) ────────────────────────────────────────────────────────
+void Shell::on_dups_find() {  // handler: look for duplicates (worker)
+    if (m_du_worker.joinable() || door_busy()) return;
+    m_du_progress = std::make_shared<core::dups::Progress>();
+    m_du_run_big.set_text("0 files");
+    m_du_run_caption.set_text(core::dups::stage_name(0));
+    if (m_act_du_find)   m_act_du_find->set_enabled(false);
+    if (m_act_du_cancel) m_act_du_cancel->set_enabled(true);
+    dups_gate();
+    m_du_spinner.start();
+    m_du_states.set_visible_child("running");
+    if (auto lg = log::get(log::Area::Dups)) lg->info("find (home '{}')", m_home);
+
+    m_du_worker = std::thread([this, prog = m_du_progress, home = m_home] {
+        const auto t0 = std::chrono::steady_clock::now();
+        core::dups::Found f = core::dups::find(home, home, *prog);
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - t0).count();
+        if (auto lg = log::get(log::Area::Dups)) {
+            std::size_t folders = 0;
+            for (const auto& g : f.groups) folders += g.folder;
+            lg->info("found {} groups ({} folders) in {} files, read {}, {} unreadable, reflink {}, {} ms{}{}",
+                     f.groups.size(), folders, f.files, core::scan::human_bytes(f.hashed), f.errors,
+                     f.reflink ? "yes" : "no", ms, f.cancelled ? " (cancelled)" : "",
+                     f.refused.empty() ? "" : " REFUSED: " + f.refused);
+        }
+        {
+            std::lock_guard lk(m_du_mx);
+            m_du_found = std::move(f);
+        }
+        m_dups_finished.emit();
+    });
+    m_du_tick = Glib::signal_timeout().connect(sigc::mem_fun(*this, &Shell::tick_dups), 120);
+}
+
+void Shell::on_dups_cancel() {  // handler: stop looking
+    if (m_du_progress) m_du_progress->cancel = true;
+    if (auto lg = log::get(log::Area::Dups)) lg->info("cancel requested");
+}
+
+void Shell::on_dups_found() {  // handler: the worker finished (Dispatcher -> UI thread)
+    if (m_du_worker.joinable()) m_du_worker.join();
+    m_du_tick.disconnect();
+    m_du_spinner.stop();
+    if (m_act_du_find)   m_act_du_find->set_enabled(true);
+    if (m_act_du_cancel) m_act_du_cancel->set_enabled(false);
+    {
+        std::lock_guard lk(m_du_mx);
+        m_du_shown = m_du_found;
+    }
+    if (!m_du_shown.refused.empty()) {
+        m_du_sub.set_text("Not looked: " + m_du_shown.refused);
+        m_du_states.set_visible_child("start");
+        return;
+    }
+    m_du_mode = m_du_shown.reflink ? core::dups::Mode::Share : core::dups::Mode::Trash;
+    dups_preset();
+    paint_dups();
+    m_du_states.set_visible_child("results");
+}
+
+void Shell::on_dups_mode(core::dups::Mode m) {  // handler: Share / Trash switch
+    if (m == m_du_mode) return;
+    if (m == core::dups::Mode::Share && !m_du_shown.reflink) return;
+    m_du_mode = m;
+    dups_preset();
+    paint_dups();
+}
+
+void Shell::on_dups_keep(std::size_t gi, std::size_t mi) {  // handler: make another member the keeper
+    if (gi >= m_du_shown.groups.size() || mi >= m_du_shown.groups[gi].members.size()) return;
+    auto& g = m_du_shown.groups[gi];
+    g.keep = mi;
+    g.keep_why = "you chose";
+    for (std::size_t i = 0; i < g.members.size(); ++i)
+        g.members[i].checked = m_du_mode == core::dups::Mode::Share && i != g.keep && !g.shared(i);
+    if (auto lg = log::get(log::Area::Dups)) lg->info("keep '{}'", g.members[mi].rel);
+    paint_dups();
+}
+
+void Shell::on_dups_run() {  // handler: the checked copies -> a plan -> worker -> the door
+    if (!m_door || door_busy() || m_du_worker.joinable()) return;
+    if (m_du_states.get_visible_child_name() != "results") return;   // preview first: only from the list
+    paint_preflight();
+    if (m_pf_red) { dups_gate(); return; }
+    m_du_dropped.clear();
+    core::door::Plan plan = core::dups::plan(m_home, m_du_shown, m_du_mode, m_du_dropped);
+    if (plan.actions.empty()) {
+        m_du_gate.set_text(m_du_dropped.empty() ? std::string("Nothing to do.") : m_du_dropped.front() + " -- Look again.");
+        return;
+    }
+    plan.previewed = true;   // the cards on screen were the preview
+    m_du_act_bytes = 0;
+    for (const auto& a : plan.actions) m_du_act_bytes += a.bytes;
+    m_du_act_total = plan.actions.size();
+    m_du_acting = true;
+    if (m_act_undo_action) m_act_undo_action->set_enabled(false);
+    if (m_act_du_find) m_act_du_find->set_enabled(false);
+    if (m_act_du_cancel) m_act_du_cancel->set_enabled(false);   // a half-run plan is the door's to finish
+    m_du_run_big.set_text(core::scan::human_bytes(m_du_act_bytes));
+    m_du_run_caption.set_text(m_du_mode == core::dups::Mode::Share
+        ? "Sharing blocks -- the filesystem compares every byte as it goes"
+        : "Moving copies to the Trash");
+    m_du_spinner.start();
+    m_du_states.set_visible_child("running");
+    if (auto lg = log::get(log::Area::Dups)) {
+        lg->info("run '{}': {} actions, {}", plan.label, plan.actions.size(), core::scan::human_bytes(m_du_act_bytes));
+        for (const auto& d : m_du_dropped) lg->info("  left out: {}", d);
+    }
+    m_du_act_worker = std::thread([this, plan] {
+        const auto r = m_door->run(plan);
+        {
+            std::lock_guard lk(m_du_act_mx);
+            m_du_act_result = r;
+        }
+        m_dups_acted.emit();
+    });
+}
+
+void Shell::on_dups_acted() {  // handler: the door finished (Dispatcher -> UI thread)
+    if (m_du_act_worker.joinable()) m_du_act_worker.join();
+    m_du_acting = false;
+    m_du_spinner.stop();
+    if (m_act_du_find) m_act_du_find->set_enabled(true);
+    core::door::Result r;
+    {
+        std::lock_guard lk(m_du_act_mx);
+        r = m_du_act_result;
+    }
+    if (auto lg = log::get(log::Area::Dups)) {
+        lg->info("run: {} done, {} failed", r.done, r.failed);
+        for (const auto& m : r.messages) lg->warn("  {}", m);
+    }
+    const bool share = m_du_mode == core::dups::Mode::Share;
+    std::string left;
+    if (!m_du_dropped.empty())
+        left = " " + std::to_string(m_du_dropped.size()) + " left out (changed since Look) -- see the log.";
+    if (r.ok) {
+        m_du_done_big.set_text(core::scan::human_bytes(m_du_act_bytes));
+        m_du_done_caption.set_text(share
+            ? "of copies now share their keepers' blocks -- " + std::to_string(r.done) + (r.done == 1 ? " file" : " files") +
+              ". Every file is still where it was, with the same contents. The space is free now, unless a "
+              "snapshot still holds the old blocks." + left
+            : "went to the Trash -- " + std::to_string(r.done) + (r.done == 1 ? " copy. Undo puts it back." : " copies. Undo puts them back.") +
+              " The space returns when you empty the Trash." + left);
+    } else if (r.done == 0) {
+        m_du_done_big.set_text(share ? "Nothing shared" : "Nothing moved");
+        m_du_done_caption.set_text(r.messages.empty() ? std::string("The door refused the plan.") : r.messages.front());
+    } else {
+        m_du_done_big.set_text(std::to_string(r.done) + " of " + std::to_string(m_du_act_total));
+        m_du_done_caption.set_text(std::string(share ? "were shared" : "went to the Trash") + "; " +
+                                   std::to_string(r.failed) + " could not: " +
+                                   (r.messages.empty() ? std::string("see Activity") : r.messages.front()) +
+                                   (share ? ". Those files are untouched." : ". Undo puts back what moved."));
+    }
+    m_du_states.set_visible_child("done");
+    dups_gate();
     paint_activity();
 }
 

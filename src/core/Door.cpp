@@ -4,6 +4,7 @@
 
 #include "json.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <cerrno>
 #include <cstdio>
@@ -14,6 +15,8 @@
 #include <sstream>
 
 #include <fcntl.h>
+#include <linux/fs.h>        // FIDEDUPERANGE
+#include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -32,13 +35,14 @@ const char* verb_name(Verb v) {
         case Verb::Move:  return "move";
         case Verb::Write: return "write";
         case Verb::Clone: return "clone";
+        case Verb::Dedupe: return "dedupe";
     }
     return "?";
 }
 bool creates(Verb v) { return v == Verb::Write || v == Verb::Clone; }
 
 const std::vector<Verb>& verbs() {
-    static const std::vector<Verb> v = {Verb::Trash, Verb::Move, Verb::Write, Verb::Clone};
+    static const std::vector<Verb> v = {Verb::Trash, Verb::Move, Verb::Write, Verb::Clone, Verb::Dedupe};
     return v;
 }
 
@@ -243,6 +247,22 @@ std::string Door::refusal(const Action& a) const {
     if (auto w = walk(a.from, false); !w.empty()) return w;
     if (inside(a.from, m_data) || inside(m_data, a.from)) return "Rouster's own records: " + a.from;
 
+    if (a.verb == Verb::Dedupe) {
+        if (bad(a.to)) return "not a clean absolute path: " + a.to;
+        if (!inside(a.to, m_home) || a.to == m_home) return "outside the home folder: " + a.to;
+        if (auto w = walk(a.to, false); !w.empty()) return w;
+        for (const auto* p : {&a.from, &a.to}) {
+            if (inside(*p, m_trash)) return "in the Trash: " + *p;
+            if (inside(*p, m_data)) return "Rouster's own records: " + *p;
+        }
+        struct stat sa{}, sb{};
+        if (::lstat(a.from.c_str(), &sa) != 0 || !S_ISREG(sa.st_mode)) return "not a file: " + a.from;
+        if (::lstat(a.to.c_str(), &sb) != 0 || !S_ISREG(sb.st_mode)) return "not a file: " + a.to;
+        if (sa.st_dev != sb.st_dev) return "on different filesystems: " + a.to;
+        if (sa.st_ino == sb.st_ino) return "the same file (a hard link): " + a.to;
+        if (sa.st_size != sb.st_size) return "not the same size: " + a.to;
+        return {};
+    }
     if (a.verb == Verb::Trash) {
         if (inside(a.from, m_trash) || inside(m_trash, a.from)) return "already in the Trash: " + a.from;
         return {};
@@ -286,6 +306,50 @@ bool Door::reserve_trash(const std::string& path, std::int64_t when, std::string
     }
     err = "no free name in the Trash";
     return false;
+}
+
+// Share `to`'s blocks with `from`'s. The kernel locks both, compares the bytes,
+// and shares only what is equal -- if anything differs it reports DIFFERS and
+// that range is left exactly as it was. Opened read-only: the owner may dedupe.
+bool Door::do_dedupe(Record& r) {
+    const int src = ::open(r.from.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    const int dst = ::open(r.to.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    const auto close_both = [&] { if (src >= 0) ::close(src); if (dst >= 0) ::close(dst); };
+    if (src < 0 || dst < 0) { r.error = std::strerror(errno); close_both(); return false; }
+    struct stat st{};
+    ::fstat(src, &st);
+    const std::uint64_t size = static_cast<std::uint64_t>(st.st_size);
+    constexpr std::uint64_t kChunk = 16ull << 20;   // btrfs takes up to 16 MiB per call
+    std::vector<char> buf(sizeof(file_dedupe_range) + sizeof(file_dedupe_range_info));
+    auto* range = reinterpret_cast<file_dedupe_range*>(buf.data());
+    for (std::uint64_t off = 0; off < size;) {
+        std::memset(buf.data(), 0, buf.size());
+        range->src_offset = off;
+        range->src_length = std::min(kChunk, size - off);
+        range->dest_count = 1;
+        range->info[0].dest_fd = dst;
+        range->info[0].dest_offset = off;
+        if (::ioctl(src, FIDEDUPERANGE, range) != 0) {
+            r.error = errno == EOPNOTSUPP || errno == EINVAL || errno == ENOTTY
+                          ? "this filesystem can't share blocks" : std::string(std::strerror(errno));
+            close_both();
+            return false;
+        }
+        if (range->info[0].status == FILE_DEDUPE_RANGE_DIFFERS) {
+            r.error = "the contents differ now -- nothing more was shared";
+            close_both();
+            return false;
+        }
+        if (range->info[0].status < 0) {
+            r.error = std::strerror(-range->info[0].status);
+            close_both();
+            return false;
+        }
+        if (range->info[0].bytes_deduped == 0) { r.error = "the filesystem shared nothing"; close_both(); return false; }
+        off += range->info[0].bytes_deduped;
+    }
+    close_both();
+    return true;
 }
 
 bool Door::do_trash(Record& r) {
@@ -370,6 +434,7 @@ Result Door::run(const Plan& plan) {
         r.to = a.to;
         r.when = now_s();
         if (creates(r.verb)) { if (!do_create(r, a)) { /* r.error set */ } }
+        else if (r.verb == Verb::Dedupe) { if (!identity_of(r.to, r.ident)) r.error = "vanished before it could be shared"; }
         else if (!identity_of(r.from, r.ident)) { r.error = "vanished before it could be moved"; }
         else if (r.verb == Verb::Trash && !do_trash(r)) { /* r.error set */ }
 
@@ -385,19 +450,22 @@ Result Door::run(const Plan& plan) {
             m_records.push_back(r);
             batch.records.push_back(r.id);
             Record& live = m_records.back();
-            if (rename_noreplace(live.from, live.to) == 0) {
+            const bool acted = live.verb == Verb::Dedupe ? do_dedupe(live) : rename_noreplace(live.from, live.to) == 0;
+            if (acted) {
                 live.state = State::Done;
                 append(json{{"t", "done"}, {"id", live.id}}.dump());
                 ++res.done;
             } else {
-                live.error = errno == EXDEV ? "on another filesystem -- Rouster never copies-and-deletes"
-                                            : std::string(std::strerror(errno));
+                if (live.verb != Verb::Dedupe)
+                    live.error = errno == EXDEV ? "on another filesystem -- Rouster never copies-and-deletes"
+                                                : std::string(std::strerror(errno));
                 if (!live.info.empty()) ::unlink(live.info.c_str());
                 if (creates(live.verb)) { std::string d, e; trash_now(live.from, d, e); }   // the staging copy
                 live.state = State::Failed;
                 append(json{{"t", "failed"}, {"id", live.id}, {"error", live.error}}.dump());
                 ++res.failed;
-                res.messages.push_back("failed: " + (creates(live.verb) ? live.to : live.from) + " -- " + live.error);
+                res.messages.push_back("failed: " + (creates(live.verb) || live.verb == Verb::Dedupe ? live.to : live.from) +
+                                       " -- " + live.error);
             }
         } else {
             ++res.failed;
@@ -411,6 +479,10 @@ Result Door::run(const Plan& plan) {
 bool Door::undo_one(Record& r, std::string& why) {
     Identity now{};
     if (!identity_of(r.to, now)) { why = "no longer at " + r.to; return false; }
+    if (r.verb == Verb::Dedupe) {   // nothing moved: the copy must still be the copy, then the step is closed
+        if (!(now.dev == r.ident.dev && now.ino == r.ident.ino)) { why = "something else is at " + r.to + " now"; return false; }
+        return true;
+    }
     if (creates(r.verb)) {   // nothing was there before: what was made goes to the Trash
         if (!(now.dev == r.ident.dev && now.ino == r.ident.ino && now.dir == r.ident.dir)) {
             why = "something else is at " + r.to + " now";

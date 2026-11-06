@@ -4,6 +4,7 @@
 #include "core/Door.hpp"     // s004: the one door
 #include "core/Sweep.hpp"    // s006: the first module that acts
 #include "core/Dev.hpp"      // s007: dev projects
+#include "core/Dups.hpp"     // s008: duplicates
 
 #include <gtkmm/applicationwindow.h>
 #include <giomm/menu.h>
@@ -44,6 +45,8 @@
 //   "Where does Sweep act?"              -> Shell_handlers.cpp (on_sweep_run -> m_door->run)
 //   "Where is the Dev projects page?"    -> Shell_zones.cpp   (build_dev_page); cards: Shell_helpers.cpp (paint_dev)
 //   "Where does the light clean act?"    -> Shell_handlers.cpp (on_dev_run -> m_door->run)
+//   "Where is the Duplicates page?"      -> Shell_zones.cpp   (build_dups_page); groups: Shell_helpers.cpp (paint_dups)
+//   "Where does Duplicates act?"         -> Shell_handlers.cpp (on_dups_run -> worker -> m_door->run)
 //   "Where does a write go?"             -> core/Door.* -- nowhere else (the selftest's source gate)
 // ─────────────────────────────────────────────────────────────────────────────
 namespace rouster {
@@ -66,6 +69,7 @@ private:
     void build_scan_page();                      // category: zone: Smart Scan (s002; look s005)
     void build_sweep_page();                     // category: zone: Sweep (s006)
     void build_dev_page();                       // category: zone: Dev projects (s007)
+    void build_dups_page();                      // category: zone: Duplicates (s008)
     void build_preflight_page();                 // category: zone: Preflight (s003)
     void build_activity_page();                  // category: zone: Activity (s004)
     Glib::RefPtr<Gio::Menu> build_menu();        // category: zone: hamburger model
@@ -92,6 +96,13 @@ private:
     void on_dev_confirm();                       // category: handler: the preview's act button -> worker (verify again, door)
     void on_dev_acted();                         // category: handler: retire / restore finished (Dispatcher, UI thread)
     void on_dev_known(const std::string& rel, const std::string& name, bool add);  // category: handler: promote / forget a lint name
+    void on_dups_find();                         // category: handler: look for duplicates (worker)
+    void on_dups_cancel();                       // category: handler: stop looking
+    void on_dups_found();                        // category: handler: the worker finished (Dispatcher, UI thread)
+    void on_dups_mode(core::dups::Mode m);       // category: handler: Share / Trash switch -> re-preset the checks
+    void on_dups_keep(std::size_t group, std::size_t member);   // category: handler: make another member the keeper
+    void on_dups_run();                          // category: handler: the checked copies -> a plan -> worker -> the door
+    void on_dups_acted();                        // category: handler: the door finished (Dispatcher, UI thread)
     void on_preflight();                         // category: handler: run the checklist again
     void on_pick_folder();                       // category: handler: folder chooser -> scan it
     void on_recent_open(const std::string& p);   // category: handler: scan a recent folder again
@@ -121,6 +132,11 @@ private:
     void dev_gate();                             // category: helper: the light-clean button's label + whether it may act
     void paint_dev_confirm(const std::string& title, const std::string& sub, const std::string& go,
                            const std::vector<std::string>& keep, const std::vector<std::string>& warn);  // category: helper: the retire / restore preview
+    void stop_dups();                            // category: helper: cancel + join (close, dtor)
+    bool tick_dups();                            // category: helper: the live counters while looking
+    void dups_preset();                          // category: helper: checks for the mode; nothing unshown stays checked
+    void paint_dups();                           // category: helper: mode switch, one card per group, rows with checks
+    void dups_gate();                            // category: helper: the act button's label + whether it may act
     bool door_busy() const;                      // category: helper: a retire / restore owns the door right now
     void go_to(const std::string& page);         // category: helper: select a module's sidebar row
     void note_recent(const std::string& path);   // category: helper: push onto the list + persist
@@ -230,6 +246,41 @@ private:
     core::door::Result m_dv_act_result;   // written by the worker
     std::string        m_dv_act_refused;  // the re-check said no (nothing ran)
     std::vector<std::string> m_known;     // lint names promoted to known-optional (core/Known)
+
+    // Duplicates (s008): start | running | results | done.
+    widgets::Box     m_du_page;
+    widgets::Stack   m_du_states;
+    widgets::Label   m_du_sub;
+    widgets::Button  m_du_find;       // the orb
+    widgets::Spinner m_du_spinner;
+    widgets::Label   m_du_run_big;
+    widgets::Label   m_du_run_caption;
+    widgets::Button  m_du_cancel;
+    widgets::Label   m_du_big;        // what the checked copies would free
+    widgets::Label   m_du_caption;
+    widgets::Box     m_du_list;       // mode switch + one card per group
+    widgets::Button  m_du_go;
+    widgets::Label   m_du_gate;
+    widgets::Label   m_du_done_big;
+    widgets::Label   m_du_done_caption;
+    core::dups::Found m_du_shown;     // what the cards show; checks + keepers live here (UI thread only)
+    core::dups::Mode  m_du_mode = core::dups::Mode::Share;
+    static constexpr std::size_t kDupsShown = 150;   // cards painted; groups past it are never checked
+    Glib::Dispatcher                       m_dups_finished;
+    std::shared_ptr<core::dups::Progress>  m_du_progress;
+    std::thread                            m_du_worker;
+    std::mutex                             m_du_mx;
+    core::dups::Found                      m_du_found;   // written by the worker, read after done
+    sigc::connection                       m_du_tick;
+    Glib::RefPtr<Gio::SimpleAction>        m_act_du_find, m_act_du_cancel, m_act_du_run;
+    bool               m_du_acting = false;   // UI thread: the act worker owns m_door
+    Glib::Dispatcher   m_dups_acted;
+    std::thread        m_du_act_worker;
+    std::mutex         m_du_act_mx;
+    core::door::Result m_du_act_result;
+    std::uint64_t      m_du_act_bytes = 0;
+    std::size_t        m_du_act_total = 0;
+    std::vector<std::string> m_du_dropped;   // left out of the plan, and why
 
     // Preflight (s003).
     bool            m_pf_red = true;  // a red check stops every act button; true until the first run

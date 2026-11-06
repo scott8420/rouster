@@ -28,6 +28,8 @@ add_library(rouster_core STATIC
     # Dev projects (s007): find, verify (git, read-only), lint, plan; the door acts.
     src/core/Dev.cpp
     # git as a child process (Dev reads with it; the door's Clone verb writes with it).
+    # Duplicates (s008): size -> head/tail -> full hash, folders, keep rules; read-only.
+    src/core/Dups.cpp
     src/core/Git.cpp
     # Known (s007b): the names promoted to known-optional -- Rouster's own setting.
     src/core/Known.cpp

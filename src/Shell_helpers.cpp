@@ -5,6 +5,7 @@
 
 #include <gtkmm/label.h>
 #include <gtkmm/checkbutton.h>
+#include <gtkmm/togglebutton.h>
 #include <gtkmm/listboxrow.h>
 #include <gtkmm/expander.h>
 #include <gtkmm/image.h>
@@ -335,9 +336,10 @@ void Shell::paint_preflight() {  // helper: gather + evaluate + repaint the card
     }
     m_pf_summary.set_text(std::to_string(green) + " of " + std::to_string(checks.size()) + " checks green" +
                           (red ? ", " + std::to_string(red) + " red" : std::string{}) +
-                          ". A red check stops Sweep and Dev projects until it clears.");
+                          ". A red check stops Sweep, Duplicates and Dev projects until it clears.");
     m_pf_red = red > 0;
     sweep_gate();
+    dups_gate();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -467,6 +469,183 @@ void Shell::sweep_gate() {  // helper: the act button's label + whether it may a
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Duplicates (s008). The worker runs core::dups::find (read-only: it reads to
+// hash, never writes); the cards are the preview; checks and keepers live in
+// m_du_shown. Only the first kDupsShown groups are painted, and a group that
+// isn't painted is never checked -- nothing acts that wasn't shown.
+// ─────────────────────────────────────────────────────────────────────────────
+void Shell::stop_dups() {  // helper: cancel + join (close, dtor)
+    if (m_du_progress) m_du_progress->cancel = true;
+    if (m_du_worker.joinable()) m_du_worker.join();
+    m_du_tick.disconnect();
+    if (m_du_act_worker.joinable()) m_du_act_worker.join();   // a run in flight finishes; the door stays whole
+}
+
+bool Shell::tick_dups() {  // helper: the live counters while looking
+    if (!m_du_progress) return false;
+    const int st = m_du_progress->stage.load();
+    m_du_run_big.set_text(st == 0 ? with_commas(m_du_progress->files.load()) + " files"
+                                  : scan::human_bytes(m_du_progress->hashed.load()) + " read");
+    m_du_run_caption.set_text(m_du_progress->cancel.load() ? "Stopping…" : core::dups::stage_name(st));
+    return true;
+}
+
+void Shell::dups_preset() {  // helper: checks for the mode; nothing unshown stays checked
+    core::dups::preset(m_du_shown, m_du_mode);
+    for (std::size_t gi = kDupsShown; gi < m_du_shown.groups.size(); ++gi)
+        for (auto& m : m_du_shown.groups[gi].members) m.checked = false;
+}
+
+void Shell::paint_dups() {  // helper: mode switch, one card per group, rows with checks
+    namespace du = core::dups;
+    while (auto* c = m_du_list.get_first_child()) m_du_list.remove(*c);
+    const bool share = m_du_mode == du::Mode::Share;
+
+    // The mode switch.
+    auto modes = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+    auto b_share = Gtk::make_managed<Gtk::ToggleButton>("Share blocks");
+    auto b_trash = Gtk::make_managed<Gtk::ToggleButton>("Move copies to the Trash");
+    for (auto* b : {b_share, b_trash}) { b->add_css_class("ghost"); b->add_css_class("mode"); }
+    b_trash->set_group(*b_share);
+    b_share->set_active(share);
+    b_trash->set_active(!share);
+    b_share->set_sensitive(m_du_shown.reflink);
+    b_share->set_tooltip_text(m_du_shown.reflink
+        ? "Every copy keeps its path; their blocks become one. Nothing to put back, nothing to break."
+        : "Your home folder isn't on btrfs, so its files can't share blocks.");
+    b_trash->set_tooltip_text("A checked copy goes to the Trash. Undo brings it back.");
+    b_share->signal_toggled().connect([this, b_share] { if (b_share->get_active()) on_dups_mode(core::dups::Mode::Share); });
+    b_trash->signal_toggled().connect([this, b_trash] { if (b_trash->get_active()) on_dups_mode(core::dups::Mode::Trash); });
+    modes->append(*b_share);
+    modes->append(*b_trash);
+    auto mode_why = text(share ? "Copies keep their paths and share one set of blocks -- every copy is pre-checked."
+                               : m_du_shown.reflink
+                                     ? "Only what you check goes to the Trash. Nothing is pre-checked."
+                                     : "Not btrfs here, so copies can't share blocks. Only what you check goes to the Trash.",
+                         "dim");
+    mode_why->set_wrap(true);
+    mode_why->set_hexpand(true);
+    modes->append(*mode_why);
+    m_du_list.append(*modes);
+
+    const auto date = [](std::int64_t ns) {
+        std::time_t t = static_cast<std::time_t>(ns / 1'000'000'000);
+        std::tm tm{};
+        ::localtime_r(&t, &tm);
+        char b[16];
+        std::strftime(b, sizeof b, "%Y-%m-%d", &tm);
+        return std::string(b);
+    };
+    const std::size_t n = std::min(m_du_shown.groups.size(), kDupsShown);
+    for (std::size_t gi = 0; gi < n; ++gi) {
+        const auto& g = m_du_shown.groups[gi];
+        auto card = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 4);
+        card->add_css_class("card");
+        auto head = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        auto dot = Gtk::make_managed<Gtk::Box>();
+        dot->add_css_class("dot");
+        dot->add_css_class(g.folder ? "du-folder" : "du-file");
+        dot->set_valign(Gtk::Align::CENTER);
+        head->append(*dot);
+        const std::string name = std::filesystem::path(g.members[g.keep].rel).filename().string();
+        auto title = text(g.folder ? name + "/  ·  a folder of " + with_commas(g.files) + (g.files == 1 ? " file" : " files")
+                                   : name, "card-title");
+        title->set_hexpand(true);
+        title->set_ellipsize(Pango::EllipsizeMode::MIDDLE);
+        head->append(*title);
+        head->append(*text(scan::human_bytes(g.bytes) + " × " + std::to_string(g.members.size()), "card-sub", 1.0f));
+        card->append(*head);
+
+        std::vector<std::size_t> order{g.keep};   // the keeper's row first
+        for (std::size_t i = 0; i < g.members.size(); ++i) if (i != g.keep) order.push_back(i);
+        for (std::size_t i : order) {
+            const auto& m = g.members[i];
+            const bool keeper = i == g.keep;
+            auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 12);
+            row->add_css_class("sweep-row");
+            auto cb = Gtk::make_managed<Gtk::CheckButton>();
+            cb->set_active(!keeper && m.checked);
+            cb->set_sensitive(!keeper);
+            cb->set_tooltip_text(keeper ? "The keeper -- never acted on" : share ? "Share this copy's blocks with the keeper"
+                                                                                 : "Send this copy to the Trash");
+            cb->signal_toggled().connect([this, cb, gi, i] {
+                if (gi < m_du_shown.groups.size() && i < m_du_shown.groups[gi].members.size())
+                    m_du_shown.groups[gi].members[i].checked = cb->get_active();
+                dups_gate();
+            });
+            row->append(*cb);
+            auto path = text("~/" + m.rel + (g.folder ? "/" : ""), "detail-path");
+            path->set_hexpand(true);
+            path->set_ellipsize(Pango::EllipsizeMode::MIDDLE);
+            path->set_tooltip_text(m_home + "/" + m.rel);
+            row->append(*path);
+            row->append(*text(date(m.mtime_ns), "dim", 1.0f));
+            if (keeper) {
+                auto chip = text("KEEP · " + g.keep_why, "status-chip");
+                chip->add_css_class("du-keep");
+                row->append(*chip);
+            } else {
+                if (g.shared(i))
+                    row->append(*text(share ? "already shares blocks" : "shares blocks -- frees nothing", "dim", 1.0f));
+                auto keep = Gtk::make_managed<Gtk::Button>("Keep this");
+                keep->add_css_class("ghost");
+                keep->add_css_class("small");
+                keep->set_tooltip_text("Make this the one that stays; the others become the copies");
+                keep->signal_clicked().connect([this, gi, i] { on_dups_keep(gi, i); });
+                row->append(*keep);
+            }
+            card->append(*row);
+        }
+        m_du_list.append(*card);
+    }
+    if (m_du_shown.groups.empty())
+        m_du_list.append(*text("No duplicates of 4 KB or more -- every file here is one of a kind.", "hero-caption", 0.5f));
+
+    std::string foot = "Looked at " + with_commas(m_du_shown.files) + " files and read " +
+                       scan::human_bytes(m_du_shown.hashed) + " to compare them. Hidden folders, build output and "
+                       "anything protected were left out. ";
+    if (m_du_shown.groups.size() > kDupsShown)
+        foot += with_commas(m_du_shown.groups.size() - kDupsShown) + " smaller groups aren't shown, and stay unchecked. ";
+    if (m_du_shown.cancelled) foot += "Stopped early -- the list is partial. ";
+    if (m_du_shown.errors) foot += with_commas(m_du_shown.errors) + " things could not be read. ";
+    auto f = text(foot, "dim");
+    f->set_wrap(true);
+    m_du_list.append(*f);
+    dups_gate();
+}
+
+void Shell::dups_gate() {  // helper: the act button's label + whether it may act
+    namespace du = core::dups;
+    const bool share = m_du_mode == du::Mode::Share;
+    std::uint64_t gain = 0, all = 0;
+    std::size_t copies = 0;
+    for (const auto& g : m_du_shown.groups) {
+        gain += g.gain(m_du_mode);
+        all += g.bytes * (g.members.size() - 1);
+        for (std::size_t i = 0; i < g.members.size(); ++i)
+            if (i != g.keep && g.members[i].checked && !(share && g.shared(i))) ++copies;
+    }
+    m_du_big.set_text(scan::human_bytes(gain));
+    m_du_caption.set_text(std::string(share ? "freed by sharing" : "to the Trash") + ", of " + scan::human_bytes(all) +
+                          " in copies · " + with_commas(m_du_shown.groups.size()) + " groups · " +
+                          with_commas(copies) + (copies == 1 ? " copy" : " copies") + " checked");
+    const std::string nc = with_commas(copies) + (copies == 1 ? " copy" : " copies");
+    m_du_go.set_label(!copies ? (share ? "Share blocks" : "Move to the Trash")
+                              : share ? "Share blocks of " + nc : "Move " + nc + " to the Trash");
+    const bool busy = m_du_worker.joinable() || door_busy();
+    if (m_pf_red)
+        m_du_gate.set_text("Preflight has a red check. Duplicates waits until it clears -- see Preflight.");
+    else if (!copies)
+        m_du_gate.set_text("Nothing checked.");
+    else if (share)
+        m_du_gate.set_text("One step. Every path and every byte stays; the filesystem checks each pair is "
+                           "identical before it shares a block.");
+    else
+        m_du_gate.set_text("Everything goes to the Trash as one step; Undo brings it all back.");
+    if (m_act_du_run) m_act_du_run->set_enabled(copies > 0 && !m_pf_red && !busy);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Dev projects (s007). The worker runs core::dev::find (read-only, git with
 // optional locks off); the cards are the preview; checks live in m_dv_shown.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -477,8 +656,8 @@ void Shell::stop_dev() {  // helper: cancel + join (close, dtor)
     if (m_dv_act_worker.joinable()) m_dv_act_worker.join();   // a clone in flight finishes; the door stays whole
 }
 
-bool Shell::door_busy() const {  // helper: a retire / restore owns the door right now
-    return m_dv_acting;
+bool Shell::door_busy() const {  // helper: a retire / restore / duplicates run owns the door right now
+    return m_dv_acting || m_du_acting;
 }
 
 bool Shell::tick_dev() {  // helper: the live counters while looking

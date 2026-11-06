@@ -40,18 +40,25 @@
 // Their undo is not a rename back (there was nothing before): the created
 // thing goes to the Trash, after the same identity check.
 //
+// One verb MOVES NOTHING (s008, Duplicates): Dedupe shares the blocks of `to`
+// with `from` (FIDEDUPERANGE -- the kernel compares the bytes itself, under
+// lock, and shares nothing if they differ; a stale hash can't do harm). Both
+// paths stay, both contents stay; only free space changes. Its undo puts no
+// bytes anywhere: the files are and were identical, so the step is closed
+// with nothing to move (re-splitting blocks is not a way back, it's a copy).
+//
 // Hard-delete does not exist here, and will not (§1.1).
 // ─────────────────────────────────────────────────────────────────────────────
 namespace rouster::core::door {
 
-enum class Verb { Trash, Move, Write, Clone };
-const char* verb_name(Verb v);   // "trash", "move", "write", "clone"
+enum class Verb { Trash, Move, Write, Clone, Dedupe };
+const char* verb_name(Verb v);   // "trash", "move", "write", "clone", "dedupe"
 bool creates(Verb v);            // Write, Clone: `to` is made; `from` is unused
 // THE VERB TABLE the selftest gate walks: a verb added to the enum and not
 // here fails the gate's count; every verb here is run through the door,
 // checked to be one step, and undone back to the exact tree.
 const std::vector<Verb>& verbs();
-inline constexpr int kVerbCount = 4;
+inline constexpr int kVerbCount = 5;
 inline constexpr std::size_t kWriteMax = 64 * 1024;   // Write is for small notes (RESTORE.txt)
 
 struct Action {
@@ -65,6 +72,7 @@ struct Action {
     std::string url;             // Clone: what to clone
     std::string branch;          // Clone: check this branch out ("" = the remote's default)
     std::string commit;          // Clone: must be this commit or an ancestor of HEAD ("" = any)
+    // Dedupe: `from` is the keeper (its blocks), `to` the copy that will share them.
 };
 
 struct Plan {
@@ -140,6 +148,7 @@ private:
     bool trash_now(const std::string& path, std::string& dest, std::string& err);   // reserve + rename
     bool do_create(Record& r, const Action& a);              // Write / Clone into staging (r.from)
     bool do_move(Record& r);
+    bool do_dedupe(Record& r);                               // FIDEDUPERANGE, in chunks
     bool undo_one(Record& r, std::string& why);
     Record* find(std::uint64_t id);
 

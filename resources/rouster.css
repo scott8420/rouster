@@ -29,6 +29,10 @@ window.rouster.page-dev {
   background-image: radial-gradient(circle at 75% 15%, rgba(251,146,60,0.50), transparent 55%),
                     linear-gradient(160deg, #4a2511 0%, #6b2f12 55%, #2e160b 100%);
 }
+window.rouster.page-dups {
+  background-image: radial-gradient(circle at 75% 15%, rgba(56,189,248,0.45), transparent 55%),
+                    linear-gradient(160deg, #0c2f4a 0%, #0e4a6e 55%, #0a2236 100%);
+}
 window.rouster.page-preflight {
   background-image: radial-gradient(circle at 75% 15%, rgba(45,212,191,0.45), transparent 55%),
                     linear-gradient(160deg, #10394a 0%, #134e5e 55%, #0c2734 100%);
@@ -77,6 +81,10 @@ window.page-sweep button.orb {
 window.page-dev button.orb {
   background-image: linear-gradient(160deg, #fdba74 0%, #f97316 55%, #b45309 100%);
   box-shadow: 0 0 0 6px rgba(255,255,255,0.10), 0 10px 40px rgba(251,146,60,0.50);
+}
+window.page-dups button.orb {
+  background-image: linear-gradient(160deg, #7dd3fc 0%, #0ea5e9 55%, #0369a1 100%);
+  box-shadow: 0 0 0 6px rgba(255,255,255,0.10), 0 10px 40px rgba(56,189,248,0.45);
 }
 window.page-preflight button.orb {
   background-image: linear-gradient(160deg, #5eead4 0%, #14b8a6 55%, #0e7490 100%);
@@ -162,3 +170,13 @@ expander title { color: #ffffff; }
 .drift-tag { font-size: 0.78em; font-weight: 700; min-width: 132px; }
 .dv-retired  { background-color: #94a3b8; }
 button.ghost.small { padding: 2px 12px; font-size: 0.88em; min-height: 0; }
+
+/* Duplicates (s008): a dot per group kind, the keeper chip, the mode switch. */
+.du-file   { background-color: #38bdf8; }
+.du-folder { background-color: #a78bfa; }
+.du-keep   { background-color: rgba(56,189,248,0.22); color: #e0f2fe; }
+window.page-dups button.act {
+  background-image: linear-gradient(160deg, #7dd3fc 0%, #0284c7 100%);
+  box-shadow: 0 6px 22px rgba(56,189,248,0.35);
+}
+button.ghost.mode:checked { background: rgba(255,255,255,0.24); border-color: rgba(255,255,255,0.55); }

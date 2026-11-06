@@ -26,6 +26,12 @@ void Shell::bind_actions() {  // bindings: actions + recents group
     m_act_dv_run    = add_action("dev-run",    sigc::mem_fun(*this, &Shell::on_dev_run));
     m_act_dv_cancel->set_enabled(false);
     m_act_dv_run->set_enabled(false);
+    m_act_du_find   = add_action("dups-find",   sigc::mem_fun(*this, &Shell::on_dups_find));
+    m_act_du_cancel = add_action("dups-cancel", sigc::mem_fun(*this, &Shell::on_dups_cancel));
+    m_act_du_run    = add_action("dups-run",    sigc::mem_fun(*this, &Shell::on_dups_run));
+    m_act_du_cancel->set_enabled(false);
+    m_act_du_run->set_enabled(false);
+    add_action("go-dups",       [this]() { go_to("dups"); });
     add_action("preflight",     sigc::mem_fun(*this, &Shell::on_preflight));
     add_action("dump-registry", sigc::mem_fun(*this, &Shell::on_dump_registry));
     add_action("about",         sigc::mem_fun(*this, &Shell::on_about));

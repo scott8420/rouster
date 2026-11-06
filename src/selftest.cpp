@@ -24,6 +24,7 @@
 #include "core/Sweep.hpp"
 #include "core/Dev.hpp"
 #include "core/Known.hpp"
+#include "core/Dups.hpp"
 
 #include <algorithm>
 #include <array>
@@ -35,6 +36,7 @@
 #include <fstream>
 #include <sstream>
 #include <set>
+#include <random>
 #include <utility>
 
 #include <fcntl.h>
@@ -74,6 +76,31 @@ bool put(const fs::path& home, const std::string& rel, std::size_t bytes) {
         left -= n;
     }
     return static_cast<bool>(o);
+}
+
+// Exact bytes (Duplicates needs content that differs where we say it does).
+bool put_bytes(const fs::path& home, const std::string& rel, const std::string& data) {
+    const fs::path p = home / rel;
+    std::error_code ec;
+    fs::create_directories(p.parent_path(), ec);
+    std::ofstream o(p, std::ios::binary);
+    o.write(data.data(), static_cast<std::streamsize>(data.size()));
+    return static_cast<bool>(o);
+}
+std::string noise(std::size_t n, unsigned seed) {
+    std::mt19937 rng(seed);
+    std::string s(n, '\0');
+    for (auto& c : s) c = static_cast<char>(rng() & 0xff);
+    return s;
+}
+// Where a fixture can share blocks (s008): the temp dir if it is btrfs, else
+// /var/tmp if that is (Fedora: /tmp is tmpfs, /var/tmp is on the btrfs root),
+// else the temp dir (Dedupe is then checked to fail cleanly).
+fs::path share_base() {
+    const fs::path t = fs::temp_directory_path();
+    if (rouster::core::dups::can_share(t.string())) return t;
+    if (rouster::core::dups::can_share("/var/tmp")) return "/var/tmp";
+    return t;
 }
 
 // Expected file counts per kind are written next to the tree they describe.
@@ -286,11 +313,29 @@ bool make_dev_fixture(const fs::path& home, const fs::path& remotes) {
 }
 }  // namespace
 
+// The duplicates a drive should show (s008): a double-dumped backup folder,
+// a download saved twice, a "copy" of a photo, one file of the backup elsewhere.
+bool make_dups_fixture(const fs::path& home) {
+    bool ok = true;
+    for (const char* top : {"Backups/2024", "Backups/2024 (2)"}) {
+        ok &= put_bytes(home, std::string(top) + "/notes.odt", noise(60000, 21));
+        ok &= put_bytes(home, std::string(top) + "/photos/beach.jpg", noise(240000, 22));
+        ok &= put_bytes(home, std::string(top) + "/photos/dune.jpg", noise(180000, 23));
+    }
+    ok &= put_bytes(home, "Documents/invoice.pdf", noise(90000, 24));
+    ok &= put_bytes(home, "Downloads/invoice (1).pdf", noise(90000, 24));
+    ok &= put_bytes(home, "Pictures/cat.png", noise(120000, 25));
+    ok &= put_bytes(home, "Pictures/cat copy.png", noise(120000, 25));
+    ok &= put_bytes(home, "Desktop/beach.jpg", noise(240000, 22));
+    return ok;
+}
+
 int main(int argc, char** argv) {
     // `--make-fixture DIR`: build the fixture home for an Xvfb drive, then stop.
     if (argc == 3 && std::string(argv[1]) == "--make-fixture") {
         const bool ok = make_fixture(argv[2]) &&
-                        make_dev_fixture(argv[2], std::string(argv[2]) + "_remotes");   // s007
+                        make_dev_fixture(argv[2], std::string(argv[2]) + "_remotes") &&   // s007
+                        make_dups_fixture(argv[2]);                                         // s008
         std::cout << (ok ? "fixture: " : "fixture FAILED (exists and not empty?): ") << argv[2] << "\n";
         return ok ? 0 : 1;
     }
@@ -755,7 +800,7 @@ int main(int argc, char** argv) {
         std::cout << "\n-- door --\n";
         namespace dr = core::door;
         using dr::Verb;
-        const fs::path home = fs::temp_directory_path() / "rouster_selftest_door";
+        const fs::path home = share_base() / "rouster_selftest_door";
         std::error_code ec;
         fs::remove_all(home, ec);
         make_fixture(home);
@@ -782,6 +827,9 @@ int main(int argc, char** argv) {
         // The verb table, walked: through the door, one step, undo -> the exact tree.
         check("gate: the verb table holds every verb", dr::verbs().size() == dr::kVerbCount);
         fs::create_directories(home / "Documents/archive", ec);
+        put_bytes(home, "Documents/twin-a.bin", noise(70000, 7));   // Dedupe's pair (s008)
+        put_bytes(home, "Documents/twin-b.bin", noise(70000, 7));
+        const bool can_share = core::dups::can_share(H);
         // Clone's source: a bare repo OUTSIDE home (s007b).
         const fs::path gate_remote = fs::temp_directory_path() / "rouster_selftest_door_remote";
         fs::remove_all(gate_remote, ec);
@@ -809,6 +857,26 @@ int main(int argc, char** argv) {
                 case Verb::Write: a.verb = v; a.to = H + "/Documents/RESTORE.txt"; a.content = "url: x\n"; break;
                 case Verb::Clone: a.verb = v; a.to = H + "/Documents/clone"; a.url = (gate_remote / "r.git").string();
                                   a.branch = "main"; break;
+                case Verb::Dedupe: a.verb = v; a.from = H + "/Documents/twin-a.bin"; a.to = H + "/Documents/twin-b.bin"; break;
+            }
+            if (v == Verb::Dedupe) {
+                // Moves nothing: the tree is the same before and after; the blocks are what change.
+                const auto r = door.run(plan(name + " one", {a}));
+                if (!can_share) {
+                    check("gate/dedupe: (no btrfs at " + H + ") fails cleanly, tree exact",
+                          !r.ok && r.failed == 1 && files_snapshot(home) == before,
+                          r.messages.empty() ? "" : r.messages.front());
+                    door.undo();
+                    continue;
+                }
+                check("gate/dedupe: done through the door", r.ok && r.done == 1, r.messages.empty() ? "" : r.messages.front());
+                check("gate/dedupe: one step", door.batches().size() == batches + 1 && door.undo_label() == name + " one");
+                check("gate/dedupe: blocks shared, every path / size / mtime / inode unchanged",
+                      core::dups::same_blocks(a.from, a.to) && files_snapshot(home) == before);
+                const auto u = door.undo();
+                check("gate/dedupe: undo closes the step, tree exact", u.ok && files_snapshot(home) == before,
+                      u.messages.empty() ? "" : u.messages.front());
+                continue;
             }
             const auto r = door.run(plan(name + " one", {a}));
             check("gate/" + name + ": done through the door", r.ok && r.done == 1,
@@ -1435,6 +1503,214 @@ int main(int argc, char** argv) {
         fs::remove_all(remotes, ec);
     }
 
+    // -- Duplicates: find (read-only) -> keep rules -> plan -> the door (s008) --
+    {
+        std::cout << "\n-- duplicates --\n";
+        namespace du = core::dups;
+        namespace dr = core::door;
+        const fs::path home = share_base() / "rouster_selftest_dups";
+        std::error_code ec;
+        fs::remove_all(home, ec);
+        fs::create_directories(home, ec);
+        const std::string H = home.string();
+        const bool can_share = du::can_share(H);
+        std::cout << "  (fixture at " << H << (can_share ? ", btrfs: Share is real)\n" : ", not btrfs: Share must fail cleanly)\n");
+        // keeper by place / by name
+        put_bytes(home, "Documents/report.pdf", noise(20000, 1));
+        put_bytes(home, "Downloads/report (1).pdf", noise(20000, 1));
+        put_bytes(home, "Pictures/a.jpg", noise(50000, 2));
+        put_bytes(home, "Pictures/a copy.jpg", noise(50000, 2));
+        // too small to list
+        put_bytes(home, "Documents/s1.txt", noise(100, 3));
+        put_bytes(home, "Documents/s2.txt", noise(100, 3));
+        // same size, same head and tail, different middle: only the whole hash tells
+        std::string mid = noise(80000, 4);
+        put_bytes(home, "Music/x.bin", mid);
+        mid[40000] ^= 1;
+        put_bytes(home, "Music/y.bin", mid);
+        // hard links are one file
+        put_bytes(home, "Videos/h1.bin", noise(30000, 5));
+        fs::create_hard_link(home / "Videos/h1.bin", home / "Videos/h2.bin", ec);
+        // a double-dumped backup: two whole folders, plus one file of it elsewhere
+        for (const char* top : {"Backups/2024", "Backups/2024 (2)"}) {
+            put_bytes(home, std::string(top) + "/p1.dat", noise(10000, 6));
+            put_bytes(home, std::string(top) + "/sub/p2.dat", noise(8000, 7));
+            put_bytes(home, std::string(top) + "/empty.txt", "");
+        }
+        put_bytes(home, "Documents/p1copy.dat", noise(10000, 6));
+        // folders that differ only by a hidden file: not folder copies, the files still are
+        put_bytes(home, "Old/a/q.dat", noise(9000, 8));
+        put_bytes(home, "Old/b/q.dat", noise(9000, 8));
+        put_bytes(home, "Old/b/.hidden", "x");
+        // never seen: hidden, protected, build trees
+        put_bytes(home, ".cache/d1.bin", noise(9000, 9));
+        put_bytes(home, ".cache/d2.bin", noise(9000, 9));
+        put_bytes(home, "Develop/w/fixes/f.bin", noise(9000, 10));
+        put_bytes(home, "Develop/w/notes/f.bin", noise(9000, 10));
+        put_bytes(home, "Develop/p/build/CMakeCache.txt", "x");
+        put_bytes(home, "Develop/p/build/big.o", noise(9000, 11));
+        put_bytes(home, "Develop/q/big.o", noise(9000, 11));
+        fs::create_directories(home / ".local/share/Trash/files", ec);   // a home has a Trash already
+        fs::create_directories(home / ".local/share/Trash/info", ec);
+        fs::create_directories(home / ".local/share/rouster", ec);
+        // keep rules, alone
+        check("dups: copy_like -- 'x (2).pdf', 'Copy of x', 'x - Copy.txt', 'x_copy', 'x copy 3' yes; 'copyright.txt', 'x2.pdf' no",
+              du::copy_like("x (2).pdf") && du::copy_like("Copy of x") && du::copy_like("x - Copy.txt") &&
+              du::copy_like("x_copy") && du::copy_like("x copy 3") && !du::copy_like("copyright.txt") &&
+              !du::copy_like("x2.pdf"));
+
+        const std::string before = files_snapshot(home);
+        du::Progress prog;
+        du::Found f = du::find(H, H, prog);
+        check("dups: find changes nothing", files_snapshot(home) == before && f.refused.empty() && prog.done);
+        check("dups: reflink flag = the filesystem's", f.reflink == can_share);
+        const auto find_group = [&](const std::string& rel) -> du::Group* {
+            for (auto& g : f.groups)
+                for (auto& m : g.members) if (m.rel == rel) return &g;
+            return nullptr;
+        };
+        const auto keeper = [](const du::Group* g) { return g ? g->members[g->keep].rel : std::string("-"); };
+        std::string listed;
+        for (const auto& g : f.groups) {
+            listed += g.folder ? "[D" : "[F";
+            for (const auto& m : g.members) listed += " " + m.rel;
+            listed += "] ";
+        }
+        check("dups: 5 groups -- 1 folder, 4 files", f.groups.size() == 5 && f.groups[0].folder, listed);
+        check("dups: keeper not in Downloads", keeper(find_group("Downloads/report (1).pdf")) == "Documents/report.pdf" &&
+              find_group("Documents/report.pdf")->keep_why == "not in Downloads");
+        check("dups: keeper has the original name", keeper(find_group("Pictures/a copy.jpg")) == "Pictures/a.jpg" &&
+              find_group("Pictures/a.jpg")->keep_why == "the original name");
+        check("dups: under 4 KB not listed", !find_group("Documents/s1.txt"));
+        check("dups: same head and tail, different middle -> not duplicates", !find_group("Music/x.bin"));
+        check("dups: hard links are one file, not duplicates", !find_group("Videos/h1.bin"));
+        {
+            const du::Group* g = find_group("Backups/2024");
+            check("dups: the double-dumped backup is ONE folder group, 3 files, keeper by name",
+                  g && g->folder && g->members.size() == 2 && g->files == 3 && g->inner.size() == 3 &&
+                  keeper(g) == "Backups/2024" && !find_group("Backups/2024/sub") && !find_group("Backups/2024 (2)/p1.dat"),
+                  listed);
+            const du::Group* p1 = find_group("Documents/p1copy.dat");
+            check("dups: a file inside the folder copy isn't listed again; the keeper side's still is",
+                  p1 && p1->members.size() == 2 && find_group("Backups/2024/p1.dat") == p1);
+        }
+        check("dups: a hidden file in a folder -> no folder group, its files still are",
+              !find_group("Old/b") && find_group("Old/a/q.dat") && find_group("Old/a/q.dat") == find_group("Old/b/q.dat"));
+        check("dups: never seen -- hidden, protected (fixes/), build trees",
+              !find_group(".cache/d1.bin") && !find_group("Develop/w/notes/f.bin") && !find_group("Develop/q/big.o"));
+        check("dups: hashing read only what it had to", f.hashed > 0 && f.hashed < 2 * 400000, std::to_string(f.hashed));
+
+        // Trash mode: nothing pre-checked (only when chosen).
+        du::preset(f, du::Mode::Trash);
+        std::vector<std::string> dropped;
+        check("dups: Trash mode pre-checks nothing -> an empty plan",
+              du::plan(H, f, du::Mode::Trash, dropped).actions.empty());
+        dr::Door door(H, H + "/.local/share/rouster");
+        door.load();
+        {
+            du::Group* g = find_group("Downloads/report (1).pdf");
+            for (auto& m : g->members) m.checked = m.rel == "Downloads/report (1).pdf";
+            dropped.clear();
+            dr::Plan p = du::plan(H, f, du::Mode::Trash, dropped);
+            check("dups: one copy checked -> one Trash action; the door refuses it unpreviewed",
+                  p.actions.size() == 1 && p.actions[0].verb == dr::Verb::Trash && !door.run(p).ok);
+            p.previewed = true;
+            const auto r = door.run(p);
+            check("dups: run -> the copy in the Trash, the keeper stays",
+                  r.ok && !fs::exists(home / "Downloads/report (1).pdf") && fs::exists(home / "Documents/report.pdf") &&
+                  fs::exists(home / ".local/share/Trash/files/report (1).pdf"));
+            const auto u = door.undo();
+            check("dups: undo -> exact", u.ok && files_snapshot(home) == before);
+            for (auto& m : g->members) m.checked = false;
+        }
+        {   // the keeper never goes with its copies
+            du::Group* fg = find_group("Backups/2024");
+            fg->keep = 1;                                   // keep "2024 (2)": "2024" is now the copy
+            fg->members[0].checked = true;
+            du::Group* pg = find_group("Documents/p1copy.dat");   // keeper Backups/2024/p1.dat -- inside the trashed copy
+            for (auto& m : pg->members) m.checked = m.rel == "Documents/p1copy.dat";
+            dropped.clear();
+            const dr::Plan p = du::plan(H, f, du::Mode::Trash, dropped);
+            const bool only_folder = p.actions.size() == 1 && p.actions[0].from == H + "/Backups/2024";
+            check("dups: a keeper inside a trashed folder -> its group left out, said why",
+                  only_folder && dropped.size() == 1 && dropped[0].find("would go to the Trash") != std::string::npos,
+                  dropped.empty() ? "" : dropped[0]);
+            fg->keep = 0; fg->members[0].checked = false;
+            for (auto& m : pg->members) m.checked = false;
+        }
+        {   // changed since Look
+            du::Group* g = find_group("Pictures/a copy.jpg");
+            for (auto& m : g->members) m.checked = m.rel == "Pictures/a copy.jpg";
+            struct timespec ts[2] = {{1000000000, 0}, {1000000000, 0}};
+            ::utimensat(AT_FDCWD, (home / "Pictures/a copy.jpg").c_str(), ts, 0);
+            dropped.clear();
+            const dr::Plan p = du::plan(H, f, du::Mode::Trash, dropped);
+            check("dups: a copy changed since Look -> left out, said why",
+                  p.actions.empty() && dropped.size() == 1 && dropped[0].find("changed since Look") != std::string::npos);
+            for (auto& m : g->members) m.checked = false;
+        }
+        // Fresh look for Share (the mtime above moved).
+        du::Progress prog2;
+        f = du::find(H, H, prog2);
+        const std::string before2 = files_snapshot(home);
+        du::preset(f, du::Mode::Share);
+        dropped.clear();
+        dr::Plan sp = du::plan(H, f, du::Mode::Share, dropped);
+        std::size_t inner_acts = 0;
+        for (const auto& a : sp.actions) if (a.to.find("/Backups/2024 (2)/") != std::string::npos) ++inner_acts;
+        check("dups: Share mode -> a Dedupe per copy; the folder's files >= 4 KB each (empty.txt not)",
+              sp.actions.size() == 6 && inner_acts == 2 &&
+              std::all_of(sp.actions.begin(), sp.actions.end(), [](auto& a) { return a.verb == dr::Verb::Dedupe; }),
+              std::to_string(sp.actions.size()));
+        sp.previewed = true;
+        const auto r = door.run(sp);
+        if (can_share) {
+            check("dups: share run -> every pair shares its blocks", r.ok && r.done == sp.actions.size() &&
+                  std::all_of(sp.actions.begin(), sp.actions.end(), [](auto& a) { return du::same_blocks(a.from, a.to); }),
+                  r.messages.empty() ? "" : r.messages.front());
+            check("dups: ...and every path, size, mtime, inode is as it was", files_snapshot(home) == before2);
+            du::Progress prog3;
+            du::Found again = du::find(H, H, prog3);
+            std::uint64_t gain = 0;
+            for (const auto& g : again.groups) gain += g.gain(du::Mode::Share);
+            check("dups: Look again -> already shared, nothing pre-checked, nothing to gain", gain == 0);
+        } else {
+            check("dups: share run (not btrfs) -> fails cleanly, tree exact",
+                  !r.ok && r.done == 0 && files_snapshot(home) == before2, r.messages.empty() ? "" : r.messages.front());
+        }
+        const auto u = door.undo();
+        check("dups: undo the share -> exact", files_snapshot(home) == before2, u.messages.empty() ? "" : u.messages.front());
+        {   // door policy for Dedupe
+            dr::Action hl; hl.verb = dr::Verb::Dedupe; hl.from = H + "/Videos/h1.bin"; hl.to = H + "/Videos/h2.bin";
+            dr::Action sz; sz.verb = dr::Verb::Dedupe; sz.from = H + "/Pictures/a.jpg"; sz.to = H + "/Documents/report.pdf";
+            dr::Action pr; pr.verb = dr::Verb::Dedupe; pr.from = H + "/Develop/w/notes/f.bin"; pr.to = H + "/Develop/w/fixes/f.bin";
+            dr::Action dir; dir.verb = dr::Verb::Dedupe; dir.from = H + "/Old/a"; dir.to = H + "/Old/b";
+            dr::Action out; out.verb = dr::Verb::Dedupe; out.from = H + "/Pictures/a.jpg"; out.to = "/etc/hostname";
+            check("door: dedupe refuses -- a hard link, different sizes, protected, a folder, outside home",
+                  !door.refusal(hl).empty() && !door.refusal(sz).empty() && !door.refusal(pr).empty() &&
+                  !door.refusal(dir).empty() && !door.refusal(out).empty(), door.refusal(pr));
+        }
+        if (can_share) {   // the kernel compares: a same-size file that differs is never shared
+            const std::string b3 = files_snapshot(home);
+            dr::Action d; d.verb = dr::Verb::Dedupe; d.from = H + "/Music/x.bin"; d.to = H + "/Music/y.bin";
+            const auto rr = door.run(dr::Plan{"differ", {d}, true});
+            check("door: dedupe of different contents -> failed, says so, nothing changed",
+                  !rr.ok && rr.failed == 1 && !rr.messages.empty() && rr.messages[0].find("differ") != std::string::npos &&
+                  files_snapshot(home) == b3 && !du::same_blocks(d.from, d.to), rr.messages.empty() ? "" : rr.messages[0]);
+            door.undo();
+        }
+        {
+            du::Progress pc;
+            pc.cancel = true;
+            const du::Found c = du::find(H, H, pc);
+            check("dups: cancel -> stops, says so", c.cancelled && c.groups.empty() && pc.done);
+            du::Progress po;
+            check("dups: refuses outside home and protected roots",
+                  !du::find(H, "/etc", po).refused.empty() && !du::find(H, H + "/Develop/w/fixes", po).refused.empty());
+        }
+        fs::remove_all(home, ec);
+    }
+
     // -- The source gate: no write call outside the door (s004) --------------
     // RULES: "every write goes through it, and the selftest fails on a write
     // that does not." Allowlisted, each for a reason:
@@ -1455,7 +1731,8 @@ int main(int argc, char** argv) {
             "remove", "remove_all", "copy_file", "copy", "create_directory", "create_directories", "create_symlink",
             "create_hard_link", "resize_file", "truncate", "write", "fopen", "mkdir", "symlink", "link", "chmod",
             "permissions", "last_write_time"};
-        const std::vector<std::string> tokens = {"ofstream", "O_WRONLY", "O_RDWR", "O_CREAT", "std::fstream"};
+        const std::vector<std::string> tokens = {"ofstream", "O_WRONLY", "O_RDWR", "O_CREAT", "std::fstream",
+                                                 "FIDEDUPERANGE", "FICLONE"};
         // One line -> the write calls in it. Comments are dropped; a member
         // call (x.remove(...)) or another namespace's function (registry::
         // remove) is not a filesystem write; ::, std::, fs:: and bare are.
