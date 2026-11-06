@@ -6,6 +6,7 @@
 #include "core/Dev.hpp"      // s007: dev projects
 #include "core/Dups.hpp"     // s008: duplicates
 #include "core/Archive.hpp"  // s009: archive
+#include "core/Organize.hpp" // s010: templates, naming, file into project
 
 #include <gtkmm/applicationwindow.h>
 #include <giomm/menu.h>
@@ -50,6 +51,8 @@
 //   "Where does Duplicates act?"         -> Shell_handlers.cpp (on_dups_run -> worker -> m_door->run)
 //   "Where is the Archive page?"         -> Shell_zones.cpp   (build_archive_page); rows: Shell_helpers.cpp (paint_archive)
 //   "Where does Archive act?"            -> Shell_handlers.cpp (on_archive_run -> m_door->run)
+//   "Where is the Projects page?"        -> Shell_zones.cpp   (build_projects_page); painting: Shell_helpers.cpp (paint_projects / paint_pj_project)
+//   "Where do Projects act?"             -> Shell_handlers.cpp (on_pj_create / on_pj_file / on_pj_confirm -> m_door->run)
 //   "Where does a write go?"             -> core/Door.* -- nowhere else (the selftest's source gate)
 // ─────────────────────────────────────────────────────────────────────────────
 namespace rouster {
@@ -74,6 +77,7 @@ private:
     void build_dev_page();                       // category: zone: Dev projects (s007)
     void build_dups_page();                      // category: zone: Duplicates (s008)
     void build_archive_page();                   // category: zone: Archive (s009)
+    void build_projects_page();                  // category: zone: Projects (s010)
     void build_preflight_page();                 // category: zone: Preflight (s003)
     void build_activity_page();                  // category: zone: Activity (s004)
     Glib::RefPtr<Gio::Menu> build_menu();        // category: zone: hamburger model
@@ -113,6 +117,19 @@ private:
     void on_archive_view(bool stored);           // category: handler: Old files / In the archive
     void on_archive_months(int months);          // category: handler: the "untouched for" choice -> look again
     void on_archive_run();                       // category: handler: checked rows -> a plan (archive or put back) -> the door
+    void on_pj_home();                           // category: handler: back to templates + projects (re-read)
+    void on_pj_new(std::size_t tmpl);            // category: handler: a template's New project... -> the form
+    void on_pj_form();                           // category: handler: id / title typed -> the plan again
+    void on_pj_create();                         // category: handler: the form's plan -> the door
+    void on_pj_starters();                       // category: handler: Install starter templates... -> the preview
+    void on_pj_version(const std::string& rel);  // category: handler: a row's New version -> the preview
+    void on_pj_confirm();                        // category: handler: the preview's act button -> the door
+    void on_pj_open(const std::string& dir);     // category: handler: open a project
+    void on_pj_pick_project();                   // category: handler: folder chooser -> open a project
+    void on_pj_add_files();                      // category: handler: file chooser -> the queue
+    void on_pj_dropped(const std::vector<std::string>& paths);   // category: handler: files dropped / chosen -> the queue
+    void on_pj_file();                           // category: handler: the checked queue -> a plan -> the door
+    void on_pj_show(const std::string& path);    // category: handler: open a folder in Files
     void on_preflight();                         // category: handler: run the checklist again
     void on_pick_folder();                       // category: handler: folder chooser -> scan it
     void on_recent_open(const std::string& p);   // category: handler: scan a recent folder again
@@ -151,6 +168,11 @@ private:
     bool tick_archive();                         // category: helper: the live counters while looking
     void paint_archive();                        // category: helper: view switch, cards per top folder / the stored list
     void archive_gate();                         // category: helper: the act button's label + whether it may act
+    void paint_projects();                       // category: helper: the home state -- templates, projects
+    void paint_pj_plan(Gtk::Box& box, const core::door::Plan& plan);   // category: helper: a plan, step by step (the preview)
+    void paint_pj_project();                     // category: helper: the open project -- the queue, what's in it
+    void pj_gate();                              // category: helper: the file button's label + whether it may act
+    void pj_done(const core::door::Result& r, const std::string& big, const std::string& what, const std::string& back);   // category: helper: the done state
     bool door_busy() const;                      // category: helper: a retire / restore owns the door right now
     void go_to(const std::string& page);         // category: helper: select a module's sidebar row
     void note_recent(const std::string& path);   // category: helper: push onto the list + persist
@@ -325,6 +347,41 @@ private:
     core::archive::Found                  m_ar_found;
     sigc::connection                      m_ar_tick;
     Glib::RefPtr<Gio::SimpleAction>       m_act_ar_find, m_act_ar_cancel, m_act_ar_run;
+
+    // Projects (s010): home | new | preview | project | done.
+    widgets::Box     m_pj_page;
+    widgets::Stack   m_pj_states;
+    widgets::Box     m_pj_home;        // templates + projects (painted)
+    widgets::Label   m_pj_new_title;
+    widgets::Entry   m_pj_id;
+    widgets::Entry   m_pj_title;
+    widgets::Label   m_pj_new_where;
+    widgets::Box     m_pj_new_list;    // the plan, step by step -- the preview
+    widgets::Label   m_pj_new_gate;
+    widgets::Button  m_pj_new_go;
+    widgets::Label   m_pj_pv_title;
+    widgets::Label   m_pj_pv_sub;
+    widgets::Box     m_pj_pv_list;
+    widgets::Label   m_pj_pv_gate;
+    widgets::Button  m_pj_pv_go;
+    widgets::Label   m_pj_head;        // the open project's name
+    widgets::Label   m_pj_head_sub;    // template · pattern · where
+    widgets::Box     m_pj_list;        // the queue + what's in the project (painted)
+    widgets::Label   m_pj_gate;
+    widgets::Button  m_pj_go;          // "File 3 files"
+    widgets::Label   m_pj_done_big;
+    widgets::Label   m_pj_done_caption;
+    widgets::Button  m_pj_done_back;
+    std::vector<core::organize::Template> m_pj_templates;   // UI thread only
+    std::vector<core::organize::Project>  m_pj_projects;
+    std::size_t      m_pj_tmpl = 0;                          // the template the form is for
+    core::organize::Project m_pj_open;                       // the open project
+    bool             m_pj_has_open = false;
+    std::vector<core::organize::Incoming> m_pj_queue;        // the preview of a filing; checks live here
+    core::door::Plan m_pj_plan;                              // what the form / preview shows, and exactly what runs
+    bool             m_pj_plan_gated = false;                // the preview moves user files: Preflight gates it
+    std::string      m_pj_back = "home";                     // where done's Back goes
+    static constexpr std::size_t kProjectShown = 300;        // rows painted
 
     // Preflight (s003).
     bool            m_pf_red = true;  // a red check stops every act button; true until the first run

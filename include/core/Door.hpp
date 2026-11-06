@@ -53,18 +53,23 @@
 // bytes anywhere: the files are and were identical, so the step is closed
 // with nothing to move (re-splitting blocks is not a way back, it's a copy).
 //
+// Copy (s010, new version / templates) makes a new file `to` from the file
+// `from` -- a reflink (FICLONE) where the filesystem shares blocks, else the
+// bytes -- into a staging name, then one rename. The source is untouched. Its
+// undo is a create's: the copy goes to the Trash.
+//
 // Hard-delete does not exist here, and will not (§1.1).
 // ─────────────────────────────────────────────────────────────────────────────
 namespace rouster::core::door {
 
-enum class Verb { Trash, Move, Write, Clone, Dedupe, MakeDir };
-const char* verb_name(Verb v);   // "trash", "move", "write", "clone", "dedupe", "mkdir"
-bool creates(Verb v);            // Write, Clone, MakeDir: `to` is made; `from` is unused
+enum class Verb { Trash, Move, Write, Clone, Dedupe, MakeDir, Copy };
+const char* verb_name(Verb v);   // "trash", "move", "write", "clone", "dedupe", "mkdir", "copy"
+bool creates(Verb v);            // Write, Clone, MakeDir, Copy: `to` is made (Copy: from `from`; the others have no source)
 // THE VERB TABLE the selftest gate walks: a verb added to the enum and not
 // here fails the gate's count; every verb here is run through the door,
 // checked to be one step, and undone back to the exact tree.
 const std::vector<Verb>& verbs();
-inline constexpr int kVerbCount = 6;
+inline constexpr int kVerbCount = 7;
 inline constexpr std::size_t kWriteMax = 64 * 1024;   // Write is for small notes (RESTORE.txt)
 
 struct Action {
@@ -100,6 +105,7 @@ struct Record {
     std::uint64_t id = 0, batch = 0;
     Verb          verb = Verb::Trash;
     std::string   from, to, info;   // info: the .trashinfo path (Trash only)
+    std::string   src;              // Copy: the file copied (from is the staging name)
     Identity      ident;
     std::int64_t  when = 0;         // unix seconds
     State         state = State::Intent;

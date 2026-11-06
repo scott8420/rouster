@@ -37,13 +37,14 @@ const char* verb_name(Verb v) {
         case Verb::Clone: return "clone";
         case Verb::Dedupe: return "dedupe";
         case Verb::MakeDir: return "mkdir";
+        case Verb::Copy: return "copy";
     }
     return "?";
 }
-bool creates(Verb v) { return v == Verb::Write || v == Verb::Clone || v == Verb::MakeDir; }
+bool creates(Verb v) { return v == Verb::Write || v == Verb::Clone || v == Verb::MakeDir || v == Verb::Copy; }
 
 const std::vector<Verb>& verbs() {
-    static const std::vector<Verb> v = {Verb::Trash, Verb::Move, Verb::Write, Verb::Clone, Verb::Dedupe, Verb::MakeDir};
+    static const std::vector<Verb> v = {Verb::Trash, Verb::Move, Verb::Write, Verb::Clone, Verb::Dedupe, Verb::MakeDir, Verb::Copy};
     return v;
 }
 
@@ -158,6 +159,7 @@ bool Door::load() {
             r.from = j.value("from", "");
             r.to = j.value("to", "");
             r.info = j.value("info", "");
+            r.src = j.value("src", "");
             r.when = j.value("when", 0ll);
             if (j.contains("ident")) {
                 const auto& i = j["ident"];
@@ -228,7 +230,15 @@ std::string Door::refusal(const Action& a, const std::vector<std::string>& made)
         return {};
     };
     if (creates(a.verb)) {
-        if (!a.from.empty()) return "a " + std::string(verb_name(a.verb)) + " has no source";
+        if (a.verb == Verb::Copy) {   // the source: a regular file in home, nothing protected on the way
+            if (bad(a.from)) return "not a clean absolute path to copy: " + a.from;
+            if (!inside(a.from, m_home) || a.from == m_home) return "outside the home folder: " + a.from;
+            if (auto w = walk(a.from, false); !w.empty()) return w;
+            if (inside(a.from, m_trash)) return "in the Trash: " + a.from;
+            if (inside(a.from, m_data)) return "Rouster's own records: " + a.from;
+            struct stat ss{};
+            if (::lstat(a.from.c_str(), &ss) != 0 || !S_ISREG(ss.st_mode)) return "not a file: " + a.from;
+        } else if (!a.from.empty()) return "a " + std::string(verb_name(a.verb)) + " has no source";
         if (bad(a.to)) return "not a clean absolute path to create: " + a.to;
         if (!inside(a.to, m_home) || a.to == m_home) return "outside the home folder: " + a.to;
         if (inside(a.to, m_trash) || inside(m_trash, a.to)) return "not in the Trash: " + a.to;
@@ -238,7 +248,7 @@ std::string Door::refusal(const Action& a, const std::vector<std::string>& made)
         if (::lstat(a.to.c_str(), &st) == 0 || planned(a.to)) return "already exists: " + a.to;
         const std::string parent = fs::path(a.to).parent_path().string();
         if (!planned(parent) && (::stat(parent.c_str(), &st) != 0 || !S_ISDIR(st.st_mode))) return "folder missing: " + parent;
-        if (a.verb == Verb::MakeDir) return {};
+        if (a.verb == Verb::MakeDir || a.verb == Verb::Copy) return {};
         if (a.verb == Verb::Write) {
             if (a.content.size() > kWriteMax) return "too big to write: " + a.to;
             return {};
@@ -391,6 +401,35 @@ bool Door::do_create(Record& r, const Action& a) {
                            ::fsync(fd) == 0;
         ::close(fd);
         if (!wrote) { r.error = "could not write " + r.from; ::unlink(r.from.c_str()); return false; }
+    } else if (r.verb == Verb::Copy) {
+        // A reflink where the filesystem can (btrfs: instant, shares blocks),
+        // else the bytes. Into the staging name; the source is opened read-only.
+        const int in = ::open(r.src.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        if (in < 0) { r.error = std::strerror(errno); return false; }
+        struct stat ss{};
+        if (::fstat(in, &ss) != 0 || !S_ISREG(ss.st_mode)) { ::close(in); r.error = "not a file: " + r.src; return false; }
+        const int out = ::open(r.from.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, ss.st_mode & 0777);
+        if (out < 0) { r.error = std::strerror(errno); ::close(in); return false; }
+        bool ok = ::ioctl(out, FICLONE, in) == 0;
+        if (!ok) {
+            ok = true;
+            std::vector<char> buf(1 << 20);
+            for (;;) {
+                const ssize_t n = ::read(in, buf.data(), buf.size());
+                if (n < 0) { if (errno == EINTR) continue; ok = false; break; }
+                if (n == 0) break;
+                for (ssize_t off = 0; off < n;) {
+                    const ssize_t w = ::write(out, buf.data() + off, static_cast<std::size_t>(n - off));
+                    if (w < 0) { if (errno == EINTR) continue; ok = false; break; }
+                    off += w;
+                }
+                if (!ok) break;
+            }
+        }
+        ok = ok && ::fsync(out) == 0;
+        ::close(out);
+        ::close(in);
+        if (!ok) { r.error = "could not copy " + r.src; ::unlink(r.from.c_str()); return false; }
     } else {
         const std::string parent = to.parent_path().string();
         const auto fail = [&](const std::string& why) {
@@ -446,6 +485,7 @@ Result Door::run(const Plan& plan) {
         r.verb = a.verb;
         r.from = a.from;
         r.to = a.to;
+        if (r.verb == Verb::Copy) r.src = a.from;
         r.when = now_s();
         if (creates(r.verb)) { if (!do_create(r, a)) { /* r.error set */ } }
         else if (r.verb == Verb::Dedupe) { if (!identity_of(r.to, r.ident)) r.error = "vanished before it could be shared"; }
@@ -455,7 +495,7 @@ Result Door::run(const Plan& plan) {
         if (r.error.empty()) {
             // Write-ahead: the intent is on disk before the rename happens.
             if (!append(json{{"t", "intent"}, {"id", r.id}, {"batch", r.batch}, {"verb", verb_name(r.verb)},
-                             {"from", r.from}, {"to", r.to}, {"info", r.info}, {"when", r.when},
+                             {"from", r.from}, {"to", r.to}, {"info", r.info}, {"src", r.src}, {"when", r.when},
                              {"ident", json::parse(ident_json(r.ident))}}.dump())) {
                 if (!r.info.empty()) ::unlink(r.info.c_str());
                 res.messages.push_back("could not write the manifest -- stopped before " + r.from);

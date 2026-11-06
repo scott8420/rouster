@@ -6,6 +6,8 @@
 #include <gtkmm/label.h>
 #include <gtkmm/listboxrow.h>
 #include <gtkmm/scrolledwindow.h>
+#include <gtkmm/droptarget.h>
+#include <gdk/gdk.h>
 
 // Shell_zones.cpp -- ZONES. Construction of the named regions: the window frame,
 // the sidebar, each module page, and the menu model. The look is CSS
@@ -91,6 +93,7 @@ void Shell::build_sidebar() {  // zone: brand + sections + module rows
     item("dups", "rouster-dups-symbolic", "Duplicates");
     item("dev", "rouster-dev-symbolic", "Dev projects");
     section("ORGANIZE");
+    item("projects", "rouster-projects-symbolic", "Projects");
     item("archive", "rouster-archive-symbolic", "Archive");
     section("SAFETY");
     item("preflight", "rouster-preflight-symbolic", "Preflight");
@@ -110,6 +113,7 @@ void Shell::build_pages() {  // zone: the module pages
     build_sweep_page();
     build_dups_page();
     build_archive_page();
+    build_projects_page();
     build_dev_page();
     build_preflight_page();
     build_activity_page();
@@ -644,6 +648,228 @@ void Shell::build_archive_page() {  // zone: Archive
 
     m_ar_page.append(m_ar_states);
     m_stack.add(m_ar_page, "archive", "Archive");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Projects (s010, §4.7) -- organize first. Five states:
+//   home    : templates (each with New project...) and the projects found in
+//             their roots; Install starter templates...; Open templates folder.
+//   new     : id + title; the plan below them IS the preview, live as you type.
+//   preview : any other plan, step by step (starter templates, New version).
+//   project : the open project -- drop files (or Add files...) and the queue
+//             shows where each would go; then what's in it, misfits flagged,
+//             New version on the files that fit.
+//   done    : what happened; Undo / Activity / Back.
+// ─────────────────────────────────────────────────────────────────────────────
+void Shell::build_projects_page() {  // zone: Projects
+    m_pj_states.set_transition_type(Gtk::StackTransitionType::CROSSFADE);
+    m_pj_states.set_transition_duration(220);
+    m_pj_states.set_vexpand(true);
+
+    const auto scrolled = [](Gtk::Widget& child) {
+        auto scroll = Gtk::make_managed<Gtk::ScrolledWindow>();
+        scroll->set_policy(Gtk::PolicyType::NEVER, Gtk::PolicyType::AUTOMATIC);
+        scroll->set_vexpand(true);
+        child.set_margin_start(32);
+        child.set_margin_end(32);
+        child.set_margin_top(12);
+        child.set_margin_bottom(16);
+        scroll->set_child(child);
+        return scroll;
+    };
+    const auto act_bar = [](Gtk::Label& gate, Gtk::Button& go) {
+        auto bar = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 16);
+        bar->add_css_class("act-bar");
+        gate.add_css_class("dim");
+        gate.set_xalign(0.0f);
+        gate.set_hexpand(true);
+        gate.set_wrap(true);
+        bar->append(gate);
+        go.add_css_class("act");
+        bar->append(go);
+        return bar;
+    };
+    const auto back_button = [this](const char* to) {
+        auto b = Gtk::make_managed<Gtk::Button>("Back");
+        b->add_css_class("ghost");
+        b->set_valign(Gtk::Align::CENTER);
+        const std::string where = to;
+        b->signal_clicked().connect([this, where] {
+            if (where == "home") on_pj_home();
+            else { paint_pj_project(); m_pj_states.set_visible_child(where); }
+        });
+        return b;
+    };
+
+    // home (painted by paint_projects)
+    m_pj_states.add(*scrolled(m_pj_home), "home");
+
+    // new
+    {
+        auto page = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 0);
+        auto body = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 12);
+        auto head = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 20);
+        head->append(*hero("rouster-hero-projects", 72));
+        auto words = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 2);
+        words->set_valign(Gtk::Align::CENTER);
+        words->set_hexpand(true);
+        m_pj_new_title.add_css_class("hero-big");
+        m_pj_new_title.set_xalign(0.0f);
+        words->append(m_pj_new_title);
+        m_pj_new_where.add_css_class("hero-caption");
+        m_pj_new_where.set_xalign(0.0f);
+        m_pj_new_where.set_wrap(true);
+        words->append(m_pj_new_where);
+        head->append(*words);
+        head->append(*back_button("home"));
+        body->append(*head);
+        auto form = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 12);
+        m_pj_id.set_placeholder_text("Id (job number, app name)");
+        m_pj_id.set_width_chars(16);
+        m_pj_title.set_placeholder_text("Title");
+        m_pj_title.set_hexpand(true);
+        m_pj_id.signal_changed().connect([this] { on_pj_form(); });
+        m_pj_title.signal_changed().connect([this] { on_pj_form(); });
+        m_pj_title.signal_activate().connect([this] { if (m_pj_new_go.get_sensitive()) on_pj_create(); });
+        form->append(m_pj_id);
+        form->append(m_pj_title);
+        body->append(*form);
+        body->append(m_pj_new_list);
+        page->append(*scrolled(*body));
+        m_pj_new_go.signal_clicked().connect([this] { on_pj_create(); });
+        page->append(*act_bar(m_pj_new_gate, m_pj_new_go));
+        m_pj_states.add(*page, "new");
+    }
+
+    // preview
+    {
+        auto page = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 0);
+        auto body = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 12);
+        auto head = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 20);
+        head->append(*hero("rouster-hero-projects", 72));
+        auto words = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 2);
+        words->set_valign(Gtk::Align::CENTER);
+        words->set_hexpand(true);
+        m_pj_pv_title.add_css_class("hero-big");
+        m_pj_pv_title.set_xalign(0.0f);
+        m_pj_pv_title.set_wrap(true);
+        words->append(m_pj_pv_title);
+        m_pj_pv_sub.add_css_class("hero-caption");
+        m_pj_pv_sub.set_xalign(0.0f);
+        m_pj_pv_sub.set_wrap(true);
+        words->append(m_pj_pv_sub);
+        head->append(*words);
+        auto back = Gtk::make_managed<Gtk::Button>("Back");
+        back->add_css_class("ghost");
+        back->set_valign(Gtk::Align::CENTER);
+        back->signal_clicked().connect([this] {
+            if (m_pj_has_open && m_pj_back == "project") { paint_pj_project(); m_pj_states.set_visible_child("project"); }
+            else on_pj_home();
+        });
+        head->append(*back);
+        body->append(*head);
+        body->append(m_pj_pv_list);
+        page->append(*scrolled(*body));
+        m_pj_pv_go.signal_clicked().connect([this] { on_pj_confirm(); });
+        page->append(*act_bar(m_pj_pv_gate, m_pj_pv_go));
+        m_pj_states.add(*page, "preview");
+    }
+
+    // project
+    {
+        auto page = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 0);
+        auto body = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 12);
+        auto head = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 20);
+        head->append(*hero("rouster-hero-projects", 72));
+        auto words = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 2);
+        words->set_valign(Gtk::Align::CENTER);
+        words->set_hexpand(true);
+        m_pj_head.add_css_class("hero-big");
+        m_pj_head.set_xalign(0.0f);
+        m_pj_head.set_wrap(true);
+        words->append(m_pj_head);
+        m_pj_head_sub.add_css_class("hero-caption");
+        m_pj_head_sub.set_xalign(0.0f);
+        m_pj_head_sub.set_wrap(true);
+        words->append(m_pj_head_sub);
+        head->append(*words);
+        auto btns = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 6);
+        btns->set_valign(Gtk::Align::CENTER);
+        auto add = Gtk::make_managed<Gtk::Button>("Add files...");
+        add->add_css_class("ghost");
+        add->signal_clicked().connect([this] { on_pj_add_files(); });
+        auto show = Gtk::make_managed<Gtk::Button>("Open in Files");
+        show->add_css_class("ghost");
+        show->signal_clicked().connect([this] { if (m_pj_has_open) on_pj_show(m_pj_open.path); });
+        btns->append(*add);
+        btns->append(*show);
+        btns->append(*back_button("home"));
+        head->append(*btns);
+        body->append(*head);
+        body->append(m_pj_list);
+        page->append(*scrolled(*body));
+        m_pj_go.signal_clicked().connect([this] { on_pj_file(); });
+        page->append(*act_bar(m_pj_gate, m_pj_go));
+        // Drop files anywhere on the project page.
+        auto drop = Gtk::DropTarget::create(GDK_TYPE_FILE_LIST, Gdk::DragAction::COPY);
+        drop->signal_enter().connect([page](double, double) { page->add_css_class("pj-over"); return Gdk::DragAction::COPY; }, false);
+        drop->signal_leave().connect([page] { page->remove_css_class("pj-over"); });
+        drop->signal_drop().connect([this, page](const Glib::ValueBase& value, double, double) {
+            page->remove_css_class("pj-over");
+            if (!G_VALUE_HOLDS(value.gobj(), GDK_TYPE_FILE_LIST)) return false;
+            auto* list = static_cast<GdkFileList*>(g_value_get_boxed(value.gobj()));
+            std::vector<std::string> paths;
+            for (GSList* l = list ? gdk_file_list_get_files(list) : nullptr, *h = l; l; l = l->next) {
+                (void)h;
+                if (char* p = g_file_get_path(G_FILE(l->data))) { paths.emplace_back(p); g_free(p); }
+            }
+            on_pj_dropped(paths);
+            return true;
+        }, false);
+        page->add_controller(drop);
+        m_pj_states.add(*page, "project");
+    }
+
+    // done
+    {
+        auto done = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 12);
+        done->set_valign(Gtk::Align::CENTER);
+        done->set_halign(Gtk::Align::CENTER);
+        done->set_margin(40);
+        done->append(*hero("rouster-hero-done", 112));
+        m_pj_done_big.add_css_class("hero-big");
+        m_pj_done_big.set_wrap(true);
+        m_pj_done_big.set_justify(Gtk::Justification::CENTER);
+        done->append(m_pj_done_big);
+        m_pj_done_caption.add_css_class("hero-sub");
+        m_pj_done_caption.set_wrap(true);
+        m_pj_done_caption.set_justify(Gtk::Justification::CENTER);
+        m_pj_done_caption.set_max_width_chars(60);
+        done->append(m_pj_done_caption);
+        auto btns = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 12);
+        btns->set_halign(Gtk::Align::CENTER);
+        btns->set_margin_top(12);
+        auto undo = Gtk::make_managed<Gtk::Button>("Undo");
+        undo->add_css_class("ghost");
+        undo->set_action_name("win.undo");
+        auto act = Gtk::make_managed<Gtk::Button>("Activity");
+        act->add_css_class("ghost");
+        act->signal_clicked().connect([this] { go_to("activity"); });
+        m_pj_done_back.set_label("Back");
+        m_pj_done_back.add_css_class("ghost");
+        m_pj_done_back.signal_clicked().connect([this] {
+            if (m_pj_back == "project" && m_pj_has_open) on_pj_open(m_pj_open.path);
+            else on_pj_home();
+        });
+        btns->append(*undo);
+        btns->append(*act);
+        btns->append(m_pj_done_back);
+        done->append(*btns);
+        m_pj_states.add(*done, "done");
+    }
+
+    m_pj_page.append(m_pj_states);
+    m_stack.add(m_pj_page, "projects", "Projects");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

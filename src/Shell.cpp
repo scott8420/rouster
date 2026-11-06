@@ -93,6 +93,29 @@ Shell::Shell()
       m_ar_gate("shell.archive.gate"),
       m_ar_done_big("shell.archive.done_big"),
       m_ar_done_caption("shell.archive.done_caption"),
+      m_pj_page("shell.projects.page", Gtk::Orientation::VERTICAL),
+      m_pj_states("shell.projects.states"),
+      m_pj_home("shell.projects.home", Gtk::Orientation::VERTICAL, 14),
+      m_pj_new_title("shell.projects.new_title"),
+      m_pj_id("shell.projects.id"),
+      m_pj_title("shell.projects.title"),
+      m_pj_new_where("shell.projects.new_where"),
+      m_pj_new_list("shell.projects.new_list", Gtk::Orientation::VERTICAL, 4),
+      m_pj_new_gate("shell.projects.new_gate"),
+      m_pj_new_go("shell.projects.new_go"),
+      m_pj_pv_title("shell.projects.preview_title"),
+      m_pj_pv_sub("shell.projects.preview_sub"),
+      m_pj_pv_list("shell.projects.preview_list", Gtk::Orientation::VERTICAL, 4),
+      m_pj_pv_gate("shell.projects.preview_gate"),
+      m_pj_pv_go("shell.projects.preview_go"),
+      m_pj_head("shell.projects.head"),
+      m_pj_head_sub("shell.projects.head_sub"),
+      m_pj_list("shell.projects.list", Gtk::Orientation::VERTICAL, 12),
+      m_pj_gate("shell.projects.gate"),
+      m_pj_go("shell.projects.go"),
+      m_pj_done_big("shell.projects.done_big"),
+      m_pj_done_caption("shell.projects.done_caption"),
+      m_pj_done_back("shell.projects.done_back"),
       m_pf_page("shell.preflight.page", Gtk::Orientation::VERTICAL, 10),
       m_pf_summary("shell.preflight.summary"),
       m_pf_rows("shell.preflight.rows", Gtk::Orientation::VERTICAL, 10),
@@ -122,6 +145,7 @@ void Shell::build_ui() {
     set_scanning(false);
     paint_preflight();
     paint_activity();
+    paint_projects();
 
     signal_close_request().connect([this] { stop_scan(); stop_sweep(); stop_dev(); stop_dups(); stop_archive(); return false; }, false);
     m_scan_finished.connect(sigc::mem_fun(*this, &Shell::on_scan_done));

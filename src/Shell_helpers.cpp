@@ -274,10 +274,12 @@ void Shell::paint_activity() {  // helper: the manifest's batches, newest first
                 case dr::State::Undone:           mark = "↩"; break;
                 default:                ++failed; mark = "✗"; break;
             }
-            auto l = text(std::string(mark) + "  " + dr::verb_name(r->verb) + "  " + r->from +
+            // A created thing's `from` is the door's staging name: show what was made (and, for a copy, from what).
+            const std::string what = r->verb == dr::Verb::Copy ? r->src + " → " + r->to : dr::creates(r->verb) ? r->to : r->from;
+            auto l = text(std::string(mark) + "  " + dr::verb_name(r->verb) + "  " + what +
                           (r->error.empty() ? "" : "  -- " + r->error), "detail-path");
             l->set_ellipsize(Pango::EllipsizeMode::MIDDLE);
-            l->set_tooltip_text(r->from + "\n→ " + r->to);
+            l->set_tooltip_text((dr::creates(r->verb) ? (r->src.empty() ? std::string("made") : r->src) : r->from) + "\n→ " + r->to);
             body->append(*l);
         }
         const std::string age = core::preflight::human_age(now - it->when);
@@ -338,11 +340,12 @@ void Shell::paint_preflight() {  // helper: gather + evaluate + repaint the card
     }
     m_pf_summary.set_text(std::to_string(green) + " of " + std::to_string(checks.size()) + " checks green" +
                           (red ? ", " + std::to_string(red) + " red" : std::string{}) +
-                          ". A red check stops Sweep, Duplicates, Dev projects and Archive until it clears.");
+                          ". A red check stops Sweep, Duplicates, Dev projects, Archive and filing into a project until it clears.");
     m_pf_red = red > 0;
     sweep_gate();
     dups_gate();
     archive_gate();
+    pj_gate();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -857,6 +860,316 @@ void Shell::archive_gate() {  // helper: the act button's label + whether it may
         m_ar_gate.set_text("One step. Undo takes it back; Put back works any time later.");
     if (m_act_ar_run) m_act_ar_run->set_enabled(n > 0 && !m_pf_red && !busy);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Projects (s010). Reading templates and projects is cheap (a few folders), so
+// it happens on the UI thread; every plan is shown step by step before it runs.
+// ─────────────────────────────────────────────────────────────────────────────
+void Shell::paint_projects() {  // helper: the home state -- templates, projects
+    namespace og = core::organize;
+    m_pj_templates = og::templates(m_home);
+    m_pj_projects = og::projects(m_home, m_pj_templates);
+    while (auto* c = m_pj_home.get_first_child()) m_pj_home.remove(*c);
+    const auto tilde = [this](const std::string& p) {
+        return p.rfind(m_home + "/", 0) == 0 ? "~/" + p.substr(m_home.size() + 1) : p;
+    };
+    const auto small = [](const char* label) {
+        auto b = Gtk::make_managed<Gtk::Button>(label);
+        b->add_css_class("ghost");
+        b->add_css_class("small");
+        b->set_valign(Gtk::Align::CENTER);
+        return b;
+    };
+
+    auto head = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 20);
+    auto img = Gtk::make_managed<Gtk::Image>();
+    img->set_from_icon_name("rouster-hero-projects");
+    img->set_pixel_size(88);
+    head->append(*img);
+    auto words = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 2);
+    words->set_valign(Gtk::Align::CENTER);
+    words->set_hexpand(true);
+    words->append(*text("Projects", "hero-big"));
+    auto cap = text("A new project is built from a template; files dropped on it are named by its pattern and "
+                    "go where their type belongs. Templates are plain folders -- edit them in Files.", "hero-caption");
+    cap->set_wrap(true);
+    words->append(*cap);
+    head->append(*words);
+    m_pj_home.append(*head);
+
+    // Templates.
+    {
+        auto card = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 4);
+        card->add_css_class("card");
+        auto top = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        auto dot = Gtk::make_managed<Gtk::Box>();
+        dot->add_css_class("dot");
+        dot->add_css_class("pj-dot");
+        dot->set_valign(Gtk::Align::CENTER);
+        top->append(*dot);
+        auto t = text("Templates · " + with_commas(m_pj_templates.size()), "card-title");
+        t->set_hexpand(true);
+        top->append(*t);
+        std::vector<std::string> skipped;
+        if (!og::starters(m_home, skipped).actions.empty()) {
+            auto b = small(m_pj_templates.empty() ? "Install starter templates..." : "Add the missing starters...");
+            b->signal_clicked().connect([this] { on_pj_starters(); });
+            top->append(*b);
+        }
+        const std::string tdir = m_home + "/" + og::kTemplates;
+        if (std::filesystem::is_directory(tdir)) {
+            auto b = small("Open templates folder");
+            b->signal_clicked().connect([this, tdir] { on_pj_show(tdir); });
+            top->append(*b);
+        }
+        card->append(*top);
+        for (std::size_t i = 0; i < m_pj_templates.size(); ++i) {
+            const auto& tp = m_pj_templates[i];
+            auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 12);
+            row->add_css_class("sweep-row");
+            auto name = text(tp.name, "detail-path");
+            name->set_width_chars(14);
+            row->append(*name);
+            auto sub = text(tp.problem.empty() ? "~/" + tp.root + "/" + tp.folder + "    " +
+                                                     (tp.rules.pattern.empty() ? std::string("names kept") : tp.rules.pattern)
+                                               : "can't use it: " + tp.problem, "dim");
+            sub->set_hexpand(true);
+            sub->set_ellipsize(Pango::EllipsizeMode::MIDDLE);
+            sub->set_tooltip_text(tp.path);
+            row->append(*sub);
+            if (tp.problem.empty()) {
+                auto b = small("New project...");
+                b->signal_clicked().connect([this, i] { on_pj_new(i); });
+                row->append(*b);
+            }
+            card->append(*row);
+        }
+        if (m_pj_templates.empty())
+            card->append(*text("No templates yet. The starters are a Design job, a Book and a gtkmm app; "
+                               "they go in ~/" + std::string(og::kTemplates) + ".", "dim"));
+        m_pj_home.append(*card);
+    }
+
+    // Projects.
+    {
+        auto card = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 4);
+        card->add_css_class("card");
+        auto top = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        auto t = text("Projects · " + with_commas(m_pj_projects.size()), "card-title");
+        t->set_hexpand(true);
+        top->append(*t);
+        auto pick = small("Open a project folder...");
+        pick->signal_clicked().connect([this] { on_pj_pick_project(); });
+        top->append(*pick);
+        card->append(*top);
+        for (const auto& p : m_pj_projects) {
+            auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 12);
+            row->add_css_class("sweep-row");
+            auto name = text(std::filesystem::path(p.path).filename().string(), "detail-path");
+            name->set_hexpand(true);
+            name->set_ellipsize(Pango::EllipsizeMode::MIDDLE);
+            name->set_tooltip_text(p.path);
+            row->append(*name);
+            row->append(*text(p.tmpl + " · " + tilde(std::filesystem::path(p.path).parent_path().string()), "dim", 1.0f));
+            auto b = small("Open");
+            const std::string dir = p.path;
+            b->signal_clicked().connect([this, dir] { on_pj_open(dir); });
+            row->append(*b);
+            card->append(*row);
+        }
+        if (m_pj_projects.empty())
+            card->append(*text("None yet in the templates' folders. A project is any folder holding a " +
+                               std::string(og::kMeta) + "; Rouster writes one when it makes a project.", "dim"));
+        m_pj_home.append(*card);
+    }
+}
+
+void Shell::paint_pj_plan(Gtk::Box& box, const core::door::Plan& plan) {  // helper: a plan, step by step (the preview)
+    namespace dr = core::door;
+    while (auto* c = box.get_first_child()) box.remove(*c);
+    auto card = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 4);
+    card->add_css_class("card");
+    std::size_t shown = 0;
+    for (const auto& a : plan.actions) {
+        if (shown++ == kProjectShown) {
+            card->append(*text("... and " + with_commas(plan.actions.size() - kProjectShown) + " more steps", "dim"));
+            break;
+        }
+        auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 12);
+        row->add_css_class("sweep-row");
+        const char* verb = a.verb == dr::Verb::MakeDir ? "Make folder" : a.verb == dr::Verb::Write ? "Write"
+                         : a.verb == dr::Verb::Copy ? "Copy" : a.verb == dr::Verb::Move ? "Move" : dr::verb_name(a.verb);
+        auto v = text(verb, "status-chip", 0.5f);
+        v->add_css_class("pf-green");
+        v->set_width_chars(11);
+        row->append(*v);
+        const auto tilde = [this](const std::string& p) {
+            if (m_pj_has_open && p.rfind(m_pj_open.path + "/", 0) == 0) return p.substr(m_pj_open.path.size() + 1);   // inside the open project
+            return p.rfind(m_home + "/", 0) == 0 ? "~/" + p.substr(m_home.size() + 1) : p;
+        };
+        auto path = text(tilde(a.to) + (a.verb == dr::Verb::MakeDir ? "/" : ""), "detail-path");
+        path->set_hexpand(true);
+        path->set_ellipsize(Pango::EllipsizeMode::MIDDLE);
+        std::string tip = a.reason;
+        if (a.verb == dr::Verb::Copy || a.verb == dr::Verb::Move) tip = "from " + tilde(a.from) + "\n" + tip;
+        if (a.verb == dr::Verb::Write) tip += "\n\n" + a.content;
+        path->set_tooltip_text(tip);
+        row->append(*path);
+        if (a.verb != dr::Verb::MakeDir) {
+            auto sz = text(core::scan::human_bytes(a.bytes), "detail-size", 1.0f);
+            sz->set_width_chars(9);
+            row->append(*sz);
+        }
+        card->append(*row);
+    }
+    if (plan.actions.empty()) card->append(*text("Nothing to do.", "dim"));
+    box.append(*card);
+}
+
+void Shell::paint_pj_project() {  // helper: the open project -- the queue, what's in it
+    namespace og = core::organize;
+    while (auto* c = m_pj_list.get_first_child()) m_pj_list.remove(*c);
+    if (!m_pj_has_open) { pj_gate(); return; }
+    const auto& p = m_pj_open;
+    const auto in_home = [this](const std::string& s) {
+        return s.rfind(m_home + "/", 0) == 0 ? "~/" + s.substr(m_home.size() + 1) : s;
+    };
+    m_pj_head.set_text(std::filesystem::path(p.path).filename().string());
+    std::string routes;
+    for (const auto& r : p.rules.routes) routes += (routes.empty() ? "" : ",  ") + r.folder + "/";
+    m_pj_head_sub.set_text((p.tmpl.empty() ? std::string("project") : p.tmpl) + "  ·  " + in_home(p.path) + "\n" +
+                           (p.rules.pattern.empty() ? std::string("names kept as they are") : p.rules.pattern) +
+                           (routes.empty() ? std::string() : "\nroutes to  " + routes));
+
+    // The queue: the preview of a filing.
+    if (m_pj_queue.empty()) {
+        auto drop = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 4);
+        drop->add_css_class("pj-drop");
+        drop->append(*text("Drop files here -- or Add files...", "card-title", 0.5f));
+        drop->append(*text("Each is shown with the name and folder it would get before anything moves.", "dim", 0.5f));
+        m_pj_list.append(*drop);
+    } else {
+        auto card = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 4);
+        card->add_css_class("card");
+        auto top = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        auto t = text("To file · " + with_commas(m_pj_queue.size()), "card-title");
+        t->set_hexpand(true);
+        top->append(*t);
+        auto clear = Gtk::make_managed<Gtk::Button>("Clear");
+        clear->add_css_class("ghost");
+        clear->add_css_class("small");
+        clear->signal_clicked().connect([this] { m_pj_queue.clear(); paint_pj_project(); });
+        top->append(*clear);
+        card->append(*top);
+        for (std::size_t k = 0; k < m_pj_queue.size() && k < kProjectShown; ++k) {
+            const auto& q = m_pj_queue[k];
+            auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 12);
+            row->add_css_class("sweep-row");
+            auto cb = Gtk::make_managed<Gtk::CheckButton>();
+            cb->set_active(q.checked && !q.to.empty());
+            cb->set_sensitive(!q.to.empty());
+            cb->signal_toggled().connect([this, cb, k] {
+                if (k < m_pj_queue.size()) m_pj_queue[k].checked = cb->get_active();
+                pj_gate();
+            });
+            row->append(*cb);
+            auto from = text(std::filesystem::path(q.from).filename().string(), "detail-path");
+            from->set_tooltip_text(q.from);
+            from->set_ellipsize(Pango::EllipsizeMode::MIDDLE);
+            from->set_width_chars(22);
+            from->set_max_width_chars(30);
+            row->append(*from);
+            row->append(*text("->", "dim"));
+            auto to = text(q.to.empty() ? q.note : q.to.substr(p.path.size() + 1), q.to.empty() ? "dim" : "detail-path");
+            to->set_hexpand(true);
+            to->set_ellipsize(Pango::EllipsizeMode::MIDDLE);
+            to->set_tooltip_text(q.to.empty() ? q.note : q.to);
+            row->append(*to);
+            card->append(*row);
+        }
+        for (std::size_t k = kProjectShown; k < m_pj_queue.size(); ++k) m_pj_queue[k].checked = false;   // never unseen
+        m_pj_list.append(*card);
+    }
+
+    // What's in it.
+    const auto entries = og::contents(p, 5000);
+    std::size_t misfits = 0;
+    for (const auto& e : entries) misfits += !e.fits;
+    const std::string& pat = p.rules.pattern;
+    const bool datable = pat.find("{yyyymmdd") != std::string::npos;
+    auto card = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 4);
+    card->add_css_class("card");
+    card->append(*text("In the project · " + with_commas(entries.size()) + (entries.size() == 1 ? " file" : " files") +
+                       (misfits ? " · " + with_commas(misfits) + " don't fit the pattern" : std::string()), "card-title"));
+    std::size_t shown = 0;
+    for (const auto& e : entries) {
+        if (shown++ == kProjectShown) {
+            card->append(*text("... and " + with_commas(entries.size() - kProjectShown) + " more", "dim"));
+            break;
+        }
+        auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 12);
+        row->add_css_class("sweep-row");
+        auto sz = text(core::scan::human_bytes(e.bytes), "detail-size", 1.0f);
+        sz->set_width_chars(9);
+        row->append(*sz);
+        auto path = text(e.rel, e.versioned ? "dim" : "detail-path");
+        path->set_hexpand(true);
+        path->set_ellipsize(Pango::EllipsizeMode::MIDDLE);
+        path->set_tooltip_text(p.path + "/" + e.rel);
+        row->append(*path);
+        if (!e.fits) {
+            auto chip = text("doesn't fit", "pj-misfit", 0.5f);
+            chip->set_valign(Gtk::Align::CENTER);
+            chip->set_tooltip_text("Flagged, not moved. Drop it on the project to name it by the pattern.");
+            row->append(*chip);
+        } else if (datable && !e.versioned) {
+            auto b = Gtk::make_managed<Gtk::Button>("New version");
+            b->add_css_class("ghost");
+            b->add_css_class("small");
+            const std::string rel = e.rel;
+            b->signal_clicked().connect([this, rel] { on_pj_version(rel); });
+            row->append(*b);
+        }
+        card->append(*row);
+    }
+    if (entries.empty()) card->append(*text("Empty so far.", "dim"));
+    m_pj_list.append(*card);
+    pj_gate();
+}
+
+void Shell::pj_gate() {  // helper: the file button's label + whether it may act
+    std::size_t n = 0;
+    for (const auto& q : m_pj_queue) n += q.checked && !q.to.empty();
+    m_pj_go.set_label(n ? "File " + with_commas(n) + (n == 1 ? " file" : " files") : "File");
+    if (m_pf_red && n)
+        m_pj_gate.set_text("Preflight has a red check. Filing waits until it clears -- see Preflight.");
+    else if (!n)
+        m_pj_gate.set_text(m_pj_queue.empty() ? "Drop files on the page to see where they'd go." : "Nothing checked.");
+    else
+        m_pj_gate.set_text("Each is moved (never copied) under its new name. One step; Undo takes it back.");
+    m_pj_go.set_sensitive(n > 0 && !m_pf_red && !door_busy());
+}
+
+void Shell::pj_done(const core::door::Result& r, const std::string& big, const std::string& what, const std::string& back) {  // helper: the done state
+    m_pj_back = back;
+    if (r.ok) {
+        m_pj_done_big.set_text(big);
+        m_pj_done_caption.set_text(what + " " + std::to_string(r.done) + (r.done == 1 ? " step" : " steps") +
+                                   "; Undo takes them all back.");
+    } else if (r.done == 0) {
+        m_pj_done_big.set_text("Nothing changed");
+        m_pj_done_caption.set_text(r.messages.empty() ? std::string("The door refused the plan.") : r.messages.front());
+    } else {
+        m_pj_done_big.set_text(std::to_string(r.done) + " of " + std::to_string(r.done + r.failed));
+        m_pj_done_caption.set_text("steps done; " + std::to_string(r.failed) + " could not: " +
+                                   (r.messages.empty() ? std::string("see Activity") : r.messages.front()) +
+                                   ". Undo puts back what changed.");
+    }
+    m_pj_done_back.set_label(back == "project" && m_pj_has_open ? "Back to the project" : "Back");
+    m_pj_states.set_visible_child("done");
+    paint_activity();
+}
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Dev projects (s007). The worker runs core::dev::find (read-only, git with

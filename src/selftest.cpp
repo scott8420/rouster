@@ -26,6 +26,7 @@
 #include "core/Known.hpp"
 #include "core/Dups.hpp"
 #include "core/Archive.hpp"
+#include "core/Organize.hpp"
 
 #include <algorithm>
 #include <array>
@@ -349,13 +350,23 @@ bool make_archive_fixture(const fs::path& home) {
     return ok;
 }
 
+// Loose files to file into a project (s010): a logo, a font, a photo, a note.
+bool make_organize_fixture(const fs::path& home) {
+    bool ok = true;
+    for (const char* r : {"Downloads/Acme logo FINAL.ai", "Downloads/Brandon Grotesque.otf", "Downloads/shoot 01.JPG",
+                          "Downloads/call notes.txt"})
+        ok &= put(home, r, 12000);
+    return ok;
+}
+
 int main(int argc, char** argv) {
     // `--make-fixture DIR`: build the fixture home for an Xvfb drive, then stop.
     if (argc == 3 && std::string(argv[1]) == "--make-fixture") {
         const bool ok = make_fixture(argv[2]) &&
                         make_dev_fixture(argv[2], std::string(argv[2]) + "_remotes") &&   // s007
                         make_dups_fixture(argv[2]) &&                                       // s008
-                        make_archive_fixture(argv[2]);                                      // s009
+                        make_archive_fixture(argv[2]) &&                                    // s009
+                        make_organize_fixture(argv[2]);                                     // s010
         std::cout << (ok ? "fixture: " : "fixture FAILED (exists and not empty?): ") << argv[2] << "\n";
         return ok ? 0 : 1;
     }
@@ -878,6 +889,7 @@ int main(int argc, char** argv) {
                 case Verb::Clone: a.verb = v; a.to = H + "/Documents/clone"; a.url = (gate_remote / "r.git").string();
                                   a.branch = "main"; break;
                 case Verb::MakeDir: a.verb = v; a.to = H + "/Documents/made"; break;
+                case Verb::Copy: a.verb = v; a.from = H + "/Documents/report.pdf"; a.to = H + "/Documents/report v2.pdf"; break;
                 case Verb::Dedupe: a.verb = v; a.from = H + "/Documents/twin-a.bin"; a.to = H + "/Documents/twin-b.bin"; break;
             }
             if (v == Verb::Dedupe) {
@@ -1891,6 +1903,228 @@ int main(int argc, char** argv) {
             core::scan::Progress pc;
             pc.cancel = true;
             check("archive: cancel -> stops, says so", ar::find(H, now, 12, pc).cancelled);
+        }
+        fs::remove_all(home, ec);
+    }
+
+    // -- Organize: templates, new project, file into project, new version (s010)
+    {
+        std::cout << "\n-- organize --\n";
+        namespace og = core::organize;
+        namespace dr = core::door;
+        const fs::path home = fs::temp_directory_path() / "rouster_selftest_organize";
+        std::error_code ec;
+        fs::remove_all(home, ec);
+        for (const char* d : {".local/share/Trash/files", ".local/share/Trash/info", ".local/share/rouster", ".config",
+                              "Documents", "Downloads"})
+            fs::create_directories(home / d, ec);
+        const std::string H = home.string();
+        const auto there = [](const fs::path& p) { struct stat st{}; return ::lstat(p.c_str(), &st) == 0; };
+        const auto slurp = [](const fs::path& p) { std::ifstream in(p, std::ios::binary); std::ostringstream o; o << in.rdbuf(); return o.str(); };
+        const auto outside_trash = [](const std::string& snap) {
+            std::istringstream in(snap);
+            std::string out;
+            for (std::string l; std::getline(in, l);)
+                if (l.find("/.local/share/Trash/") == std::string::npos) out += l + "\n";
+            return out;
+        };
+        dr::Door door(H, H + "/.local/share/rouster");
+        door.load();
+        const auto go = [&](dr::Plan p) { p.previewed = true; return door.run(p); };
+
+        check("organize: slug -- spaces and _ / become one '-', never hidden",
+              og::slug("Spring Catalog_2026 / v2") == "Spring-Catalog-2026-v2" && og::slug(".hidden  x") == "hidden-x" &&
+              og::slug("a - b") == "a-b", og::slug("Spring Catalog_2026 / v2"));
+        const std::int64_t T0 = 1793000000;   // pinned clock for names
+        const og::Values v{"2611", "Acme Spring Catalog", T0};
+        check("organize: fill -- names slugged, text as typed",
+              og::fill("{id}_{title}_{yyyymmdd}", v) == "2611_Acme-Spring-Catalog_" + og::stamp(T0, false) &&
+              og::fill("# {title}", v, false) == "# Acme Spring Catalog");
+        check("organize: no templates yet", og::templates(H).empty());
+
+        // Starters: MakeDir + Write through the door, one step, undoable.
+        std::vector<std::string> skipped;
+        const std::string b0 = files_snapshot(home);
+        auto sp = og::starters(H, skipped);
+        check("organize: starters plan changes nothing; three templates, nothing skipped",
+              files_snapshot(home) == b0 && skipped.empty() && !sp.actions.empty());
+        auto r = go(sp);
+        check("organize: starters through the door", r.ok, r.messages.empty() ? "" : r.messages.front());
+        auto ts = og::templates(H);
+        check("organize: three templates, each readable",
+              ts.size() == 3 && ts[0].name == "Book" && ts[1].name == "Design job" && ts[2].name == "gtkmm app" &&
+              ts[0].problem.empty() && ts[1].problem.empty() && ts[2].problem.empty() &&
+              ts[1].rules.pattern == "{id}_{title}_{yyyymmdd-hhmm}_{part}.{ext}" && ts[1].root == "Documents/Jobs");
+        {
+            std::vector<std::string> sk;
+            check("organize: starters again -- all three skipped, nothing to do", og::starters(H, sk).actions.empty() && sk.size() == 3);
+        }
+        {
+            const auto u = door.undo();
+            check("organize: undo the starters -- exact outside the Trash", u.ok && outside_trash(files_snapshot(home)) == outside_trash(b0),
+                  u.messages.empty() ? "" : u.messages.front());
+            std::vector<std::string> sk;
+            go(og::starters(H, sk));
+            check("organize: starters again after undo", og::templates(H).size() == 3);
+        }
+        ts = og::templates(H);
+        og::Template design = ts[1];
+        // A binary file in the template is copied, not written.
+        const std::string blank = std::string("\0\x01PDF-ish\0", 10) + noise(30000, 9);
+        put_bytes(fs::path(design.path), "finals/{id}_blank.bin", blank);
+
+        // New project.
+        std::vector<std::string> probs;
+        const std::string b2 = files_snapshot(home);
+        auto np = og::new_project(H, design, v, probs);
+        const std::string pdir = H + "/Documents/Jobs/2611_Acme-Spring-Catalog";
+        std::size_t copies = 0, writes = 0;
+        for (const auto& a : np.actions) { copies += a.verb == dr::Verb::Copy; writes += a.verb == dr::Verb::Write; }
+        check("organize: new project plan changes nothing; makes Jobs/ first; one Copy, two Writes",
+              files_snapshot(home) == b2 && probs.empty() && og::project_dir(H, design, v) == pdir &&
+              np.actions.front().verb == dr::Verb::MakeDir && np.actions.front().to == H + "/Documents/Jobs" &&
+              copies == 1 && writes == 2, probs.empty() ? "" : probs.front());
+        r = go(np);
+        const std::string S0 = og::stamp(T0);
+        const fs::path brief = fs::path(pdir) / ("brief/2611_Acme-Spring-Catalog_" + S0 + "_brief.md");
+        check("organize: new project through the door -- the tree, placeholders filled",
+              r.ok && fs::is_directory(pdir + "/workups") && fs::is_directory(pdir + "/versions") &&
+              slurp(brief).rfind("# Acme Spring Catalog\n\nJob 2611", 0) == 0,
+              r.messages.empty() ? brief.string() : r.messages.front());
+        check("organize: the binary template file copied byte for byte", slurp(pdir + "/finals/2611_blank.bin") == blank);
+        og::Project pj;
+        check("organize: the project carries its own rules",
+              og::load_project(pdir, pj) && pj.id == "2611" && pj.title == "Acme Spring Catalog" &&
+              pj.tmpl == "Design job" && pj.rules.pattern == design.rules.pattern && og::route(pj, "OTF") == "fonts");
+        check("organize: projects() finds it", og::projects(H, og::templates(H)).size() == 1);
+        {
+            std::vector<std::string> p2, p3;
+            og::new_project(H, design, v, p2);
+            og::new_project(H, design, og::Values{"", "x", T0}, p3);
+            check("organize: refused -- already there; no id", !p2.empty() && !p3.empty());
+        }
+
+        // Naming.
+        og::Parts parts;
+        check("organize: fits -- the brief fits, a stray doesn't",
+              og::fits(pj, brief.filename().string(), &parts) && parts.part == "brief" && parts.ext == "md" && parts.stamp == S0 &&
+              !og::fits(pj, "stray notes.txt") && !og::fits(pj, "2612_Acme-Spring-Catalog_" + S0 + "_x.md"));
+
+        // File into project.
+        for (const char* f : {"Downloads/Acme logo FINAL.ai", "Downloads/Brandon.otf", "Downloads/notes", "Downloads/a/x.ai",
+                              "Downloads/b/x.ai"})
+            put(home, f, 6000);
+        fs::create_directories(home / "Downloads/folder", ec);
+        for (const char* f : {"Downloads/a/x.ai", "Downloads/b/x.ai"}) {   // same name, same minute -> -2
+            struct timespec ts2[2] = {{T0, 0}, {T0, 0}};
+            ::utimensat(AT_FDCWD, (home / f).c_str(), ts2, AT_SYMLINK_NOFOLLOW);
+        }
+        const std::string b3 = files_snapshot(home);
+        auto in = og::propose(H, pj, {H + "/Downloads/Acme logo FINAL.ai", H + "/Downloads/Brandon.otf", H + "/Downloads/notes",
+                                      H + "/Downloads/a/x.ai", H + "/Downloads/b/x.ai", H + "/Downloads/folder", "/etc/hostname",
+                                      brief.string()});
+        const auto stamp_of = [&](const char* rel) { struct stat st{}; ::lstat((home / rel).c_str(), &st); return og::stamp(st.st_mtim.tv_sec); };
+        const std::string P = pdir + "/";
+        const std::string N = "2611_Acme-Spring-Catalog_";
+        check("organize: propose changes nothing", files_snapshot(home) == b3 && in.size() == 8);
+        check("organize: named by the pattern, routed by type",
+              in[0].to == P + "workups/" + N + stamp_of("Downloads/Acme logo FINAL.ai") + "_Acme-logo-FINAL.ai" &&
+              in[1].to == P + "fonts/" + N + stamp_of("Downloads/Brandon.otf") + "_Brandon.otf" &&
+              in[2].to == P + N + stamp_of("Downloads/notes") + "_notes", in[0].to + " | " + in[2].to);
+        check("organize: the same name twice -> the second gets -2",
+              in[3].to == P + "workups/" + N + S0 + "_x.ai" && in[4].to == P + "workups/" + N + S0 + "_x-2.ai", in[4].to);
+        check("organize: not filed -- a folder, outside home, already filed",
+              in[5].to.empty() && !in[5].checked && in[6].to.empty() && in[7].to.empty() && in[7].note == "already filed");
+        in[2].checked = false;   // unchecked stays
+        {   // changed since propose -> left out
+            struct timespec ts3[2] = {{T0 + 99, 0}, {T0 + 99, 0}};
+            ::utimensat(AT_FDCWD, (home / "Downloads/b/x.ai").c_str(), ts3, AT_SYMLINK_NOFOLLOW);
+        }
+        std::vector<std::string> dropped;
+        auto fp = og::file_plan(pj, in, dropped);
+        check("organize: file plan -- 3 moves, the changed one left out, unchecked stays",
+              fp.actions.size() == 3 && dropped.size() == 1 && dropped[0].find("changed since") != std::string::npos);
+        const std::string b4 = files_snapshot(home);
+        r = go(fp);
+        check("organize: filed through the door",
+              r.ok && there(in[0].to) && there(in[1].to) && there(in[3].to) && !there(home / "Downloads/Brandon.otf") &&
+              there(home / "Downloads/notes") && there(home / "Downloads/b/x.ai"), r.messages.empty() ? "" : r.messages.front());
+        auto u = door.undo();
+        check("organize: undo the filing -- exact", u.ok && files_snapshot(home) == b4);
+        {   // a route to a folder the project doesn't have yet -> MakeDir first
+            og::Project q = pj;
+            q.rules.routes.push_back({"sketches/raw", {"zzz"}});
+            put(home, "Downloads/s.zzz", 3000);
+            std::vector<std::string> d2;
+            auto qp = og::file_plan(q, og::propose(H, q, {H + "/Downloads/s.zzz"}), d2);
+            check("organize: a missing route folder is made first (parents first), then the move",
+                  qp.actions.size() == 3 && qp.actions[0].verb == dr::Verb::MakeDir && qp.actions[0].to == P + "sketches" &&
+                  qp.actions[1].to == P + "sketches/raw" && qp.actions[2].verb == dr::Verb::Move);
+            const std::string b5 = files_snapshot(home);
+            r = go(qp);
+            u = door.undo();
+            check("organize: ...through the door and back exactly (outside the Trash)", r.ok && u.ok && outside_trash(files_snapshot(home)) == outside_trash(b5), u.messages.empty() ? "" : u.messages.front());
+        }
+
+        // Flagged, not moved.
+        put(home, "Documents/Jobs/2611_Acme-Spring-Catalog/stray notes.txt", 100);
+        {
+            const auto c = og::contents(pj);
+            std::size_t misfit = 0;
+            bool hidden = false;
+            for (const auto& e : c) { misfit += !e.fits; hidden |= e.rel.find(".rouster") != std::string::npos; }
+            check("organize: contents -- the stray and the template's blank flagged; .rouster.json not listed",
+                  misfit == 2 && !hidden, std::to_string(misfit));
+        }
+
+        // New version.
+        const std::string rel = "brief/" + brief.filename().string();
+        const std::int64_t T1 = T0 + 3600;
+        std::string why;
+        auto vp = og::new_version(pj, rel, T1, why);
+        const std::string fresh = P + "brief/" + N + og::stamp(T1) + "_brief.md";
+        check("organize: new version plan -- Copy to the new stamp, then the old into versions/",
+              why.empty() && vp.actions.size() == 2 && vp.actions[0].verb == dr::Verb::Copy && vp.actions[0].to == fresh &&
+              vp.actions[1].verb == dr::Verb::Move && vp.actions[1].to == P + "versions/" + brief.filename().string(), why);
+        const std::string body = slurp(brief);
+        const std::string b6 = files_snapshot(home);
+        r = go(vp);
+        check("organize: new version through the door -- same text, old one in versions/",
+              r.ok && slurp(fresh) == body && !there(brief) && there(P + "versions/" + brief.filename().string()),
+              r.messages.empty() ? "" : r.messages.front());
+        {
+            std::string w1, w2, w3;
+            og::new_version(pj, "brief/" + fs::path(fresh).filename().string(), T1, w1);
+            og::new_version(pj, "stray notes.txt", T1, w2);
+            og::new_version(pj, "versions/" + brief.filename().string(), T1 + 600, w3);
+            check("organize: no new version -- this minute again, a misfit, an old version",
+                  !w1.empty() && !w2.empty() && !w3.empty(), w1);
+        }
+        u = door.undo();
+        check("organize: undo the new version -- exact outside the Trash, the copy in the Trash",
+              u.ok && outside_trash(files_snapshot(home)) == outside_trash(b6) &&
+              there(home / (".local/share/Trash/files/" + fs::path(fresh).filename().string())),
+              u.messages.empty() ? "" : u.messages.front());
+        {   // Copy refusals
+            fs::create_directories(home / ".ssh", ec);
+            put(home, ".ssh/key", 10);
+            dr::Action c1; c1.verb = dr::Verb::Copy; c1.from = H + "/Documents"; c1.to = H + "/Documents/d2";
+            dr::Action c2; c2.verb = dr::Verb::Copy; c2.from = H + "/.ssh/key"; c2.to = H + "/Documents/key";
+            dr::Action c3; c3.verb = dr::Verb::Copy; c3.from = "/etc/hostname"; c3.to = H + "/Documents/h";
+            dr::Action c4; c4.verb = dr::Verb::Copy; c4.from = brief.string(); c4.to = pdir + "/stray notes.txt";
+            dr::Action c5; c5.verb = dr::Verb::Copy; c5.from = brief.string(); c5.to = H + "/.ssh/b.md";
+            check("door: copy refuses -- a folder, a protected source, outside home, an existing target, a protected target",
+                  !door.refusal(c1).empty() && !door.refusal(c2).empty() && !door.refusal(c3).empty() &&
+                  !door.refusal(c4).empty() && !door.refusal(c5).empty());
+        }
+        {   // the manifest keeps the copy's source
+            dr::Door d2(H, H + "/.local/share/rouster");
+            d2.load();
+            bool src = false;
+            for (const auto& b : d2.batches())
+                for (auto id : b.records)
+                    if (const auto* rec = d2.record(id); rec && rec->verb == dr::Verb::Copy && rec->src == brief.string()) src = true;
+            check("door: the manifest records what a copy was made from", src);
         }
         fs::remove_all(home, ec);
     }

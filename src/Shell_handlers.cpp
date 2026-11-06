@@ -11,8 +11,11 @@
 #include <gtkmm/filedialog.h>
 #include <giomm/asyncresult.h>
 #include <giomm/file.h>
+#include <giomm/appinfo.h>
+#include <glibmm/convert.h>
 
 #include <chrono>
+#include <cstring>
 #include <ctime>
 #include <filesystem>
 
@@ -27,6 +30,7 @@ void Shell::on_nav(const std::string& page) {  // handler: a sidebar row was cho
     add_css_class("page-" + page);   // the window's gradient follows the module (rouster.css)
     m_stack.set_visible_child(page);
     if (page == "preflight" || page == "sweep" || page == "dev" || page == "dups" || page == "archive") paint_preflight();   // fresh gate on arrival
+    if (page == "projects" && m_pj_states.get_visible_child_name() == "home") paint_projects();   // templates may have been edited in Files
     if (page == "activity") paint_activity();
 }
 
@@ -81,6 +85,12 @@ void Shell::on_undo() {  // handler: undo the last batch, through the door
         m_du_sub.set_text("Undone. A Trash step is back where it was; a shared step is closed -- the files were "
                           "and are identical, so there was nothing to move. Look again to see it.");
         m_du_states.set_visible_child("start");
+    }
+    if (const auto pj = m_pj_states.get_visible_child_name(); pj == "done" || pj == "project" || pj == "home") {
+        const std::string open = m_pj_open.path;
+        if (m_pj_has_open && !core::organize::load_project(open, m_pj_open)) m_pj_has_open = false;   // undone away
+        if (pj != "project" || !m_pj_has_open) on_pj_home();
+        else paint_pj_project();
     }
     if (m_dv_states.get_visible_child_name() == "done") {
         m_dv_sub.set_text("Undone -- the build output is back where it was. Look again to see it.");
@@ -460,6 +470,233 @@ void Shell::on_archive_run() {  // handler: checked rows -> a plan -> the door
     m_ar_states.set_visible_child("done");
     archive_gate();
     paint_activity();
+}
+
+// ── Projects (s010) ──────────────────────────────────────────────────────────
+void Shell::on_pj_home() {  // handler: back to templates + projects (re-read)
+    paint_projects();
+    m_pj_states.set_visible_child("home");
+}
+
+void Shell::on_pj_new(std::size_t tmpl) {  // handler: a template's New project... -> the form
+    if (tmpl >= m_pj_templates.size()) return;
+    m_pj_tmpl = tmpl;
+    m_pj_new_title.set_text("New " + m_pj_templates[tmpl].name);
+    m_pj_id.set_text("");
+    m_pj_title.set_text("");
+    on_pj_form();
+    m_pj_states.set_visible_child("new");
+    m_pj_id.grab_focus();
+}
+
+void Shell::on_pj_form() {  // handler: id / title typed -> the plan again
+    namespace og = core::organize;
+    if (m_pj_tmpl >= m_pj_templates.size()) return;
+    const auto& t = m_pj_templates[m_pj_tmpl];
+    const og::Values v{m_pj_id.get_text(), m_pj_title.get_text(), static_cast<std::int64_t>(std::time(nullptr))};
+    std::vector<std::string> problems;
+    m_pj_plan = og::new_project(m_home, t, v, problems);
+    m_pj_plan_gated = false;
+    const std::string dir = og::project_dir(m_home, t, v);
+    m_pj_new_where.set_text("~/" + t.root + "/" + og::fill(t.folder, v) + "    ·    " +
+                            (t.rules.pattern.empty() ? std::string("file names kept as they are") : t.rules.pattern));
+    while (auto* c = m_pj_new_list.get_first_child()) m_pj_new_list.remove(*c);
+    if (!problems.empty()) {
+        m_pj_new_gate.set_text(problems.front() + ".");
+        m_pj_new_go.set_label("Create");
+        m_pj_new_go.set_sensitive(false);
+        return;
+    }
+    paint_pj_plan(m_pj_new_list, m_pj_plan);
+    m_pj_new_go.set_label("Create " + std::filesystem::path(dir).filename().string());
+    m_pj_new_gate.set_text("One step: " + std::to_string(m_pj_plan.actions.size()) +
+                           " things made. Undo sends what was made to the Trash.");
+    m_pj_new_go.set_sensitive(!door_busy());
+}
+
+void Shell::on_pj_create() {  // handler: the form's plan -> the door
+    namespace og = core::organize;
+    if (!m_door || door_busy() || m_pj_plan.actions.empty()) return;
+    if (m_pj_states.get_visible_child_name() != "new") return;   // preview first: only from the form
+    m_pj_plan.previewed = true;   // the list on screen was the preview
+    const auto r = m_door->run(m_pj_plan);
+    if (auto lg = log::get(log::Area::Organize)) {
+        lg->info("run '{}': {} done, {} failed", m_pj_plan.label, r.done, r.failed);
+        for (const auto& m : r.messages) lg->warn("  {}", m);
+    }
+    std::string dir;
+    for (const auto& a : m_pj_plan.actions)
+        if (a.to.size() > 13 && a.to.ends_with(std::string("/") + og::kMeta)) dir = a.to.substr(0, a.to.size() - std::strlen(og::kMeta) - 1);
+    if (r.ok && og::load_project(dir, m_pj_open)) {
+        m_pj_has_open = true;
+        m_pj_queue.clear();
+        m_pj_back = "project";
+    } else {
+        m_pj_back = "home";
+    }
+    const std::string name = std::filesystem::path(dir).filename().string();
+    pj_done(r, name, "Ready at ~/" + (dir.size() > m_home.size() ? dir.substr(m_home.size() + 1) : dir) +
+                     ". Drop files on it to file them by its pattern.", m_pj_back);
+}
+
+void Shell::on_pj_starters() {  // handler: Install starter templates... -> the preview
+    std::vector<std::string> skipped;
+    m_pj_plan = core::organize::starters(m_home, skipped);
+    m_pj_plan_gated = false;
+    m_pj_back = "home";
+    m_pj_pv_title.set_text("Starter templates");
+    m_pj_pv_sub.set_text(std::string("Plain folders in ~/") + core::organize::kTemplates +
+                         " -- open them in Files and make them yours. Design job and Book name files "
+                         "{id}_{title}_{yyyymmdd-hhmm}_{part}.{ext}; edit a template's .rouster.json to change that." +
+                         (skipped.empty() ? std::string() : "  Already there, left alone: " + std::to_string(skipped.size()) + "."));
+    while (auto* c = m_pj_pv_list.get_first_child()) m_pj_pv_list.remove(*c);
+    paint_pj_plan(m_pj_pv_list, m_pj_plan);
+    m_pj_pv_go.set_label("Install");
+    m_pj_pv_go.set_sensitive(!m_pj_plan.actions.empty() && !door_busy());
+    m_pj_pv_gate.set_text(m_pj_plan.actions.empty() ? "All three are there already." : "One step. Undo sends them to the Trash.");
+    m_pj_states.set_visible_child("preview");
+}
+
+void Shell::on_pj_version(const std::string& rel) {  // handler: a row's New version -> the preview
+    if (!m_pj_has_open) return;
+    std::string why;
+    m_pj_plan = core::organize::new_version(m_pj_open, rel, static_cast<std::int64_t>(std::time(nullptr)), why);
+    m_pj_plan_gated = true;
+    m_pj_back = "project";
+    m_pj_pv_title.set_text("New version");
+    m_pj_pv_sub.set_text(rel);
+    while (auto* c = m_pj_pv_list.get_first_child()) m_pj_pv_list.remove(*c);
+    if (!why.empty()) {
+        m_pj_pv_gate.set_text("No new version: " + why + ".");
+        m_pj_pv_go.set_label("Make the version");
+        m_pj_pv_go.set_sensitive(false);
+    } else {
+        paint_pj_plan(m_pj_pv_list, m_pj_plan);
+        m_pj_pv_go.set_label("Make the version");
+        paint_preflight();
+        m_pj_pv_gate.set_text(m_pf_red ? "Preflight has a red check. This waits until it clears -- see Preflight."
+                                       : "The copy is the new current file; the old one goes into " +
+                                             m_pj_open.rules.versions + "/. One step; Undo takes it back.");
+        m_pj_pv_go.set_sensitive(!m_pf_red && !door_busy());
+    }
+    m_pj_states.set_visible_child("preview");
+}
+
+void Shell::on_pj_confirm() {  // handler: the preview's act button -> the door
+    if (!m_door || door_busy() || m_pj_plan.actions.empty()) return;
+    if (m_pj_states.get_visible_child_name() != "preview") return;
+    if (m_pj_plan_gated) { paint_preflight(); if (m_pf_red) return; }
+    m_pj_plan.previewed = true;   // the list on screen was the preview
+    const auto r = m_door->run(m_pj_plan);
+    if (auto lg = log::get(log::Area::Organize)) {
+        lg->info("run '{}': {} done, {} failed", m_pj_plan.label, r.done, r.failed);
+        for (const auto& m : r.messages) lg->warn("  {}", m);
+    }
+    pj_done(r, m_pj_plan_gated ? "New version" : "Templates installed",
+            m_pj_plan_gated ? "The copy is the current file now; the old one is in " + m_pj_open.rules.versions + "/."
+                            : std::string("Open them in Files, ~/") + core::organize::kTemplates + ", and make them yours.", m_pj_back);
+}
+
+void Shell::on_pj_open(const std::string& dir) {  // handler: open a project
+    core::organize::Project p;
+    if (!core::organize::load_project(dir, p)) {
+        paint_projects();
+        m_pj_states.set_visible_child("home");
+        if (auto lg = log::get(log::Area::Organize)) lg->warn("not a project (no {}): {}", core::organize::kMeta, dir);
+        return;
+    }
+    if (!m_pj_has_open || m_pj_open.path != p.path) m_pj_queue.clear();
+    m_pj_open = p;
+    m_pj_has_open = true;
+    paint_pj_project();
+    m_pj_states.set_visible_child("project");
+}
+
+void Shell::on_pj_pick_project() {  // handler: folder chooser -> open a project
+    auto dialog = Gtk::FileDialog::create();
+    dialog->set_title("Open a project folder");
+    dialog->set_initial_folder(Gio::File::create_for_path(m_home));
+    dialog->select_folder(*this, [this, dialog](const Glib::RefPtr<Gio::AsyncResult>& result) {
+        try {
+            auto dir = dialog->select_folder_finish(result);
+            if (dir && !dir->get_path().empty()) on_pj_open(dir->get_path());
+        } catch (const Glib::Error& e) {
+            if (auto lg = log::get(log::Area::Organize)) lg->info("open project: dialog dismissed ({})", e.what());
+        }
+    });
+}
+
+void Shell::on_pj_add_files() {  // handler: file chooser -> the queue
+    auto dialog = Gtk::FileDialog::create();
+    dialog->set_title("Files to file into the project");
+    dialog->set_initial_folder(Gio::File::create_for_path(std::filesystem::exists(m_home + "/Downloads") ? m_home + "/Downloads" : m_home));
+    dialog->open_multiple(*this, [this, dialog](const Glib::RefPtr<Gio::AsyncResult>& result) {
+        try {
+            std::vector<std::string> paths;
+            for (const auto& f : dialog->open_multiple_finish(result))
+                if (f && !f->get_path().empty()) paths.push_back(f->get_path());
+            on_pj_dropped(paths);
+        } catch (const Glib::Error& e) {
+            if (auto lg = log::get(log::Area::Organize)) lg->info("add files: dialog dismissed ({})", e.what());
+        }
+    });
+}
+
+void Shell::on_pj_dropped(const std::vector<std::string>& paths) {  // handler: files dropped / chosen -> the queue
+    if (!m_pj_has_open || paths.empty()) return;
+    std::vector<std::string> all;
+    std::vector<std::pair<std::string, bool>> checks;
+    for (const auto& q : m_pj_queue) { all.push_back(q.from); checks.emplace_back(q.from, q.checked); }
+    for (const auto& p : paths)
+        if (std::find(all.begin(), all.end(), p) == all.end()) all.push_back(p);
+    m_pj_queue = core::organize::propose(m_home, m_pj_open, all);   // looks, changes nothing
+    for (auto& q : m_pj_queue)
+        for (const auto& [from, c] : checks)
+            if (q.from == from && !q.to.empty()) q.checked = c;
+    if (auto lg = log::get(log::Area::Organize)) {
+        lg->info("queue: {} files for {}", m_pj_queue.size(), m_pj_open.path);
+        for (const auto& q : m_pj_queue) lg->info("  {} -> {}", q.from, q.to.empty() ? "(" + q.note + ")" : q.to);
+    }
+    paint_pj_project();
+    m_pj_states.set_visible_child("project");
+}
+
+void Shell::on_pj_file() {  // handler: the checked queue -> a plan -> the door
+    if (!m_door || door_busy() || !m_pj_has_open) return;
+    if (m_pj_states.get_visible_child_name() != "project") return;   // preview first: only from the queue
+    paint_preflight();
+    if (m_pf_red) { pj_gate(); return; }
+    std::vector<std::string> dropped;
+    core::door::Plan plan = core::organize::file_plan(m_pj_open, m_pj_queue, dropped);
+    std::size_t moves = 0;
+    for (const auto& a : plan.actions) moves += a.verb == core::door::Verb::Move;
+    if (auto lg = log::get(log::Area::Organize)) {
+        lg->info("run '{}': {} actions", plan.label, plan.actions.size());
+        for (const auto& d : dropped) lg->info("  left out: {}", d);
+    }
+    if (!moves) {
+        m_pj_gate.set_text(dropped.empty() ? std::string("Nothing to file.") : dropped.front() + " -- drop it again.");
+        return;
+    }
+    plan.previewed = true;   // the queue on screen was the preview
+    const auto r = m_door->run(plan);
+    if (auto lg = log::get(log::Area::Organize)) {
+        lg->info("run: {} done, {} failed", r.done, r.failed);
+        for (const auto& m : r.messages) lg->warn("  {}", m);
+    }
+    m_pj_queue.clear();
+    pj_done(r, "Filed " + std::to_string(moves) + (moves == 1 ? " file" : " files"),
+            "Named by the project's pattern, each in the folder its type goes to." +
+               (dropped.empty() ? std::string() : " " + std::to_string(dropped.size()) + " left out: " + dropped.front() + "."),
+            "project");
+}
+
+void Shell::on_pj_show(const std::string& path) {  // handler: open a folder in Files
+    try {
+        Gio::AppInfo::launch_default_for_uri(Glib::filename_to_uri(path));
+    } catch (const Glib::Error& e) {
+        if (auto lg = log::get(log::Area::Organize)) lg->warn("could not open {}: {}", path, e.what());
+    }
 }
 
 // ── Dev projects (s007) ──────────────────────────────────────────────────────
