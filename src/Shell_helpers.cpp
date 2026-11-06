@@ -1,10 +1,12 @@
 #include "Shell.hpp"
 #include "core/Recents.hpp"
 #include "core/Preflight.hpp"
+#include "core/Settings.hpp"
 #include "Log.hpp"
 
 #include <gtkmm/label.h>
 #include <gtkmm/checkbutton.h>
+#include <gtkmm/switch.h>
 #include <gtkmm/togglebutton.h>
 #include <gtkmm/dropdown.h>
 #include <gtkmm/stringlist.h>
@@ -340,12 +342,13 @@ void Shell::paint_preflight() {  // helper: gather + evaluate + repaint the card
     }
     m_pf_summary.set_text(std::to_string(green) + " of " + std::to_string(checks.size()) + " checks green" +
                           (red ? ", " + std::to_string(red) + " red" : std::string{}) +
-                          ". A red check stops Sweep, Duplicates, Dev projects, Archive and filing into a project until it clears.");
+                          ". A red check stops Sweep, Duplicates, Dev projects, Archive, filing into a project and Rules until it clears.");
     m_pf_red = red > 0;
     sweep_gate();
     dups_gate();
     archive_gate();
     pj_gate();
+    rl_gate();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -859,6 +862,202 @@ void Shell::archive_gate() {  // helper: the act button's label + whether it may
     else
         m_ar_gate.set_text("One step. Undo takes it back; Put back works any time later.");
     if (m_act_ar_run) m_act_ar_run->set_enabled(n > 0 && !m_pf_red && !busy);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Rules (s011). Matching reads one folder's top level per watched folder, so it
+// runs on the UI thread; the matches shown are the preview.
+// ─────────────────────────────────────────────────────────────────────────────
+void Shell::rl_save(bool write) {  // helper: rules.json (core::save_own) + the timer
+    if (write && !core::save_own(data_dir(), core::rules::kFile, core::rules::to_json(m_rl_book)))
+        if (auto lg = log::get(log::Area::Rules)) lg->warn("could not save {}/{}", data_dir(), core::rules::kFile);
+    m_rl_timer.disconnect();
+    if (m_rl_book.watch) m_rl_timer = Glib::signal_timeout().connect_seconds(sigc::mem_fun(*this, &Shell::on_rl_tick), 600);
+}
+
+void Shell::paint_rules() {  // helper: the list state -- the rules in order
+    namespace rl = core::rules;
+    while (auto* c = m_rl_list.get_first_child()) m_rl_list.remove(*c);
+    const auto small = [](const char* l) {
+        auto b = Gtk::make_managed<Gtk::Button>(l);
+        b->add_css_class("ghost");
+        b->add_css_class("small");
+        b->set_valign(Gtk::Align::CENTER);
+        return b;
+    };
+    auto head = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 20);
+    auto img = Gtk::make_managed<Gtk::Image>();
+    img->set_from_icon_name("rouster-hero-rules");
+    img->set_pixel_size(88);
+    head->append(*img);
+    auto words = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 2);
+    words->set_valign(Gtk::Align::CENTER);
+    words->set_hexpand(true);
+    words->append(*text("Rules", "hero-big"));
+    auto cap = text("Each rule watches a folder -- Downloads is the inbox -- and moves what matches. A file goes to the "
+                    "first rule that matches it. A rule is turned on only after you've seen its matches.", "hero-caption");
+    cap->set_wrap(true);
+    words->append(*cap);
+    head->append(*words);
+    auto run = Gtk::make_managed<Gtk::Button>("Run rules now");
+    run->add_css_class("act");
+    run->set_valign(Gtk::Align::CENTER);
+    std::size_t on = 0;
+    for (const auto& r : m_rl_book.rules) on += r.enabled;
+    run->set_sensitive(on > 0);
+    run->signal_clicked().connect([this] { on_rl_preview(); });
+    head->append(*run);
+    m_rl_list.append(*head);
+
+    // The controls.
+    auto ctl = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 10);
+    auto add = small("New rule...");
+    add->signal_clicked().connect([this] { on_rl_edit(static_cast<std::size_t>(-1)); });
+    ctl->append(*add);
+    bool missing = false;
+    for (const auto& s : rl::starters()) {
+        bool have = false;
+        for (const auto& r : m_rl_book.rules) have |= r.name == s.name;
+        missing |= !have;
+    }
+    if (missing) {
+        auto st = small("Add starter rules (off)");
+        st->signal_clicked().connect([this] { on_rl_starters(); });
+        ctl->append(*st);
+    }
+    auto sp = Gtk::make_managed<Gtk::Box>();
+    sp->set_hexpand(true);
+    ctl->append(*sp);
+    ctl->append(*text("Watch while Rouster is open (every 10 minutes)", "dim", 1.0f));
+    auto sw = Gtk::make_managed<Gtk::Switch>();
+    sw->set_active(m_rl_book.watch);
+    sw->set_valign(Gtk::Align::CENTER);
+    sw->property_active().signal_changed().connect([this, sw] {
+        Glib::signal_idle().connect_once([this, a = sw->get_active()] { on_rl_watch(a); });
+    });
+    ctl->append(*sw);
+    m_rl_list.append(*ctl);
+    if (!m_rl_said.empty() || m_rl_deleted) {
+        auto said = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 10);
+        said->append(*text(m_rl_said, "dim"));
+        if (m_rl_deleted) {
+            auto back = small("Put it back");
+            back->signal_clicked().connect([this] { on_rl_undelete(); });
+            said->append(*back);
+        }
+        m_rl_list.append(*said);
+    }
+
+    // The rules.
+    auto card = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 4);
+    card->add_css_class("card");
+    const auto n = m_rl_book.rules.size();
+    for (std::size_t i = 0; i < n; ++i) {
+        const auto& r = m_rl_book.rules[i];
+        const std::string why = rl::problem(r, m_home);
+        auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 12);
+        row->add_css_class("sweep-row");
+        auto s = Gtk::make_managed<Gtk::Switch>();
+        s->set_active(r.enabled);
+        s->set_valign(Gtk::Align::CENTER);
+        s->property_active().signal_changed().connect([this, s, i] {
+            Glib::signal_idle().connect_once([this, i, a = s->get_active()] { on_rl_toggle(i, a); });
+        });
+        row->append(*s);
+        auto w = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 1);
+        w->set_hexpand(true);
+        w->append(*text(std::to_string(i + 1) + ".  " + r.name, "card-title"));
+        auto sum = text(rl::summary(r), "dim");
+        sum->set_wrap(true);
+        w->append(*sum);
+        if (!why.empty()) w->append(*text("Can't run: " + why, "pj-misfit"));
+        row->append(*w);
+        auto up = small("↑");
+        up->set_sensitive(i > 0);
+        up->signal_clicked().connect([this, i] { on_rl_move(i, -1); });
+        auto dn = small("↓");
+        dn->set_sensitive(i + 1 < n);
+        dn->signal_clicked().connect([this, i] { on_rl_move(i, +1); });
+        auto ed = small("Edit");
+        ed->signal_clicked().connect([this, i] { on_rl_edit(i); });
+        row->append(*up);
+        row->append(*dn);
+        row->append(*ed);
+        card->append(*row);
+    }
+    if (!n) card->append(*text("No rules yet. Start from the starters (they come in off) or make your own.", "dim"));
+    m_rl_list.append(*card);
+    auto foot = text("Rules look only at the top of each watched folder, never at hidden files, partial downloads, or "
+                     "anything changed in the last two minutes. Each run is one step in Activity; Undo takes it back.", "dim");
+    foot->set_wrap(true);
+    m_rl_list.append(*foot);
+}
+
+void Shell::paint_rl_matches(Gtk::Box& box, std::vector<core::rules::Match>& ms, bool checks) {  // helper: matches by rule
+    while (auto* c = box.get_first_child()) box.remove(*c);
+    const auto tilde = [this](const std::string& p) {
+        return p.rfind(m_home + "/", 0) == 0 ? "~/" + p.substr(m_home.size() + 1) : p;
+    };
+    std::size_t painted = 0;
+    for (std::size_t ri = 0; ri < std::max<std::size_t>(m_rl_book.rules.size(), 1); ++ri) {
+        Gtk::Box* card = nullptr;
+        for (std::size_t k = 0; k < ms.size(); ++k) {
+            auto& m = ms[k];
+            if (checks ? m.rule != ri : ri != 0) continue;
+            if (painted >= kProjectShown) { m.checked = false; continue; }   // never unseen
+            if (!card) {
+                card = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 4);
+                card->add_css_class("card");
+                std::size_t cnt = 0;
+                for (const auto& x : ms) cnt += checks ? x.rule == ri : 1;
+                const std::string title = checks && ri < m_rl_book.rules.size() ? m_rl_book.rules[ri].name : "Matches now";
+                card->append(*text(title + " · " + with_commas(cnt), "card-title"));
+            }
+            ++painted;
+            auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 12);
+            row->add_css_class("sweep-row");
+            if (checks) {
+                auto cb = Gtk::make_managed<Gtk::CheckButton>();
+                const bool can = m.note.empty();
+                cb->set_active(m.checked && can);
+                cb->set_sensitive(can);
+                cb->signal_toggled().connect([this, cb, k] {
+                    if (k < m_rl_matches.size()) m_rl_matches[k].checked = cb->get_active();
+                    rl_gate();
+                });
+                row->append(*cb);
+            }
+            auto from = text(std::filesystem::path(m.from).filename().string(), "detail-path");
+            from->set_ellipsize(Pango::EllipsizeMode::MIDDLE);
+            from->set_width_chars(22);
+            from->set_max_width_chars(32);
+            from->set_tooltip_text(m.from);
+            row->append(*from);
+            row->append(*text("->", "dim"));
+            const bool trash = m.to.empty() && m.note.empty();
+            auto to = text(!m.note.empty() ? m.note : trash ? std::string("the Trash") : tilde(m.to), m.note.empty() ? "detail-path" : "dim");
+            to->set_hexpand(true);
+            to->set_ellipsize(Pango::EllipsizeMode::MIDDLE);
+            to->set_tooltip_text(m.to.empty() ? m.note : m.to);
+            row->append(*to);
+            auto sz = text(core::scan::human_bytes(m.bytes), "detail-size", 1.0f);
+            sz->set_width_chars(9);
+            row->append(*sz);
+            card->append(*row);
+        }
+        if (card) box.append(*card);
+    }
+    if (ms.empty()) box.append(*text(checks ? "Nothing matches any rule that's on right now." : "Nothing matches right now.", "hero-caption", 0.5f));
+}
+
+void Shell::rl_gate() {  // helper: the run button's label + whether it may act
+    std::size_t n = 0;
+    for (const auto& m : m_rl_matches) n += m.checked && m.note.empty();
+    m_rl_go.set_label(n ? "Do it for " + with_commas(n) + (n == 1 ? " file" : " files") : "Do it");
+    if (m_pf_red && n) m_rl_run_gate.set_text("Preflight has a red check. Rules wait until it clears -- see Preflight.");
+    else if (!n) m_rl_run_gate.set_text("Nothing checked.");
+    else m_rl_run_gate.set_text("One step; Undo takes it back.");
+    m_rl_go.set_sensitive(n > 0 && !m_pf_red && !door_busy());
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

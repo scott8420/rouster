@@ -8,6 +8,8 @@
 #include <gtkmm/scrolledwindow.h>
 #include <gtkmm/droptarget.h>
 #include <gdk/gdk.h>
+#include <gtkmm/dropdown.h>
+#include <gtkmm/stringlist.h>
 
 // Shell_zones.cpp -- ZONES. Construction of the named regions: the window frame,
 // the sidebar, each module page, and the menu model. The look is CSS
@@ -94,6 +96,7 @@ void Shell::build_sidebar() {  // zone: brand + sections + module rows
     item("dev", "rouster-dev-symbolic", "Dev projects");
     section("ORGANIZE");
     item("projects", "rouster-projects-symbolic", "Projects");
+    item("rules", "rouster-rules-symbolic", "Rules");
     item("archive", "rouster-archive-symbolic", "Archive");
     section("SAFETY");
     item("preflight", "rouster-preflight-symbolic", "Preflight");
@@ -114,6 +117,7 @@ void Shell::build_pages() {  // zone: the module pages
     build_dups_page();
     build_archive_page();
     build_projects_page();
+    build_rules_page();
     build_dev_page();
     build_preflight_page();
     build_activity_page();
@@ -870,6 +874,180 @@ void Shell::build_projects_page() {  // zone: Projects
 
     m_pj_page.append(m_pj_states);
     m_stack.add(m_pj_page, "projects", "Projects");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Rules (s011, §4.7) -- Hazel-shaped. Four states:
+//   list : the rules in order (first match wins), each with its switch, Edit,
+//          up / down; New rule, Add starter rules, Watch while open, and
+//          Run rules now.
+//   edit : the form; the draft's matches below it ARE the preview -- a rule
+//          is turned on from here, after its matches were shown.
+//   run  : every enabled rule's matches, checked; the act bar.
+//   done : what happened; Undo / Activity / Back.
+// ─────────────────────────────────────────────────────────────────────────────
+void Shell::build_rules_page() {  // zone: Rules
+    m_rl_states.set_transition_type(Gtk::StackTransitionType::CROSSFADE);
+    m_rl_states.set_transition_duration(220);
+    m_rl_states.set_vexpand(true);
+    const auto scrolled = [](Gtk::Widget& child) {
+        auto scroll = Gtk::make_managed<Gtk::ScrolledWindow>();
+        scroll->set_policy(Gtk::PolicyType::NEVER, Gtk::PolicyType::AUTOMATIC);
+        scroll->set_vexpand(true);
+        child.set_margin_start(32);
+        child.set_margin_end(32);
+        child.set_margin_top(12);
+        child.set_margin_bottom(16);
+        scroll->set_child(child);
+        return scroll;
+    };
+    const auto bar_with = [](Gtk::Label& gate) {
+        auto bar = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 12);
+        bar->add_css_class("act-bar");
+        gate.add_css_class("dim");
+        gate.set_xalign(0.0f);
+        gate.set_hexpand(true);
+        gate.set_wrap(true);
+        bar->append(gate);
+        return bar;
+    };
+    const auto back = [this] {
+        auto b = Gtk::make_managed<Gtk::Button>("Back");
+        b->add_css_class("ghost");
+        b->set_valign(Gtk::Align::CENTER);
+        b->signal_clicked().connect([this] { paint_rules(); m_rl_states.set_visible_child("list"); });
+        return b;
+    };
+
+    m_rl_states.add(*scrolled(m_rl_list), "list");
+
+    // edit
+    {
+        auto page = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 0);
+        auto body = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 10);
+        auto head = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 20);
+        head->append(*hero("rouster-hero-rules", 72));
+        auto words = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 2);
+        words->set_valign(Gtk::Align::CENTER);
+        words->set_hexpand(true);
+        m_rl_edit_title.add_css_class("hero-big");
+        m_rl_edit_title.set_xalign(0.0f);
+        words->append(m_rl_edit_title);
+        m_rl_summary.add_css_class("hero-caption");
+        m_rl_summary.set_xalign(0.0f);
+        m_rl_summary.set_wrap(true);
+        words->append(m_rl_summary);
+        head->append(*words);
+        head->append(*back());
+        body->append(*head);
+
+        auto grid = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 6);
+        grid->add_css_class("card");
+        const auto field = [&](const char* label, Gtk::Widget& w, const char* hint) {
+            auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 12);
+            auto l = Gtk::make_managed<Gtk::Label>(label);
+            l->add_css_class("card-sub");
+            l->set_xalign(1.0f);
+            l->set_width_chars(14);
+            row->append(*l);
+            w.set_hexpand(true);
+            row->append(w);
+            if (hint) {
+                auto h = Gtk::make_managed<Gtk::Label>(hint);
+                h->add_css_class("dim");
+                h->set_width_chars(26);
+                h->set_xalign(0.0f);
+                h->set_wrap(true);
+                row->append(*h);
+            }
+            grid->append(*row);
+        };
+        field("Name", m_rl_name, nullptr);
+        field("Watch ~/", m_rl_folder, "a folder under home; its top only");
+        field("Name matches", m_rl_glob, "* and ?, any case; empty = any");
+        field("Kinds", m_rl_exts, "extensions: pdf jpg; empty = any");
+        field("Untouched for", m_rl_days, "days; empty = any age");
+        m_rl_do = Gtk::make_managed<Gtk::DropDown>(Gtk::StringList::create(
+            {"Move to a folder", "Move to the Trash", "Archive (~/Archive/<year>/...)", "File into a project"}));
+        field("Then", *m_rl_do, nullptr);
+        field("To ~/", m_rl_dest, "a folder (may use {year}); for File, the project");
+        field("Rename to", m_rl_rename, "Move only; {stem} {ext} {yyyymmdd} {yyyymmdd-hhmm}; empty = keep");
+        body->append(*grid);
+        for (auto* e : {&m_rl_name, &m_rl_folder, &m_rl_glob, &m_rl_exts, &m_rl_days, &m_rl_dest, &m_rl_rename})
+            e->signal_changed().connect([this] { on_rl_form(); });
+        m_rl_do->property_selected().signal_changed().connect([this] { on_rl_form(); });
+        body->append(m_rl_preview);
+        page->append(*scrolled(*body));
+        auto bar = bar_with(m_rl_edit_gate);
+        m_rl_delete.set_label("Delete");
+        m_rl_delete.add_css_class("ghost");
+        m_rl_delete.signal_clicked().connect([this] { on_rl_delete(); });
+        m_rl_save_off.set_label("Save, off");
+        m_rl_save_off.add_css_class("ghost");
+        m_rl_save_off.signal_clicked().connect([this] { on_rl_save(false); });
+        m_rl_save_on.set_label("Save and turn on");
+        m_rl_save_on.add_css_class("act");
+        m_rl_save_on.signal_clicked().connect([this] { on_rl_save(true); });
+        bar->append(m_rl_delete);
+        bar->append(m_rl_save_off);
+        bar->append(m_rl_save_on);
+        page->append(*bar);
+        m_rl_states.add(*page, "edit");
+    }
+
+    // run
+    {
+        auto page = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 0);
+        auto body = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 12);
+        auto head = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 20);
+        head->append(*hero("rouster-hero-rules", 72));
+        auto t = label("Run rules now", "hero-big", 0.0f);
+        t->set_hexpand(true);
+        head->append(*t);
+        head->append(*back());
+        body->append(*head);
+        body->append(m_rl_run_list);
+        page->append(*scrolled(*body));
+        auto bar = bar_with(m_rl_run_gate);
+        m_rl_go.add_css_class("act");
+        m_rl_go.signal_clicked().connect([this] { on_rl_run(); });
+        bar->append(m_rl_go);
+        page->append(*bar);
+        m_rl_states.add(*page, "run");
+    }
+
+    // done
+    {
+        auto done = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 12);
+        done->set_valign(Gtk::Align::CENTER);
+        done->set_halign(Gtk::Align::CENTER);
+        done->set_margin(40);
+        done->append(*hero("rouster-hero-done", 112));
+        m_rl_done_big.add_css_class("hero-big");
+        done->append(m_rl_done_big);
+        m_rl_done_caption.add_css_class("hero-sub");
+        m_rl_done_caption.set_wrap(true);
+        m_rl_done_caption.set_justify(Gtk::Justification::CENTER);
+        m_rl_done_caption.set_max_width_chars(60);
+        done->append(m_rl_done_caption);
+        auto btns = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 12);
+        btns->set_halign(Gtk::Align::CENTER);
+        btns->set_margin_top(12);
+        auto undo = Gtk::make_managed<Gtk::Button>("Undo");
+        undo->add_css_class("ghost");
+        undo->set_action_name("win.undo");
+        auto act = Gtk::make_managed<Gtk::Button>("Activity");
+        act->add_css_class("ghost");
+        act->signal_clicked().connect([this] { go_to("activity"); });
+        btns->append(*undo);
+        btns->append(*act);
+        btns->append(*back());
+        done->append(*btns);
+        m_rl_states.add(*done, "done");
+    }
+
+    m_rl_page.append(m_rl_states);
+    m_stack.add(m_rl_page, "rules", "Rules");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

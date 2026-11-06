@@ -116,6 +116,22 @@ Shell::Shell()
       m_pj_done_big("shell.projects.done_big"),
       m_pj_done_caption("shell.projects.done_caption"),
       m_pj_done_back("shell.projects.done_back"),
+      m_rl_page("shell.rules.page", Gtk::Orientation::VERTICAL),
+      m_rl_states("shell.rules.states"),
+      m_rl_list("shell.rules.list", Gtk::Orientation::VERTICAL, 14),
+      m_rl_name("shell.rules.name"), m_rl_folder("shell.rules.folder"), m_rl_glob("shell.rules.glob"),
+      m_rl_exts("shell.rules.exts"), m_rl_days("shell.rules.days"), m_rl_dest("shell.rules.dest"),
+      m_rl_rename("shell.rules.rename"),
+      m_rl_edit_title("shell.rules.edit_title"),
+      m_rl_summary("shell.rules.summary"),
+      m_rl_preview("shell.rules.preview", Gtk::Orientation::VERTICAL, 8),
+      m_rl_edit_gate("shell.rules.edit_gate"),
+      m_rl_save_off("shell.rules.save_off"), m_rl_save_on("shell.rules.save_on"), m_rl_delete("shell.rules.delete"),
+      m_rl_run_list("shell.rules.run_list", Gtk::Orientation::VERTICAL, 10),
+      m_rl_run_gate("shell.rules.run_gate"),
+      m_rl_go("shell.rules.go"),
+      m_rl_done_big("shell.rules.done_big"),
+      m_rl_done_caption("shell.rules.done_caption"),
       m_pf_page("shell.preflight.page", Gtk::Orientation::VERTICAL, 10),
       m_pf_summary("shell.preflight.summary"),
       m_pf_rows("shell.preflight.rows", Gtk::Orientation::VERTICAL, 10),
@@ -130,7 +146,7 @@ Shell::Shell()
 
 // The worker must be gone before the members it touches (m_report, the
 // dispatcher). close-request does this too; the dtor is the backstop.
-Shell::~Shell() { stop_scan(); stop_sweep(); stop_dev(); stop_dups(); stop_archive(); }
+Shell::~Shell() { m_rl_timer.disconnect(); stop_scan(); stop_sweep(); stop_dev(); stop_dups(); stop_archive(); }
 
 void Shell::build_ui() {
     m_home = home_dir();
@@ -146,6 +162,9 @@ void Shell::build_ui() {
     paint_preflight();
     paint_activity();
     paint_projects();
+    m_rl_book = core::rules::load(data_dir() + "/" + core::rules::kFile);
+    rl_save(false);   // arms the watch timer if it is on; writes nothing
+    paint_rules();
 
     signal_close_request().connect([this] { stop_scan(); stop_sweep(); stop_dev(); stop_dups(); stop_archive(); return false; }, false);
     m_scan_finished.connect(sigc::mem_fun(*this, &Shell::on_scan_done));

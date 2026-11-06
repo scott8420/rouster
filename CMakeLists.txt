@@ -35,6 +35,9 @@ add_library(rouster_core STATIC
     src/core/Git.cpp
     # Organize (s010): templates, naming, file into project, new version; read-only.
     src/core/Organize.cpp
+    # Rules (s011): Hazel-style rules on watched folders; read-only. Settings: Rouster's own rules.json.
+    src/core/Rules.cpp
+    src/core/Settings.cpp
     # Known (s007b): the names promoted to known-optional -- Rouster's own setting.
     src/core/Known.cpp
     # The SHORTCUT-REGISTRY paradigm: one list, two consumers (App wires accels

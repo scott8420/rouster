@@ -15,6 +15,7 @@
 #include <glibmm/convert.h>
 
 #include <chrono>
+#include <cctype>
 #include <cstring>
 #include <ctime>
 #include <filesystem>
@@ -30,7 +31,8 @@ void Shell::on_nav(const std::string& page) {  // handler: a sidebar row was cho
     add_css_class("page-" + page);   // the window's gradient follows the module (rouster.css)
     m_stack.set_visible_child(page);
     if (page == "preflight" || page == "sweep" || page == "dev" || page == "dups" || page == "archive") paint_preflight();   // fresh gate on arrival
-    if (page == "projects" && m_pj_states.get_visible_child_name() == "home") paint_projects();   // templates may have been edited in Files
+    if (page == "projects" && m_pj_states.get_visible_child_name() == "home") paint_projects();
+    if (page == "rules" && m_rl_states.get_visible_child_name() == "list") paint_rules();   // folders may have appeared   // templates may have been edited in Files
     if (page == "activity") paint_activity();
 }
 
@@ -92,6 +94,7 @@ void Shell::on_undo() {  // handler: undo the last batch, through the door
         if (pj != "project" || !m_pj_has_open) on_pj_home();
         else paint_pj_project();
     }
+    if (m_rl_states.get_visible_child_name() == "done") { paint_rules(); m_rl_states.set_visible_child("list"); }
     if (m_dv_states.get_visible_child_name() == "done") {
         m_dv_sub.set_text("Undone -- the build output is back where it was. Look again to see it.");
         m_dv_states.set_visible_child("start");
@@ -697,6 +700,221 @@ void Shell::on_pj_show(const std::string& path) {  // handler: open a folder in 
     } catch (const Glib::Error& e) {
         if (auto lg = log::get(log::Area::Organize)) lg->warn("could not open {}: {}", path, e.what());
     }
+}
+
+// ── Rules (s011) ─────────────────────────────────────────────────────────────
+void Shell::on_rl_edit(std::size_t i) {  // handler: a rule's Edit (or New rule: npos) -> the form
+    namespace rl = core::rules;
+    const bool old = i < m_rl_book.rules.size();
+    m_rl_edit = old ? i : static_cast<std::size_t>(-1);
+    m_rl_draft = old ? m_rl_book.rules[i] : rl::Rule{};
+    m_rl_filling = true;
+    m_rl_name.set_text(m_rl_draft.name);
+    m_rl_folder.set_text(m_rl_draft.folder);
+    m_rl_glob.set_text(m_rl_draft.glob);
+    std::string ex;
+    for (const auto& e : m_rl_draft.exts) ex += (ex.empty() ? "" : " ") + e;
+    m_rl_exts.set_text(ex);
+    m_rl_days.set_text(m_rl_draft.older_days ? std::to_string(m_rl_draft.older_days) : "");
+    m_rl_do->set_selected(static_cast<guint>(m_rl_draft.act));
+    m_rl_dest.set_text(m_rl_draft.dest);
+    m_rl_rename.set_text(m_rl_draft.rename);
+    m_rl_filling = false;
+    m_rl_edit_title.set_text(old ? "Edit rule" : "New rule");
+    m_rl_delete.set_visible(old);
+    on_rl_form();
+    m_rl_states.set_visible_child("edit");
+    m_rl_name.grab_focus();
+}
+
+void Shell::on_rl_form() {  // handler: a field changed -> the draft + its matches (the preview)
+    namespace rl = core::rules;
+    if (m_rl_filling) return;
+    const auto trim = [](std::string s) {
+        while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) s.pop_back();
+        while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) s.erase(0, 1);
+        if (s.rfind("~/", 0) == 0) s.erase(0, 2);
+        while (s.size() > 1 && s.back() == '/') s.pop_back();
+        return s;
+    };
+    rl::Rule& d = m_rl_draft;
+    const bool was = d.enabled;
+    d = rl::Rule{};
+    d.enabled = was;
+    d.name = trim(m_rl_name.get_text());
+    d.folder = trim(m_rl_folder.get_text());
+    d.glob = trim(m_rl_glob.get_text());
+    std::string tok;
+    for (char c : std::string(m_rl_exts.get_text()) + " ") {
+        if (c == ' ' || c == ',' || c == ';') {
+            while (!tok.empty() && tok[0] == '.') tok.erase(0, 1);
+            if (!tok.empty()) {
+                for (auto& x : tok) x = static_cast<char>(std::tolower(static_cast<unsigned char>(x)));
+                d.exts.push_back(tok);
+            }
+            tok.clear();
+        } else tok += c;
+    }
+    try { d.older_days = std::max(0, std::stoi(std::string(m_rl_days.get_text()))); } catch (...) { d.older_days = 0; }
+    d.act = static_cast<rl::Do>(std::min<guint>(m_rl_do->get_selected(), 3));
+    d.dest = trim(m_rl_dest.get_text());
+    d.rename = d.act == rl::Do::Move ? trim(m_rl_rename.get_text()) : std::string();
+    const bool needs_dest = d.act == rl::Do::Move || d.act == rl::Do::File;
+    m_rl_dest.set_sensitive(needs_dest);
+    m_rl_rename.set_sensitive(d.act == rl::Do::Move);
+    m_rl_summary.set_text(rl::summary(d));
+    const std::string why = rl::problem(d, m_home);
+    m_rl_draft_matches = why.empty() ? rl::matches(m_home, {d}, static_cast<std::int64_t>(std::time(nullptr)), std::size_t(0))
+                                     : std::vector<rl::Match>{};
+    paint_rl_matches(m_rl_preview, m_rl_draft_matches, false);
+    const std::size_t n = m_rl_draft_matches.size();
+    if (!why.empty())
+        m_rl_edit_gate.set_text("Can't run yet: " + why + ".");
+    else
+        m_rl_edit_gate.set_text(std::to_string(n) + (n == 1 ? " file matches" : " files match") +
+                                " now. Nothing moves on Save -- a rule that's on acts on Run rules now, or while watching.");
+    m_rl_save_off.set_sensitive(!d.name.empty());
+    m_rl_save_on.set_sensitive(why.empty());
+}
+
+void Shell::on_rl_save(bool on) {  // handler: Save (off) / Save and turn on -> rules.json
+    if (on && !core::rules::problem(m_rl_draft, m_home).empty()) return;   // on only after a clean preview
+    if (m_rl_draft.name.empty()) return;
+    m_rl_draft.enabled = on;
+    if (m_rl_edit < m_rl_book.rules.size()) m_rl_book.rules[m_rl_edit] = m_rl_draft;
+    else m_rl_book.rules.push_back(m_rl_draft);
+    if (auto lg = log::get(log::Area::Rules)) lg->info("saved '{}' ({}): {}", m_rl_draft.name, on ? "on" : "off", core::rules::summary(m_rl_draft));
+    m_rl_said.clear();
+    rl_save();
+    paint_rules();
+    m_rl_states.set_visible_child("list");
+}
+
+void Shell::on_rl_delete() {  // handler: the form's Delete -> gone, with a way back
+    if (m_rl_edit >= m_rl_book.rules.size()) return;
+    m_rl_deleted = m_rl_book.rules[m_rl_edit];
+    m_rl_deleted_at = m_rl_edit;
+    m_rl_book.rules.erase(m_rl_book.rules.begin() + static_cast<std::ptrdiff_t>(m_rl_edit));
+    m_rl_said = "Deleted “" + m_rl_deleted->name + "”.";
+    if (auto lg = log::get(log::Area::Rules)) lg->info("deleted '{}'", m_rl_deleted->name);
+    rl_save();
+    paint_rules();
+    m_rl_states.set_visible_child("list");
+}
+
+void Shell::on_rl_undelete() {  // handler: Put it back
+    if (!m_rl_deleted) return;
+    const auto at = std::min(m_rl_deleted_at, m_rl_book.rules.size());
+    m_rl_book.rules.insert(m_rl_book.rules.begin() + static_cast<std::ptrdiff_t>(at), *m_rl_deleted);
+    m_rl_deleted.reset();
+    m_rl_said.clear();
+    rl_save();
+    paint_rules();
+}
+
+void Shell::on_rl_toggle(std::size_t i, bool on) {  // handler: a rule's switch (on -> via the form's preview)
+    if (i >= m_rl_book.rules.size() || m_rl_book.rules[i].enabled == on) return;
+    if (on) { on_rl_edit(i); return; }   // preview first: its matches, then "Save and turn on"
+    m_rl_book.rules[i].enabled = false;
+    rl_save();
+    paint_rules();
+}
+
+void Shell::on_rl_move(std::size_t i, int by) {  // handler: reorder (first match wins)
+    const auto j = static_cast<std::ptrdiff_t>(i) + by;
+    if (i >= m_rl_book.rules.size() || j < 0 || j >= static_cast<std::ptrdiff_t>(m_rl_book.rules.size())) return;
+    std::swap(m_rl_book.rules[i], m_rl_book.rules[static_cast<std::size_t>(j)]);
+    rl_save();
+    paint_rules();
+}
+
+void Shell::on_rl_starters() {  // handler: add the starter rules, all off
+    for (const auto& s : core::rules::starters()) {
+        bool have = false;
+        for (const auto& r : m_rl_book.rules) have |= r.name == s.name;
+        if (!have) m_rl_book.rules.push_back(s);
+    }
+    rl_save();
+    paint_rules();
+}
+
+void Shell::on_rl_watch(bool on) {  // handler: run every 10 minutes while open
+    if (m_rl_book.watch == on) return;
+    m_rl_book.watch = on;
+    if (auto lg = log::get(log::Area::Rules)) lg->info("watch {}", on ? "on" : "off");
+    rl_save();
+    paint_rules();
+}
+
+void Shell::on_rl_preview() {  // handler: Run rules now -> every match, checked
+    m_rl_matches = core::rules::matches(m_home, m_rl_book.rules, static_cast<std::int64_t>(std::time(nullptr)));
+    paint_rl_matches(m_rl_run_list, m_rl_matches, true);
+    paint_preflight();
+    rl_gate();
+    m_rl_states.set_visible_child("run");
+}
+
+void Shell::on_rl_run() {  // handler: the checked matches -> a plan -> the door
+    if (!m_door || door_busy()) return;
+    if (m_rl_states.get_visible_child_name() != "run") return;   // preview first: only from the list of matches
+    paint_preflight();
+    if (m_pf_red) { rl_gate(); return; }
+    std::vector<std::string> dropped;
+    core::door::Plan plan = core::rules::plan(m_home, m_rl_book.rules, m_rl_matches, dropped);
+    std::size_t n = 0;
+    for (const auto& a : plan.actions) n += a.verb != core::door::Verb::MakeDir;
+    if (auto lg = log::get(log::Area::Rules)) {
+        lg->info("run '{}': {} actions", plan.label, plan.actions.size());
+        for (const auto& d : dropped) lg->info("  left out: {}", d);
+    }
+    if (!n) { m_rl_run_gate.set_text(dropped.empty() ? std::string("Nothing to do.") : dropped.front()); return; }
+    plan.previewed = true;   // the matches on screen were the preview
+    const auto r = m_door->run(plan);
+    if (auto lg = log::get(log::Area::Rules)) {
+        lg->info("run: {} done, {} failed", r.done, r.failed);
+        for (const auto& m : r.messages) lg->warn("  {}", m);
+    }
+    m_rl_done_big.set_text(r.ok ? std::to_string(n) + (n == 1 ? " file" : " files") : r.done ? "Partly done" : "Nothing changed");
+    m_rl_done_caption.set_text(r.ok ? "moved by your rules, as one step. Undo takes it back." +
+                                          (dropped.empty() ? std::string() : " " + std::to_string(dropped.size()) + " left out: " + dropped.front() + ".")
+                                    : (r.messages.empty() ? std::string("The door refused the plan.") : r.messages.front()));
+    m_rl_matches.clear();
+    m_rl_states.set_visible_child("done");
+    paint_activity();
+}
+
+bool Shell::on_rl_tick() {  // handler: the watch timer -> the enabled rules -> the door
+    if (!m_rl_book.watch) return false;
+    const std::string st = m_rl_states.get_visible_child_name();
+    if (!m_door || door_busy() || st == "edit" || st == "run") return true;   // not while you're looking at one
+    paint_preflight();
+    if (m_pf_red) {
+        if (auto lg = log::get(log::Area::Rules)) lg->info("watch: Preflight is red -- skipped");
+        return true;
+    }
+    auto ms = core::rules::matches(m_home, m_rl_book.rules, static_cast<std::int64_t>(std::time(nullptr)));
+    std::vector<std::string> dropped;
+    core::door::Plan plan = core::rules::plan(m_home, m_rl_book.rules, ms, dropped);
+    std::size_t n = 0;
+    for (const auto& a : plan.actions) n += a.verb != core::door::Verb::MakeDir;
+    if (!n) return true;
+    plan.label = "Rules (watching): " + std::to_string(n) + (n == 1 ? " file" : " files");
+    plan.previewed = true;   // each rule was previewed when it was turned on (§4.7)
+    const auto r = m_door->run(plan);
+    if (auto lg = log::get(log::Area::Rules)) {
+        lg->info("watch run '{}': {} done, {} failed", plan.label, r.done, r.failed);
+        for (const auto& m : r.messages) lg->warn("  {}", m);
+    }
+    std::time_t t = std::time(nullptr);
+    std::tm tm{};
+    ::localtime_r(&t, &tm);
+    char hm[8];
+    std::strftime(hm, sizeof hm, "%H:%M", &tm);
+    m_rl_said = std::string("At ") + hm + " the rules moved " + std::to_string(r.done) + (r.done == 1 ? " file" : " files") +
+                (r.failed ? ", " + std::to_string(r.failed) + " could not be" : std::string()) + ". Undo is in Activity.";
+    if (st == "list") paint_rules();
+    paint_activity();
+    return true;
 }
 
 // ── Dev projects (s007) ──────────────────────────────────────────────────────

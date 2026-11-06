@@ -41,6 +41,10 @@ window.rouster.page-projects {
   background-image: radial-gradient(circle at 75% 15%, rgba(251,191,36,0.45), transparent 55%),
                     linear-gradient(160deg, #4a3411 0%, #6b4a12 55%, #2e200b 100%);
 }
+window.rouster.page-rules {
+  background-image: radial-gradient(circle at 75% 15%, rgba(167,139,250,0.45), transparent 55%),
+                    linear-gradient(160deg, #2a1a52 0%, #3b2275 55%, #1c1238 100%);
+}
 window.rouster.page-preflight {
   background-image: radial-gradient(circle at 75% 15%, rgba(45,212,191,0.45), transparent 55%),
                     linear-gradient(160deg, #10394a 0%, #134e5e 55%, #0c2734 100%);
@@ -214,3 +218,9 @@ window.page-projects button.act {
 .pj-over .pj-drop { border-color: #fbbf24; background-color: rgba(251,191,36,0.10); }
 .pj-misfit { background-color: rgba(251,191,36,0.20); color: #fef3c7; border-radius: 999px; padding: 1px 10px; font-size: 0.85em; }
 window.rouster entry { background-color: rgba(0,0,0,0.25); color: #ffffff; border-radius: 8px; }
+
+/* Rules (s011). */
+window.page-rules button.act {
+  background-image: linear-gradient(160deg, #c4b5fd 0%, #7c3aed 100%);
+  box-shadow: 0 6px 22px rgba(167,139,250,0.35);
+}

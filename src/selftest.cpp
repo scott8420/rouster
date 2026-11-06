@@ -27,6 +27,8 @@
 #include "core/Dups.hpp"
 #include "core/Archive.hpp"
 #include "core/Organize.hpp"
+#include "core/Rules.hpp"
+#include "core/Settings.hpp"
 
 #include <algorithm>
 #include <array>
@@ -38,6 +40,7 @@
 #include <fstream>
 #include <sstream>
 #include <set>
+#include <map>
 #include <random>
 #include <utility>
 
@@ -2129,6 +2132,145 @@ int main(int argc, char** argv) {
         fs::remove_all(home, ec);
     }
 
+    // -- Rules: match (read-only) -> plan -> door (s011) ---------------------
+    {
+        std::cout << "\n-- rules --\n";
+        namespace rl = core::rules;
+        namespace dr = core::door;
+        const fs::path home = fs::temp_directory_path() / "rouster_selftest_rules";
+        std::error_code ec;
+        fs::remove_all(home, ec);
+        for (const char* d : {".local/share/Trash/files", ".local/share/Trash/info", ".local/share/rouster", "Downloads", "Documents"})
+            fs::create_directories(home / d, ec);
+        const std::string H = home.string();
+        const std::string data = H + "/.local/share/rouster";
+        const std::int64_t now = 2000000000;
+        const auto age = [&](const char* rel, std::int64_t t) {
+            struct timespec ts[2] = {{t, 0}, {t, 0}};
+            ::utimensat(AT_FDCWD, (home / rel).c_str(), ts, AT_SYMLINK_NOFOLLOW);
+        };
+        const std::int64_t D = 86400;
+        for (const char* f : {"Downloads/Invoice-March.PDF", "Downloads/manual.pdf", "Downloads/setup.iso", "Downloads/new.iso",
+                              "Downloads/movie.mp4.part", "Downloads/.hidden.pdf", "Downloads/sub/deep.pdf", "Downloads/Font.otf",
+                              "Downloads/arriving.pdf", "Downloads/old.zip"})
+            put(home, f, 4000);
+        age("Downloads/Invoice-March.PDF", now - 10 * D); age("Downloads/manual.pdf", now - 3 * D);
+        age("Downloads/setup.iso", now - 60 * D);         age("Downloads/new.iso", now - 2 * D);
+        age("Downloads/movie.mp4.part", now - 90 * D);    age("Downloads/.hidden.pdf", now - 90 * D);
+        age("Downloads/sub/deep.pdf", now - 90 * D);      age("Downloads/Font.otf", now - 1 * D);
+        age("Downloads/arriving.pdf", now - 30);          age("Downloads/old.zip", now - 400 * D);
+
+        check("rules: glob -- case-insensitive * and ?",
+              rl::glob_match("*invoice*", "Invoice-March.PDF") && rl::glob_match("Screenshot*", "screenshot 1.png") &&
+              rl::glob_match("a?c", "abc") && !rl::glob_match("*.pdf", "x.pdfx") && rl::glob_match("*", ""));
+        check("rules: partial downloads are never touched",
+              rl::in_progress("movie.mp4.part") && rl::in_progress("x.CRDOWNLOAD") && !rl::in_progress("x.pdf"));
+
+        rl::Book book;
+        rl::Rule inv; inv.name = "Invoices"; inv.glob = "*invoice*"; inv.act = rl::Do::Move; inv.dest = "Documents/Invoices/{year}";
+        inv.rename = "{yyyymmdd}_{stem}.{ext}"; inv.enabled = true;
+        rl::Rule pdf; pdf.name = "PDFs"; pdf.exts = {"pdf"}; pdf.older_days = 7; pdf.act = rl::Do::Move; pdf.dest = "Documents/PDFs"; pdf.enabled = true;
+        rl::Rule iso; iso.name = "Installers"; iso.exts = {"iso"}; iso.older_days = 30; iso.act = rl::Do::Trash; iso.enabled = true;
+        rl::Rule arc; arc.name = "Old"; arc.older_days = 180; arc.act = rl::Do::Archive; arc.enabled = true;
+        rl::Rule off; off.name = "Fonts"; off.exts = {"otf"}; off.act = rl::Do::Move; off.dest = "Documents/Fonts";   // not enabled
+        book.rules = {inv, pdf, iso, arc, off};
+        book.watch = true;
+        {
+            const auto b2 = rl::from_json(rl::to_json(book));
+            check("rules: the book round-trips through JSON",
+                  b2.watch && b2.rules.size() == 5 && b2.rules[0].rename == inv.rename && b2.rules[2].act == rl::Do::Trash &&
+                  b2.rules[1].exts == pdf.exts && !b2.rules[4].enabled && rl::from_json("not json").rules.empty());
+            check("rules: saved in Rouster's own folder, read back",
+                  core::save_own(data, rl::kFile, rl::to_json(book)) && rl::load(data + "/" + rl::kFile).rules.size() == 5 &&
+                  !core::save_own(data, "../x.json", "{}"));
+        }
+        rl::Rule all; all.name = "All"; all.act = rl::Do::Trash;
+        rl::Rule self; self.name = "Self"; self.exts = {"pdf"}; self.dest = "Downloads";
+        rl::Rule nofolder = pdf; nofolder.folder = "Nope";
+        rl::Rule nofile = pdf; nofile.act = rl::Do::File; nofile.dest = "Documents";
+        check("rules: problems -- matches everything, into itself, no folder, not a project; a good rule has none",
+              !rl::problem(all, H).empty() && !rl::problem(self, H).empty() && !rl::problem(nofolder, H).empty() &&
+              !rl::problem(nofile, H).empty() && rl::problem(pdf, H).empty() && rl::problem(arc, H).empty());
+
+        const std::string before = files_snapshot(home);
+        auto ms = rl::matches(H, book.rules, now);
+        check("rules: matching changes nothing", files_snapshot(home) == before);
+        std::map<std::string, std::pair<std::size_t, std::string>> got;
+        for (const auto& m : ms) got[fs::path(m.from).filename().string()] = {m.rule, m.to};
+        const auto Y = [&](std::int64_t t) { std::time_t tt = t; std::tm tm{}; ::localtime_r(&tt, &tm); return std::to_string(tm.tm_year + 1900); };
+        std::string list;
+        for (const auto& [k, v] : got) list += k + ":" + std::to_string(v.first) + " ";
+        check("rules: first match wins -- the invoice to Invoices (not PDFs), manual too young, the old iso, the old zip archived",
+              got.size() == 3 && got.count("Invoice-March.PDF") && got["Invoice-March.PDF"].first == 0 &&
+              got.count("setup.iso") && got["setup.iso"].first == 2 && got.count("old.zip") && got["old.zip"].first == 3 &&
+              got.count("arriving.pdf") == 0, list);
+        check("rules: never -- partial, hidden, in a subfolder, still arriving, a rule that's off",
+              !got.count("movie.mp4.part") && !got.count(".hidden.pdf") && !got.count("deep.pdf") && !got.count("arriving.pdf") &&
+              !got.count("Font.otf"));
+        check("rules: where -- renamed into a dated folder; the archive by year",
+              got["Invoice-March.PDF"].second == H + "/Documents/Invoices/" + Y(now - 10 * D) + "/" +
+                  core::organize::stamp(now - 10 * D, false) + "_Invoice-March.PDF" &&
+              got["old.zip"].second == H + "/Archive/" + Y(now - 400 * D) + "/Downloads/old.zip", got["Invoice-March.PDF"].second);
+        {
+            const auto one = rl::matches(H, book.rules, now, std::size_t(4));
+            check("rules: the edit preview -- one rule, even while off", one.size() == 1 && fs::path(one[0].from).filename() == "Font.otf");
+        }
+
+        dr::Door door(H, data);
+        door.load();
+        age("Downloads/setup.iso", now - 61 * D);   // changed since -> left out
+        std::vector<std::string> dropped;
+        auto p = rl::plan(H, book.rules, ms, dropped);
+        std::size_t mk = 0, mv = 0, tr = 0;
+        for (const auto& a : p.actions) { mk += a.verb == dr::Verb::MakeDir; mv += a.verb == dr::Verb::Move; tr += a.verb == dr::Verb::Trash; }
+        check("rules: plan -- folders made first, 2 moves, the changed iso left out", mk == 5 && mv == 2 && tr == 0 &&
+              dropped.size() == 1 && p.actions.front().verb == dr::Verb::MakeDir, std::to_string(mk) + "/" + std::to_string(mv));
+        check("rules: the door refuses it unpreviewed", !door.run(p).ok);
+        const std::string b1 = files_snapshot(home);
+        p.previewed = true;
+        auto r = door.run(p);
+        check("rules: run -- the invoice renamed into place, the zip archived",
+              r.ok && fs::exists(got["Invoice-March.PDF"].second) && fs::exists(got["old.zip"].second) &&
+              !fs::exists(home / "Downloads/old.zip"), r.messages.empty() ? "" : r.messages.front());
+        auto u = door.undo();
+        check("rules: undo -- exact outside the Trash", u.ok && [&] {
+            std::istringstream a(files_snapshot(home)), b(b1);
+            std::string x, y, l;
+            while (std::getline(a, l)) if (l.find("/.local/share/Trash/") == std::string::npos) x += l + "\n";
+            while (std::getline(b, l)) if (l.find("/.local/share/Trash/") == std::string::npos) y += l + "\n";
+            return x == y;
+        }());
+        {   // Trash, and File into a project
+            const auto m2 = rl::matches(H, book.rules, now);
+            std::vector<std::string> d2;
+            auto p2 = rl::plan(H, book.rules, m2, d2);
+            p2.previewed = true;
+            bool trashed = false;
+            for (const auto& a : p2.actions) trashed |= a.verb == dr::Verb::Trash && a.from == H + "/Downloads/setup.iso";
+            r = door.run(p2);
+            check("rules: the iso goes to the Trash", trashed && r.ok && fs::exists(home / ".local/share/Trash/files/setup.iso"));
+            door.undo();
+        }
+        {
+            fs::create_directories(home / "Documents/Jobs/7_X/fonts", ec);
+            put_bytes(home, "Documents/Jobs/7_X/.rouster.json",
+                      R"({"kind":"project","id":"7","title":"X","pattern":"{id}_{title}_{yyyymmdd}_{part}.{ext}","routes":{"fonts":["otf"]}})");
+            rl::Rule fi; fi.name = "Fonts to job 7"; fi.exts = {"otf"}; fi.act = rl::Do::File; fi.dest = "Documents/Jobs/7_X"; fi.enabled = true;
+            const auto m3 = rl::matches(H, {fi}, now);
+            check("rules: File into a project -- its pattern and route",
+                  rl::problem(fi, H).empty() && m3.size() == 1 &&
+                  m3[0].to == H + "/Documents/Jobs/7_X/fonts/7_X_" + core::organize::stamp(now - D, false) + "_Font.otf",
+                  m3.empty() ? "" : m3[0].to);
+        }
+        {
+            const auto st = rl::starters();
+            check("rules: starters -- five, all off, each one usable once its folder exists",
+                  st.size() == 5 && std::none_of(st.begin(), st.end(), [](auto& x) { return x.enabled; }) &&
+                  rl::problem(st[0], H).empty(), rl::problem(st[0], H));
+        }
+        fs::remove_all(home, ec);
+    }
+
     // -- The source gate: no write call outside the door (s004) --------------
     // RULES: "every write goes through it, and the selftest fails on a write
     // that does not." Allowlisted, each for a reason:
@@ -2136,6 +2278,7 @@ int main(int argc, char** argv) {
     //   Recents.cpp   -- Rouster's own recents file, in its own data dir;
     //   selftest.cpp  -- it builds and tears down fixtures;
     //   Known.cpp     -- Rouster's own setting (promoted names), in its own data dir;
+    //   Settings.cpp  -- Rouster's own files (rules.json), in its own data dir;
 //   Stones.*      -- the in-memory undo demo: its verbs are NAMED remove /
     //                    rename and touch no disk (goes when a real model
     //                    adopts Undo.hpp);
@@ -2144,7 +2287,7 @@ int main(int argc, char** argv) {
         std::cout << "\n-- source gate --\n";
         const fs::path root = ROUSTER_SOURCE_DIR;
         const std::set<std::string> allowed = {"src/core/Door.cpp", "src/core/Recents.cpp", "src/selftest.cpp",
-            "src/core/Stones.cpp", "include/core/Stones.hpp", "src/core/Known.cpp", "src/Registry.cpp", "include/Registry.hpp"};
+            "src/core/Stones.cpp", "include/core/Stones.hpp", "src/core/Known.cpp", "src/core/Settings.cpp", "src/Registry.cpp", "include/Registry.hpp"};
         const std::vector<std::string> calls = {"rename", "renameat", "renameat2", "unlink", "unlinkat", "rmdir",
             "remove", "remove_all", "copy_file", "copy", "create_directory", "create_directories", "create_symlink",
             "create_hard_link", "resize_file", "truncate", "write", "fopen", "mkdir", "symlink", "link", "chmod",

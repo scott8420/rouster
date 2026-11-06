@@ -7,13 +7,17 @@
 #include "core/Dups.hpp"     // s008: duplicates
 #include "core/Archive.hpp"  // s009: archive
 #include "core/Organize.hpp" // s010: templates, naming, file into project
+#include "core/Rules.hpp"    // s011: rules on watched folders
 
 #include <gtkmm/applicationwindow.h>
 #include <giomm/menu.h>
 #include <giomm/simpleaction.h>
 #include <glibmm/dispatcher.h>
 
+#include <gtkmm/dropdown.h>
+
 #include <memory>
+#include <optional>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -53,6 +57,8 @@
 //   "Where does Archive act?"            -> Shell_handlers.cpp (on_archive_run -> m_door->run)
 //   "Where is the Projects page?"        -> Shell_zones.cpp   (build_projects_page); painting: Shell_helpers.cpp (paint_projects / paint_pj_project)
 //   "Where do Projects act?"             -> Shell_handlers.cpp (on_pj_create / on_pj_file / on_pj_confirm -> m_door->run)
+//   "Where is the Rules page?"           -> Shell_zones.cpp   (build_rules_page); painting: Shell_helpers.cpp (paint_rules)
+//   "Where do rules act?"                -> Shell_handlers.cpp (on_rl_run, on_rl_tick -> m_door->run)
 //   "Where does a write go?"             -> core/Door.* -- nowhere else (the selftest's source gate)
 // ─────────────────────────────────────────────────────────────────────────────
 namespace rouster {
@@ -78,6 +84,7 @@ private:
     void build_dups_page();                      // category: zone: Duplicates (s008)
     void build_archive_page();                   // category: zone: Archive (s009)
     void build_projects_page();                  // category: zone: Projects (s010)
+    void build_rules_page();                     // category: zone: Rules (s011)
     void build_preflight_page();                 // category: zone: Preflight (s003)
     void build_activity_page();                  // category: zone: Activity (s004)
     Glib::RefPtr<Gio::Menu> build_menu();        // category: zone: hamburger model
@@ -130,6 +137,18 @@ private:
     void on_pj_dropped(const std::vector<std::string>& paths);   // category: handler: files dropped / chosen -> the queue
     void on_pj_file();                           // category: handler: the checked queue -> a plan -> the door
     void on_pj_show(const std::string& path);    // category: handler: open a folder in Files
+    void on_rl_edit(std::size_t i);              // category: handler: a rule's Edit (or New rule: npos) -> the form
+    void on_rl_form();                           // category: handler: a field changed -> the draft + its matches (the preview)
+    void on_rl_save(bool on);                    // category: handler: Save (off) / Save and turn on -> rules.json
+    void on_rl_delete();                         // category: handler: the form's Delete -> gone, with a way back
+    void on_rl_undelete();                       // category: handler: Put it back
+    void on_rl_toggle(std::size_t i, bool on);   // category: handler: a rule's switch (on -> via the form's preview)
+    void on_rl_move(std::size_t i, int by);      // category: handler: reorder (first match wins)
+    void on_rl_starters();                       // category: handler: add the starter rules, all off
+    void on_rl_watch(bool on);                   // category: handler: run every 10 minutes while open
+    void on_rl_preview();                        // category: handler: Run rules now -> every match, checked
+    void on_rl_run();                            // category: handler: the checked matches -> a plan -> the door
+    bool on_rl_tick();                           // category: handler: the watch timer -> the enabled rules -> the door
     void on_preflight();                         // category: handler: run the checklist again
     void on_pick_folder();                       // category: handler: folder chooser -> scan it
     void on_recent_open(const std::string& p);   // category: handler: scan a recent folder again
@@ -173,6 +192,10 @@ private:
     void paint_pj_project();                     // category: helper: the open project -- the queue, what's in it
     void pj_gate();                              // category: helper: the file button's label + whether it may act
     void pj_done(const core::door::Result& r, const std::string& big, const std::string& what, const std::string& back);   // category: helper: the done state
+    void paint_rules();                          // category: helper: the list state -- the rules in order
+    void paint_rl_matches(Gtk::Box& box, std::vector<core::rules::Match>& ms, bool checks);   // category: helper: matches by rule
+    void rl_save(bool write = true);             // category: helper: rules.json (core::save_own) + the timer
+    void rl_gate();                              // category: helper: the run button's label + whether it may act
     bool door_busy() const;                      // category: helper: a retire / restore owns the door right now
     void go_to(const std::string& page);         // category: helper: select a module's sidebar row
     void note_recent(const std::string& path);   // category: helper: push onto the list + persist
@@ -382,6 +405,33 @@ private:
     bool             m_pj_plan_gated = false;                // the preview moves user files: Preflight gates it
     std::string      m_pj_back = "home";                     // where done's Back goes
     static constexpr std::size_t kProjectShown = 300;        // rows painted
+
+    // Rules (s011): list | edit | run | done.
+    widgets::Box     m_rl_page;
+    widgets::Stack   m_rl_states;
+    widgets::Box     m_rl_list;        // the rules (painted)
+    widgets::Entry   m_rl_name, m_rl_folder, m_rl_glob, m_rl_exts, m_rl_days, m_rl_dest, m_rl_rename;
+    Gtk::DropDown*   m_rl_do = nullptr;
+    widgets::Label   m_rl_edit_title;
+    widgets::Label   m_rl_summary;
+    widgets::Box     m_rl_preview;     // the draft's matches
+    widgets::Label   m_rl_edit_gate;
+    widgets::Button  m_rl_save_off, m_rl_save_on, m_rl_delete;
+    widgets::Box     m_rl_run_list;
+    widgets::Label   m_rl_run_gate;
+    widgets::Button  m_rl_go;
+    widgets::Label   m_rl_done_big;
+    widgets::Label   m_rl_done_caption;
+    core::rules::Book m_rl_book;                       // what rules.json holds (UI thread only)
+    core::rules::Rule m_rl_draft;
+    std::size_t      m_rl_edit = static_cast<std::size_t>(-1);   // the rule in the form; -1 = new
+    std::vector<core::rules::Match> m_rl_draft_matches;
+    std::vector<core::rules::Match> m_rl_matches;      // the run preview; checks live here
+    std::optional<core::rules::Rule> m_rl_deleted;     // Put it back
+    std::size_t      m_rl_deleted_at = 0;
+    std::string      m_rl_said;                        // the last automatic run / a deletion
+    sigc::connection m_rl_timer;
+    bool             m_rl_filling = false;             // the form is being filled: no on_rl_form
 
     // Preflight (s003).
     bool            m_pf_red = true;  // a red check stops every act button; true until the first run
