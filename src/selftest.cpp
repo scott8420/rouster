@@ -15,14 +15,21 @@
 #include "core/Stones.hpp"
 #include "core/Undo.hpp"
 #include "core/Scan.hpp"
+#include "core/Preflight.hpp"
+#include "core/Door.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
+#include <cctype>
+#include <cstdlib>
 #include <fstream>
+#include <sstream>
 #include <set>
 #include <utility>
 
 #include <sys/stat.h>
+#include <unistd.h>
 #include <filesystem>
 #include <iostream>
 #include <string>
@@ -100,6 +107,30 @@ bool make_fixture(const fs::path& home) {
     return ok;
 }
 
+// Files only (path, mode, size, mtime) -- what a user sees. Directory mtimes
+// move whenever something is renamed in or out, so "put back exactly" is
+// judged on the files and the shape of the tree.
+std::string files_snapshot(const fs::path& root) {
+    std::vector<std::string> rows;
+    for (auto it = fs::recursive_directory_iterator(root); it != fs::recursive_directory_iterator(); ++it) {
+        struct stat st{};
+        ::lstat(it->path().c_str(), &st);
+        std::string row = it->path().string() + "|" + std::to_string(st.st_mode);
+        if (!S_ISDIR(st.st_mode))
+            row += "|" + std::to_string(st.st_size) + "|" + std::to_string(st.st_mtim.tv_sec) + "." +
+                   std::to_string(st.st_mtim.tv_nsec) + "|" + std::to_string(st.st_ino);
+        // The manifest and the Trash's empty folders are the door's own trail.
+        const std::string p = it->path().string();
+        if (p.find("/.local/share/rouster") != std::string::npos) continue;
+        if (S_ISDIR(st.st_mode) && (p.ends_with("/Trash/files") || p.ends_with("/Trash/info"))) continue;
+        rows.push_back(row);
+    }
+    std::sort(rows.begin(), rows.end());
+    std::string out;
+    for (auto& r : rows) out += r + "\n";
+    return out;
+}
+
 // What's on disk, independently: du's rule (st_blocks, hard links once, no
 // symlink followed), single-threaded via std::filesystem.
 struct Du { std::uint64_t bytes = 0, files = 0, dirs = 0; };
@@ -143,7 +174,7 @@ int main(int argc, char** argv) {
         std::cout << (ok ? "fixture: " : "fixture FAILED (exists and not empty?): ") << argv[2] << "\n";
         return ok ? 0 : 1;
     }
-    std::cout << "rouster_selftest -- undo, recents, scan, shortcuts\n";
+    std::cout << "rouster_selftest -- undo, recents, scan, preflight, door, source gate, shortcuts\n";
 
     // ── Undo -- the one door, two pictures, gestures, merging (s046) ──────────
     {
@@ -504,6 +535,367 @@ int main(int argc, char** argv) {
               scan::human_bytes(2'000'000'000) == "2.0 GB");
 
         fs::remove_all(home, ec);
+    }
+    // -- Preflight: mountinfo, the checklist's branches, gather on a temp home (s003)
+    {
+        std::cout << "\n-- preflight --\n";
+        namespace pf = core::preflight;
+        using pf::Status;
+        // Scott's MBP layout (Fedora btrfs: / is subvol root, /home its own),
+        // plus a decoy prefix and an escaped space.
+        const std::string mi =
+            "60 1 0:33 /root / rw,relatime shared:1 - btrfs /dev/nvme0n1p6 rw,subvol=/root\n"
+            "90 60 0:33 /home /home rw,relatime shared:50 - btrfs /dev/nvme0n1p6 rw,subvol=/home\n"
+            "95 60 8:17 / /homework rw shared:2 - ext4 /dev/sdb1 rw\n"
+            "100 90 0:50 / /home/scott/My\\040Drive rw nosuid - fuse.rclone gdrive: rw\n"
+            "garbage line\n";
+        const auto mounts = pf::parse_mountinfo(mi);
+        check("mountinfo: four lines parsed, garbage skipped", mounts.size() == 4, std::to_string(mounts.size()));
+        const auto* h = pf::find_mount(mounts, "/home/scott");
+        check("mountinfo: /home/scott -> /home, btrfs, subvol /home",
+              h && h->mount_point == "/home" && h->fstype == "btrfs" && h->root == "/home" &&
+              h->source == "/dev/nvme0n1p6");
+        const auto* w = pf::find_mount(mounts, "/homework/x");
+        check("mountinfo: /homework is not under /home", w && w->fstype == "ext4");
+        const auto* d = pf::find_mount(mounts, "/home/scott/My Drive/f");
+        check("mountinfo: \\040 unescaped, the deepest mount wins", d && d->fstype == "fuse.rclone");
+        const auto* r = pf::find_mount(mounts, "/etc");
+        check("mountinfo: anything else falls to /", r && r->mount_point == "/");
+
+        const auto status_of = [](const std::vector<pf::Check>& cs, const std::string& id) {
+            for (const auto& c : cs) if (c.id == id) return c.status;
+            return Status::Red;
+        };
+        constexpr std::uint64_t GB = 1000ull * 1000 * 1000;
+        pf::Inputs good;
+        good.home = "/home/scott";
+        good.mount = *h;
+        good.pika_age_s = 2 * 86400;
+        good.free_bytes = 500 * GB;
+        good.total_bytes = 1000 * GB;
+        auto cs = pf::evaluate(good);
+        check("checklist: four rows (repos waits for s006)", cs.size() == 4);
+        check("checklist: own btrfs subvolume is green", status_of(cs, "filesystem") == Status::Green);
+        check("checklist: snapshot is amber until the helper", status_of(cs, "snapshot") == Status::Amber);
+        check("checklist: Pika 2 days ago is green", status_of(cs, "pika") == Status::Green);
+        check("checklist: 500 GB free is green", status_of(cs, "free") == Status::Green);
+
+        pf::Inputs shared = good;
+        shared.mount = *pf::find_mount(mounts, "/");
+        check("checklist: home on the system subvolume is amber",
+              status_of(pf::evaluate(shared), "filesystem") == Status::Amber);
+
+        pf::Inputs stale = good;
+        stale.pika_age_s = 8 * 86400;
+        check("checklist: Pika 8 days on btrfs is amber", status_of(pf::evaluate(stale), "pika") == Status::Amber);
+        stale.mount = *w;   // ext4: Pika is the only net
+        auto ext = pf::evaluate(stale);
+        check("checklist: ext4 is amber, and stale Pika goes red",
+              status_of(ext, "filesystem") == Status::Amber && status_of(ext, "pika") == Status::Red);
+        pf::Inputs none = good;
+        none.pika_age_s.reset();
+        check("checklist: no Pika history on btrfs is amber", status_of(pf::evaluate(none), "pika") == Status::Amber);
+
+        pf::Inputs tight = good;
+        tight.free_bytes = 1 * GB;
+        check("checklist: 1 GB free is red", status_of(pf::evaluate(tight), "free") == Status::Red);
+        tight.free_bytes = 5 * GB;
+        check("checklist: 5 GB free is amber", status_of(pf::evaluate(tight), "free") == Status::Amber);
+        tight.total_bytes = 0;
+        check("checklist: unreadable free space is red", status_of(pf::evaluate(tight), "free") == Status::Red);
+        pf::Inputs lost = good;
+        lost.mount.reset();
+        check("checklist: unknown filesystem is amber", status_of(pf::evaluate(lost), "filesystem") == Status::Amber);
+
+        // gather() on a temp home: finds a Pika history by its mtime, reads
+        // free space, and changes nothing.
+        const fs::path home = fs::temp_directory_path() / "rouster_selftest_preflight";
+        std::error_code ec;
+        fs::remove_all(home, ec);
+        put(home, ".var/app/org.gnome.World.PikaBackup/config/pika-backup/history.json", 100);
+        const fs::path hist = home / ".var/app/org.gnome.World.PikaBackup/config/pika-backup/history.json";
+        fs::last_write_time(hist, fs::file_time_type::clock::now() - std::chrono::hours(72), ec);
+        const std::string before = tree_snapshot(home);
+        const auto in = pf::gather(home.string());
+        check("gather: Pika's Flatpak history found, ~3 days old",
+              in.pika_age_s && *in.pika_age_s > 71 * 3600 && *in.pika_age_s < 73 * 3600 && in.pika_where == hist.string(),
+              in.pika_age_s ? pf::human_age(*in.pika_age_s) : "none");
+        check("gather: a mount and free space were read", in.mount.has_value() && in.total_bytes > 0,
+              in.mount ? in.mount->fstype + " on " + in.mount->mount_point : "no mount");
+        check("gather: nothing on disk changed", tree_snapshot(home) == before);
+        fs::remove_all(home, ec);
+
+        check("human_age: just now / 5 minutes / 3 hours / 44 hours / 9 days",
+              pf::human_age(30) == "just now" && pf::human_age(300) == "5 minutes" &&
+              pf::human_age(3 * 3600) == "3 hours" && pf::human_age(86400 + 3600 * 20) == "44 hours" &&
+              pf::human_age(9 * 86400) == "9 days");
+    }
+    // -- Door: the one door, on a fixture home (s004) --------------------------
+    {
+        std::cout << "\n-- door --\n";
+        namespace dr = core::door;
+        using dr::Verb;
+        const fs::path home = fs::temp_directory_path() / "rouster_selftest_door";
+        std::error_code ec;
+        fs::remove_all(home, ec);
+        make_fixture(home);
+        const std::string H = home.string();
+        const std::string data = H + "/.local/share/rouster";
+        dr::Door door(H, data);
+        check("door: load with no manifest -- empty, nothing to undo", door.load() && !door.can_undo());
+
+        const auto plan = [](std::string label, std::vector<dr::Action> a, bool previewed = true) {
+            return dr::Plan{std::move(label), std::move(a), previewed};
+        };
+        const auto trash = [](std::string p) { return dr::Action{Verb::Trash, std::move(p), "", "test", 0}; };
+        const auto move  = [](std::string a, std::string b) { return dr::Action{Verb::Move, std::move(a), std::move(b), "test", 0}; };
+        const auto there = [](const std::string& p) { struct stat st{}; return ::lstat(p.c_str(), &st) == 0; };
+
+        // Preview first.
+        {
+            const std::string before = files_snapshot(home);
+            const auto r = door.run(plan("x", {trash(H + "/Documents/report.pdf")}, false));
+            check("door: an unpreviewed plan is refused, nothing moves",
+                  !r.ok && r.done == 0 && files_snapshot(home) == before && !there(data + "/manifest.jsonl"));
+        }
+
+        // The verb table, walked: through the door, one step, undo -> the exact tree.
+        check("gate: the verb table holds every verb", dr::verbs().size() == dr::kVerbCount);
+        fs::create_directories(home / "Documents/archive", ec);
+        for (Verb v : dr::verbs()) {
+            const std::string name = dr::verb_name(v);
+            const std::string before = files_snapshot(home);
+            const std::size_t batches = door.batches().size();
+            const auto a = v == Verb::Trash ? trash(H + "/.cache/mozilla")
+                                            : move(H + "/Documents/report.pdf", H + "/Documents/archive/report.pdf");
+            const auto r = door.run(plan(name + " one", {a}));
+            check("gate/" + name + ": done through the door", r.ok && r.done == 1,
+                  r.messages.empty() ? "" : r.messages.front());
+            check("gate/" + name + ": one step", door.batches().size() == batches + 1 && door.undo_label() == name + " one");
+            check("gate/" + name + ": the tree changed", files_snapshot(home) != before);
+            const auto u = door.undo();
+            check("gate/" + name + ": undo puts it back exactly", u.ok && files_snapshot(home) == before,
+                  u.messages.empty() ? "" : u.messages.front());
+        }
+        check("gate: nothing left to undo", !door.can_undo());
+
+        // Trash follows the freedesktop layout.
+        {
+            const std::string f = H + "/Documents/report.pdf";
+            dr::Identity id0{};
+            dr::identity_of(f, id0);
+            const auto r = door.run(plan("Trash report", {trash(f)}));
+            const dr::Record* rec = door.record(door.batches().back().records.front());
+            std::ifstream info(rec->info);
+            std::stringstream ib;
+            ib << info.rdbuf();
+            dr::Identity id1{};
+            check("trash: gone from its place, in Trash/files, same file",
+                  r.ok && !there(f) && rec->to == H + "/.local/share/Trash/files/report.pdf" &&
+                  dr::identity_of(rec->to, id1) && id1 == id0);
+            check("trash: the .trashinfo names where it came from",
+                  ib.str().find("Path=" + f + "\n") != std::string::npos &&
+                  ib.str().find("DeletionDate=") != std::string::npos, rec->info);
+            door.undo();
+            check("trash: undo -- back, and the .trashinfo removed", there(f) && !there(rec->info));
+        }
+        check("trashinfo: a space is %20", dr::trashinfo("/h/My File", 0).find("Path=/h/My%20File\n") != std::string::npos);
+
+        // Two of the same name in one batch: the second gets .2; undo restores both.
+        {
+            put(home, "Documents/dup.txt", 10);
+            put(home, "Pictures/dup.txt", 20);
+            const std::string before = files_snapshot(home);
+            const auto r = door.run(plan("Two dups", {trash(H + "/Documents/dup.txt"), trash(H + "/Pictures/dup.txt")}));
+            check("trash: same names, both in, the second as dup.txt.2",
+                  r.ok && there(H + "/.local/share/Trash/files/dup.txt") && there(H + "/.local/share/Trash/files/dup.txt.2"));
+            const auto u = door.undo();
+            check("trash: one undo puts both back", u.ok && u.done == 2 && files_snapshot(home) == before);
+        }
+
+        // Refusals: each one leaves the tree as it was.
+        {
+            const std::string before = files_snapshot(home);
+            const std::pair<std::string, dr::Action> refuse[] = {
+                {"~/.ssh (never-touch)",           trash(H + "/.ssh/id_ed25519")},
+                {"~/.config/dconf (never-touch)",  trash(H + "/.config/dconf/user")},
+                {"a fixes/ folder",                trash(H + "/Develop/proj/fixes")},
+                {"inside a fixes/ folder",         trash(H + "/Develop/proj/fixes/patch.diff")},
+                {"outside home",                   trash("/etc/hostname")},
+                {"home itself",                    trash(H)},
+                {"a relative path",                trash("Documents/report.pdf")},
+                {"a path with ..",                 trash(H + "/Documents/../Pictures/a.jpg")},
+                {"through a symlink (to /etc)",    trash(H + "/Documents/etc/hostname")},
+                {"through a symlink (a cycle)",    trash(H + "/Documents/loop/Pictures/a.jpg")},
+                {"already in the Trash",           trash(H + "/.local/share/Trash/files/old.txt")},
+                {"Rouster's own records",          trash(data)},
+                {"something missing",              trash(H + "/Documents/nope.txt")},
+                {"move onto an existing file",     move(H + "/Documents/report.pdf", H + "/Pictures/a.jpg")},
+                {"move into a missing folder",     move(H + "/Documents/report.pdf", H + "/Nope/report.pdf")},
+                {"move into the Trash",            move(H + "/Documents/report.pdf", H + "/.local/share/Trash/files/r.pdf")},
+                {"move into ~/.ssh",               move(H + "/Documents/report.pdf", H + "/.ssh/report.pdf")},
+                {"move a folder into itself",      move(H + "/Documents", H + "/Documents/archive/Documents")},
+                {"move out of home",               move(H + "/Documents/report.pdf", "/tmp/report.pdf")},
+            };
+            for (const auto& [what, a] : refuse) {
+                const auto r = door.run(plan("bad", {a}));
+                check("refuse: " + what, !r.ok && r.done == 0 && !r.messages.empty(),
+                      r.messages.empty() ? "NOT REFUSED" : r.messages.front());
+            }
+            const auto mixed = door.run(plan("mixed", {trash(H + "/Pictures/a.jpg"), trash(H + "/.ssh/id_ed25519")}));
+            check("refuse: one bad action stops the whole plan before anything moves",
+                  !mixed.ok && mixed.done == 0 && there(H + "/Pictures/a.jpg"));
+            check("refuse: the tree is exactly as it was", files_snapshot(home) == before);
+        }
+
+        // The manifest survives: a fresh Door reads it and can undo what the old one did.
+        {
+            const std::string before = files_snapshot(home);
+            door.run(plan("Trash a", {trash(H + "/Pictures/a.jpg")}));
+            door.run(plan("Trash notes", {trash(H + "/Documents/build/notes.txt")}));
+            dr::Door again(H, data);
+            again.load();
+            check("manifest: a new door sees the last step", again.can_undo() && again.undo_label() == "Trash notes",
+                  again.undo_label());
+            again.undo();
+            check("manifest: undo order is newest first", again.undo_label() == "Trash a");
+            again.undo();
+            check("manifest: both undone, the tree is back", files_snapshot(home) == before && !again.can_undo());
+            dr::Door third(H, data);
+            third.load();
+            check("manifest: undone stays undone across a reload", !third.can_undo());
+        }
+
+        // Undo never overwrites: something new at the old place -> it stays in the Trash.
+        {
+            door.load();
+            const std::string f = H + "/Documents/report.pdf";
+            door.run(plan("Trash report", {trash(f)}));
+            put(home, "Documents/report.pdf", 7);   // the user made a new one
+            const auto u = door.undo();
+            const std::string t = H + "/.local/share/Trash/files/report.pdf";
+            check("undo: a new file in the way is left alone; the old stays in the Trash",
+                  !u.ok && u.failed == 1 && fs::file_size(f, ec) == 7 && there(t),
+                  u.messages.empty() ? "" : u.messages.front());
+            fs::remove(f, ec);                      // test cleanup, outside the door on purpose
+            dr::Door d2(H, data);
+            d2.load();
+            check("undo: the failed undo is recorded; the item is still Done", !d2.can_undo() &&
+                  d2.record(d2.batches().back().records.front())->state == dr::State::Done);
+            fs::rename(t, f, ec);                   // put the fixture back by hand
+            fs::remove(H + "/.local/share/Trash/info/report.pdf.trashinfo", ec);
+        }
+
+        // A crash between intent and outcome: load() looks and decides.
+        {
+            const std::string from = H + "/Pictures/a.jpg", to = H + "/Pictures/moved.jpg";
+            dr::Identity id{};
+            dr::identity_of(from, id);
+            {
+                std::ofstream m(data + "/manifest.jsonl", std::ios::app);
+                m << R"({"t":"batch","batch":900,"label":"crashed","when":1})" << "\n";
+                m << R"({"t":"intent","id":9000,"batch":900,"verb":"move","from":")" << from << R"(","to":")" << to
+                  << R"(","info":"","when":1,"ident":{"dev":)" << id.dev << R"(,"ino":)" << id.ino << R"(,"size":)"
+                  << id.size << R"(,"mtime_ns":)" << id.mtime_ns << R"(,"dir":false}})" << "\n";
+                m << R"({"t":"don)";   // the torn last line
+            }
+            fs::rename(from, to, ec);             // the rename DID happen before the crash
+            dr::Door d3(H, data);
+            d3.load();
+            check("crash: an intent whose item is at `to` reads as done",
+                  d3.record(9000) && d3.record(9000)->state == dr::State::Done && d3.unfinished().size() == 1,
+                  d3.unfinished().empty() ? "" : d3.unfinished().front());
+            check("crash: and it can be undone", d3.undo_label() == "crashed" && d3.undo().ok && there(from) && !there(to));
+        }
+
+        // The cross-filesystem rule needs two filesystems; as root, mount one.
+        if (::geteuid() == 0) {
+            const fs::path mnt = home / "Mnt";
+            fs::create_directory(mnt, ec);
+            if (::system(("mount -t tmpfs none '" + mnt.string() + "' 2>/dev/null").c_str()) == 0) {
+                put(home, "Mnt/far.txt", 10);
+                const auto r = door.run(plan("far", {trash(H + "/Mnt/far.txt")}));
+                check("exdev: another filesystem -- failed, not copied, still there",
+                      !r.ok && r.failed == 1 && there(H + "/Mnt/far.txt") &&
+                      !there(H + "/.local/share/Trash/files/far.txt") &&
+                      !there(H + "/.local/share/Trash/info/far.txt.trashinfo"),
+                      r.messages.empty() ? "" : r.messages.front());
+                (void)::system(("umount '" + mnt.string() + "'").c_str());
+            }
+        }
+        fs::remove_all(home, ec);
+    }
+
+    // -- The source gate: no write call outside the door (s004) --------------
+    // RULES: "every write goes through it, and the selftest fails on a write
+    // that does not." Allowlisted, each for a reason:
+    //   Door.cpp      -- it IS the door;
+    //   Recents.cpp   -- Rouster's own recents file, in its own data dir;
+    //   selftest.cpp  -- it builds and tears down fixtures;
+    //   Stones.*      -- the in-memory undo demo: its verbs are NAMED remove /
+    //                    rename and touch no disk (goes when a real model
+    //                    adopts Undo.hpp);
+    //   Registry.*    -- the widget address book; its remove() is a map erase.
+    {
+        std::cout << "\n-- source gate --\n";
+        const fs::path root = ROUSTER_SOURCE_DIR;
+        const std::set<std::string> allowed = {"src/core/Door.cpp", "src/core/Recents.cpp", "src/selftest.cpp",
+            "src/core/Stones.cpp", "include/core/Stones.hpp", "src/Registry.cpp", "include/Registry.hpp"};
+        const std::vector<std::string> calls = {"rename", "renameat", "renameat2", "unlink", "unlinkat", "rmdir",
+            "remove", "remove_all", "copy_file", "copy", "create_directory", "create_directories", "create_symlink",
+            "create_hard_link", "resize_file", "truncate", "write", "fopen", "mkdir", "symlink", "link", "chmod",
+            "permissions", "last_write_time"};
+        const std::vector<std::string> tokens = {"ofstream", "O_WRONLY", "O_RDWR", "O_CREAT", "std::fstream"};
+        // One line -> the write calls in it. Comments are dropped; a member
+        // call (x.remove(...)) or another namespace's function (registry::
+        // remove) is not a filesystem write; ::, std::, fs:: and bare are.
+        const auto line_hits = [&](std::string line) {
+            std::vector<std::string> out;
+            if (const auto c = line.find("//"); c != std::string::npos) line.erase(c);
+            for (const auto& t : tokens)
+                if (line.find(t) != std::string::npos) out.push_back(t);
+            for (const auto& c : calls) {
+                for (std::size_t p = line.find(c + "("); p != std::string::npos; p = line.find(c + "(", p + 1)) {
+                    const char before = p ? line[p - 1] : ' ';
+                    if (std::isalnum(static_cast<unsigned char>(before)) || before == '_' ||
+                        before == '.' || before == '>') continue;
+                    if (before == ':') {
+                        const std::string q = line.substr(0, p);
+                        const bool global = q.size() < 3 || !(std::isalnum(static_cast<unsigned char>(q[q.size() - 3])) || q[q.size() - 3] == '_');
+                        const bool stdfs = q.ends_with("std::") || q.ends_with("fs::") || q.ends_with("filesystem::");
+                        if (!global && !stdfs) continue;
+                    }
+                    out.push_back(c + "(");
+                }
+            }
+            return out;
+        };
+        // The gate is only worth its allowlist if it still bites.
+        check("source gate: the matcher catches real writes",
+              !line_hits("  ::rename(a, b);").empty() && !line_hits("fs::remove_all(p, ec);").empty() &&
+              !line_hits("std::filesystem::rename(a, b);").empty() && !line_hits("  unlink(p);").empty() &&
+              !line_hits("std::ofstream f(p);").empty() && !line_hits("open(p, O_WRONLY)").empty());
+        check("source gate: ...and passes what is not one",
+              line_hits("m_rows.remove(*c);").empty() && line_hits("registry::remove(this);").empty() &&
+              line_hits("core::recents_remove(m, p);").empty() && line_hits("// ::rename(a, b) in a comment").empty() &&
+              line_hits("open(p, O_RDONLY)").empty() && line_hits("std::ifstream in(p);").empty());
+
+        std::vector<std::string> hits;
+        std::size_t files = 0;
+        for (const char* sub : {"src", "include"}) {
+            for (const auto& e : fs::recursive_directory_iterator(root / sub)) {
+                const std::string rel = fs::relative(e.path(), root).string();
+                const auto ext = e.path().extension();
+                if (!e.is_regular_file() || (ext != ".cpp" && ext != ".hpp") || allowed.count(rel)) continue;
+                ++files;
+                std::ifstream in(e.path());
+                std::string line;
+                for (int n = 1; std::getline(in, line); ++n)
+                    for (const auto& h : line_hits(line)) hits.push_back(rel + ":" + std::to_string(n) + " " + h);
+            }
+        }
+        check("source gate: no write call outside the door", hits.empty(),
+              hits.empty() ? std::to_string(files) + " files clean" : hits.front() + (hits.size() > 1 ? " (+" + std::to_string(hits.size() - 1) + ")" : ""));
     }
     // -- Shortcuts: the registry paradigm, exercised ---------------------------
     // A seed's claim isn't a fact until a consumer exercises it. The registry's

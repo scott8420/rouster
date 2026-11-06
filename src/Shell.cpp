@@ -21,7 +21,15 @@ Shell::Shell()
       m_spinner("shell.scan.spinner"),
       m_scan_status("shell.scan.status"),
       m_scan_scroll("shell.scan.scroll"),
-      m_scan_results("shell.scan.results", Gtk::Orientation::VERTICAL, 6) {
+      m_scan_results("shell.scan.results", Gtk::Orientation::VERTICAL, 6),
+      m_pf_page("shell.preflight.page", Gtk::Orientation::VERTICAL, 10),
+      m_pf_summary("shell.preflight.summary"),
+      m_pf_rows("shell.preflight.rows", Gtk::Orientation::VERTICAL, 4),
+      m_pf_button("shell.preflight.again"),
+      m_act_page("shell.activity.page", Gtk::Orientation::VERTICAL, 10),
+      m_act_undo("shell.activity.undo"),
+      m_act_said("shell.activity.said"),
+      m_act_list("shell.activity.list", Gtk::Orientation::VERTICAL, 4) {
     set_name("shell.window");
 }
 
@@ -31,12 +39,16 @@ Shell::~Shell() { stop_scan(); }
 
 void Shell::build_ui() {
     m_home = home_dir();
+    m_door = std::make_unique<core::door::Door>(m_home, data_dir());
+    m_door->load();
     build_shell();     // zone
     build_pages();     // zone
     m_recents_file = recents_file();
     bind_actions();    // bindings (loads recents)
     rebuild_recents_menu();
     set_scanning(false);
+    paint_preflight();
+    paint_activity();
 
     signal_close_request().connect([this] { stop_scan(); return false; }, false);
     m_scan_finished.connect(sigc::mem_fun(*this, &Shell::on_scan_done));

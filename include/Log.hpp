@@ -14,7 +14,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 namespace rouster::log {
 
-enum class Area { App, Shell, Registry, Recents, Io, Scan };
+enum class Area { App, Shell, Registry, Recents, Io, Scan, Preflight, Door };
 
 // The logger for an area (may be null before init()/after shutdown -- callers
 // guard with `if (auto lg = log::get(area))`).

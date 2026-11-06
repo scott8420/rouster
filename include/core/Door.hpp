@@ -1,0 +1,143 @@
+#pragma once
+#include <cstdint>
+#include <string>
+#include <vector>
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Door -- THE ONE DOOR (s004, REQUIREMENTS §1.1 / §6, RULES "Undo from the
+// first write"). Every change Rouster makes to a user's files goes through
+// Door::run. Nothing else in the code base renames, unlinks or writes a user
+// file, and the selftest's source gate fails if anything does.
+//
+// The shape (ARCHITECTURE "the plan is data"):
+//
+//   module -> Plan{ label, actions[], previewed }      (a module never acts)
+//   UI shows the plan; the user unchecks what they don't want; previewed=true
+//   Door::run(plan):  policy check, every action, BEFORE anything moves
+//                     batch line -> for each action:
+//                       intent line (fsync) -> the rename -> done / failed line
+//   Door::undo():     the last batch, backwards; each item is checked to be
+//                     the SAME file (dev + inode) before it is moved back
+//
+// Two pictures, not an inverse (docs/undo.md): an action records where the
+// thing was (from) and where it went (to) plus its identity; undo moves it
+// from `to` back to `from`. No per-verb undo code beyond the Trash's info file.
+//
+// What the door refuses (policy lives HERE, not in modules -- a module bug
+// cannot get past it):
+//   * a plan that was not previewed;
+//   * anything outside home, or home itself;
+//   * anything Protected (scan::never_touch(), any fixes/), at any depth;
+//   * a path with a symlinked parent (the rename would land somewhere else);
+//   * Rouster's own records (the data dir holding the manifest);
+//   * Trashing what is already in the Trash; Moving into the Trash;
+//   * a Move onto an existing path, or into a missing folder;
+//   * crossing filesystems: the rename fails with EXDEV and nothing is copied.
+//
+// Hard-delete does not exist here, and will not (§1.1).
+// ─────────────────────────────────────────────────────────────────────────────
+namespace rouster::core::door {
+
+enum class Verb { Trash, Move };
+const char* verb_name(Verb v);   // "trash", "move"
+// THE VERB TABLE the selftest gate walks: a verb added to the enum and not
+// here fails the gate's count; every verb here is run through the door,
+// checked to be one step, and undone back to the exact tree.
+const std::vector<Verb>& verbs();
+inline constexpr int kVerbCount = 2;
+
+struct Action {
+    Verb        verb = Verb::Trash;
+    std::string from;            // absolute path
+    std::string to;              // Move: absolute destination. Trash: filled in by run().
+    std::string reason;          // why the module proposed it (shown in preview)
+    std::uint64_t bytes = 0;     // for the preview
+};
+
+struct Plan {
+    std::string         label;   // "Sweep: 3 caches" -- names the undo step
+    std::vector<Action> actions;
+    bool previewed = false;      // the UI sets this after showing the plan (RULES: preview first)
+};
+
+struct Identity {
+    std::uint64_t dev = 0, ino = 0, size = 0;
+    std::int64_t  mtime_ns = 0;
+    bool          dir = false;
+    bool operator==(const Identity&) const = default;
+};
+
+enum class State { Intent, Done, Failed, Undone };
+
+struct Record {
+    std::uint64_t id = 0, batch = 0;
+    Verb          verb = Verb::Trash;
+    std::string   from, to, info;   // info: the .trashinfo path (Trash only)
+    Identity      ident;
+    std::int64_t  when = 0;         // unix seconds
+    State         state = State::Intent;
+    std::string   error;
+};
+
+struct Batch {
+    std::uint64_t id = 0;
+    std::string   label;
+    std::int64_t  when = 0;
+    std::vector<std::uint64_t> records;
+    bool          undone = false;
+};
+
+struct Result {
+    bool ok = false;                       // everything asked for happened
+    std::size_t done = 0, failed = 0;
+    std::vector<std::string> messages;     // refusals and failures, one per line
+    std::uint64_t batch = 0;
+};
+
+class Door {
+public:
+    // home: the user's home (canonicalised). data_dir: where the manifest lives
+    // (Rouster's own folder, e.g. ~/.local/share/rouster) -- refused as a target.
+    Door(const std::string& home, const std::string& data_dir);
+
+    // Replay the manifest. An intent with no outcome (a crash mid-action) is
+    // resolved by looking: the item at `to` with the recorded identity -> done,
+    // still at `from` -> failed; either way it is listed in unfinished().
+    bool load();
+
+    // "" = allowed; otherwise why not. run() asks this of every action first.
+    std::string refusal(const Action& a) const;
+
+    Result run(const Plan& plan);
+    Result undo();                          // the last batch not yet undone
+    bool        can_undo() const;
+    std::string undo_label() const;
+
+    const std::vector<Batch>&  batches() const { return m_batches; }
+    const Record*              record(std::uint64_t id) const;
+    const std::vector<std::string>& unfinished() const { return m_unfinished; }
+    std::string manifest_path() const { return m_manifest; }
+    std::string trash_dir() const { return m_trash; }
+
+private:
+    bool append(const std::string& line);   // O_APPEND + fdatasync
+    bool do_trash(Record& r);
+    bool do_move(Record& r);
+    bool undo_one(Record& r, std::string& why);
+    Record* find(std::uint64_t id);
+
+    std::string m_home, m_data, m_manifest, m_trash;
+    std::vector<Batch>  m_batches;
+    std::vector<Record> m_records;
+    std::vector<std::string> m_unfinished;
+    std::uint64_t m_next_id = 1, m_next_batch = 1;
+};
+
+// Identity of what is at `path` now (lstat; a symlink is itself). false = gone.
+bool identity_of(const std::string& path, Identity& out);
+
+// The freedesktop .trashinfo body for `abs` deleted at unix time `when`
+// (local time, percent-encoded path). Public so the selftest can check it.
+std::string trashinfo(const std::string& abs, std::int64_t when);
+
+}  // namespace rouster::core::door

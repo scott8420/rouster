@@ -1,6 +1,7 @@
 #pragma once
 #include "widgets/Widgets.hpp"
 #include "core/Scan.hpp"     // s002: the read-only walker
+#include "core/Door.hpp"     // s004: the one door
 
 #include <gtkmm/applicationwindow.h>
 #include <giomm/menu.h>
@@ -39,6 +40,8 @@
 //   "Where is the Smart Scan page built?" -> Shell_zones.cpp    (build_scan_page)
 //   "Where does a scan start / finish?"   -> Shell_helpers.cpp  (start_scan / paint_report)
 //   "What thread does the walking?"       -> Shell_helpers.cpp  (start_scan: m_worker)
+//   "Where is the Preflight checklist?"   -> Shell_zones.cpp (page) + Shell_helpers.cpp (paint_preflight)
+//   "Where does a write go?"              -> core/Door.* -- nowhere else (the selftest's source gate)
 //   "Where are actions registered?"       -> Shell_bindings.cpp (bind_actions)
 // ─────────────────────────────────────────────────────────────────────────────
 namespace rouster {
@@ -58,6 +61,8 @@ private:
     void build_shell();                          // category: zone: window + sidebar + stack
     void build_pages();                          // category: zone: the module pages
     void build_scan_page();                      // category: zone: Smart Scan (s002)
+    void build_preflight_page();                 // category: zone: Preflight (s003)
+    void build_activity_page();                  // category: zone: Activity -- what the door did (s004)
     Glib::RefPtr<Gio::Menu> build_menu();        // category: zone: hamburger model
 
     // ── bindings ───────────────────────────────────────────────────────────
@@ -67,6 +72,8 @@ private:
     void on_scan();                              // category: handler: Smart Scan the home folder
     void on_scan_cancel();                       // category: handler: stop the running scan
     void on_scan_done();                         // category: handler: the worker finished (Dispatcher, UI thread)
+    void on_undo();                              // category: handler: undo the last batch, through the door
+    void on_preflight();                         // category: handler: run the checklist again
     void on_pick_folder();                       // category: handler: folder chooser -> scan it
     void on_recent_open(const std::string& p);   // category: handler: scan a recent folder again
     void on_recent_clear();                      // category: handler: empty the recents list
@@ -81,6 +88,9 @@ private:
     bool tick_progress();                        // category: helper: repaint the live counters
     void paint_report();                         // category: helper: the summary, by kind
     void set_scanning(bool on);                  // category: helper: buttons + spinner follow the state
+    void paint_activity();                       // category: helper: the manifest's batches, newest first
+    std::string data_dir() const;                // category: helper: where the manifest lives
+    void paint_preflight();                      // category: helper: gather + evaluate + repaint the rows
     void note_recent(const std::string& path);   // category: helper: push onto the list + persist
     void rebuild_recents_menu();                 // category: helper: repaint the submenu
     std::string recents_file() const;            // category: helper: the XDG path (UI-side resolution)
@@ -103,6 +113,20 @@ private:
     widgets::Label          m_scan_status;    // live counters, then the total
     widgets::ScrolledWindow m_scan_scroll;
     widgets::Box            m_scan_results;   // one Expander per kind, rebuilt per report
+
+    // Preflight (s003).
+    widgets::Box    m_pf_page;       // vertical
+    widgets::Label  m_pf_summary;
+    widgets::Box    m_pf_rows;       // one row per check, rebuilt per run
+    widgets::Button m_pf_button;
+
+    // Activity (s004): what went through the door, and the way back.
+    std::unique_ptr<core::door::Door> m_door;
+    widgets::Box    m_act_page;      // vertical
+    widgets::Button m_act_undo;
+    widgets::Label  m_act_said;
+    widgets::Box    m_act_list;      // one Expander per batch, rebuilt
+    Glib::RefPtr<Gio::SimpleAction> m_act_undo_action;
 
     // The worker. Declaration order matters: the dispatcher outlives the thread
     // (stop_scan joins in the dtor before members go).

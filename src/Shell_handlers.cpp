@@ -32,6 +32,25 @@ void Shell::on_scan_done() {  // handler: the worker finished (Dispatcher -> UI 
     paint_report();
 }
 
+void Shell::on_undo() {  // handler: undo the last batch, through the door
+    if (!m_door || !m_door->can_undo()) return;
+    const std::string label = m_door->undo_label();
+    const auto r = m_door->undo();
+    std::string said = (r.ok ? "Undid \u201c" : "Partly undid \u201c") + label + "\u201d -- " +
+                       std::to_string(r.done) + " put back";
+    if (r.failed) said += ", " + std::to_string(r.failed) + " could not be: " + r.messages.front();
+    m_act_said.set_text(said);
+    if (auto lg = log::get(log::Area::Door)) {
+        lg->info("undo '{}': {} back, {} failed", label, r.done, r.failed);
+        for (const auto& m : r.messages) lg->warn("  {}", m);
+    }
+    paint_activity();
+}
+
+void Shell::on_preflight() {  // handler: run the checklist again
+    paint_preflight();
+}
+
 void Shell::on_pick_folder() {  // handler: folder chooser -> scan it
     auto dialog = Gtk::FileDialog::create();
     dialog->set_title("Pick a folder to scan");

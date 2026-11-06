@@ -19,6 +19,10 @@ find_package(spdlog REQUIRED)
 add_library(rouster_core STATIC
     src/core/Recents.cpp
     src/core/Scan.cpp
+    src/core/Preflight.cpp
+    # THE ONE DOOR (s004): the only file that changes a user's files. The
+    # selftest's source gate fails if any other file makes a write call.
+    src/core/Door.cpp
     # The SHORTCUT-REGISTRY paradigm: one list, two consumers (App wires accels
     # from it, ShortcutsDialog renders from it) so a key and its advertised row
     # can't drift. GTK-free, so it lives in core and the selftest guards it
@@ -37,6 +41,8 @@ target_include_directories(rouster_core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/thir
 # ── Headless selftest -- exercises the core with no display ────────────────────
 add_executable(rouster_selftest src/selftest.cpp)
 target_link_libraries(rouster_selftest PRIVATE rouster_core)
+# The source gate reads src/ and include/ at test time.
+target_compile_definitions(rouster_selftest PRIVATE ROUSTER_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 
 # ── App resources (gresource) -- the RESOURCE-PIPELINE paradigm ────────────────
 # glib-compile-resources embeds resources/rouster.gresource.xml into a C source;

@@ -1,9 +1,11 @@
 #include "Shell.hpp"
 #include "core/Recents.hpp"
+#include "core/Preflight.hpp"
 #include "Log.hpp"
 
 #include <gtkmm/label.h>
 #include <gtkmm/expander.h>
+#include <gtkmm/image.h>
 #include <glibmm/main.h>
 #include <glibmm/markup.h>
 #include <giomm/menuitem.h>
@@ -11,6 +13,7 @@
 #include <glibmm/variant.h>
 
 #include <chrono>
+#include <ctime>
 #include <cstdlib>
 #include <filesystem>
 
@@ -187,6 +190,120 @@ void Shell::paint_report() {  // helper: the summary, by kind
         ex->set_child(*body);
         m_scan_results.append(*ex);
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Activity (s004).
+// ─────────────────────────────────────────────────────────────────────────────
+std::string Shell::data_dir() const {  // helper: where the manifest lives
+    // A fixture home keeps its own manifest, so a drive never writes into the
+    // real ~/.local/share/rouster.
+    if (const char* h = std::getenv("ROUSTER_HOME"); h && *h) return std::string(h) + "/.local/share/rouster";
+    return (std::filesystem::path(Glib::get_user_data_dir()) / "rouster").string();
+}
+
+void Shell::paint_activity() {  // helper: the manifest's batches, newest first
+    namespace dr = core::door;
+    while (auto* c = m_act_list.get_first_child()) m_act_list.remove(*c);
+    const bool can = m_door && m_door->can_undo();
+    if (m_act_undo_action) m_act_undo_action->set_enabled(can);
+    m_act_undo.set_label(can ? "Undo \u201c" + m_door->undo_label() + "\u201d" : "Undo");
+    if (!m_door) return;
+
+    for (const auto& u : m_door->unfinished()) {
+        auto l = Gtk::make_managed<Gtk::Label>("Interrupted last time (resolved by looking): " + u);
+        l->set_xalign(0.0f);
+        l->set_wrap(true);
+        l->add_css_class("pf-amber");
+        m_act_list.append(*l);
+    }
+    const auto& batches = m_door->batches();
+    if (batches.empty()) {
+        auto l = Gtk::make_managed<Gtk::Label>("Nothing done yet.");
+        l->set_xalign(0.0f);
+        l->add_css_class("dim-label");
+        m_act_list.append(*l);
+        return;
+    }
+    const std::int64_t now = static_cast<std::int64_t>(std::time(nullptr));
+    for (auto it = batches.rbegin(); it != batches.rend(); ++it) {
+        std::size_t done = 0, failed = 0, undone = 0;
+        auto body = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 2);
+        body->set_margin_start(22);
+        body->set_margin_bottom(6);
+        for (auto id : it->records) {
+            const dr::Record* r = m_door->record(id);
+            if (!r) continue;
+            const char* mark = "";
+            switch (r->state) {
+                case dr::State::Done:   ++done;   mark = "\u2192"; break;
+                case dr::State::Undone: ++undone; mark = "\u21a9"; break;
+                default:                ++failed; mark = "\u2717"; break;
+            }
+            auto l = Gtk::make_managed<Gtk::Label>(std::string(mark) + "  " + dr::verb_name(r->verb) + "  " + r->from +
+                                                   (r->error.empty() ? "" : "  -- " + r->error));
+            l->set_xalign(0.0f);
+            l->set_ellipsize(Pango::EllipsizeMode::MIDDLE);
+            l->set_tooltip_text(r->from + "\n\u2192 " + r->to);
+            body->append(*l);
+        }
+        std::string state = it->undone ? "undone" : std::to_string(done) + " done";
+        if (failed) state += ", " + std::to_string(failed) + " failed";
+        const std::string age = core::preflight::human_age(now - it->when);
+        const std::string when = age == "just now" ? age : age + " ago";
+        auto ex = Gtk::make_managed<Gtk::Expander>();
+        ex->set_use_markup(true);
+        ex->set_label("<b>" + Glib::Markup::escape_text(it->label) + "</b>    <span alpha='60%'>" +
+                      when + " \u00b7 " + state + "</span>");
+        ex->set_child(*body);
+        m_act_list.append(*ex);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Preflight (s003). gather() is a handful of syscalls -- fast enough for the UI
+// thread. The checklist itself is core::preflight::evaluate(), pure and tested.
+// ─────────────────────────────────────────────────────────────────────────────
+void Shell::paint_preflight() {  // helper: gather + evaluate + repaint the rows
+    namespace pf = core::preflight;
+    const pf::Inputs in = pf::gather(m_home);
+    const auto checks = pf::evaluate(in);
+    while (auto* c = m_pf_rows.get_first_child()) m_pf_rows.remove(*c);
+
+    int green = 0, red = 0;
+    for (const auto& c : checks) {
+        if (c.status == pf::Status::Green) ++green;
+        if (c.status == pf::Status::Red) ++red;
+        auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 12);
+        row->set_margin_bottom(8);
+        auto icon = Gtk::make_managed<Gtk::Image>();
+        icon->set_valign(Gtk::Align::START);
+        icon->set_pixel_size(20);
+        switch (c.status) {
+            case pf::Status::Green: icon->set_from_icon_name("emblem-ok-symbolic");      icon->add_css_class("pf-green"); break;
+            case pf::Status::Amber: icon->set_from_icon_name("dialog-warning-symbolic"); icon->add_css_class("pf-amber"); break;
+            case pf::Status::Red:   icon->set_from_icon_name("dialog-error-symbolic");   icon->add_css_class("pf-red");   break;
+        }
+        auto text = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 2);
+        auto t = Gtk::make_managed<Gtk::Label>();
+        t->set_xalign(0.0f);
+        t->set_markup("<b>" + Glib::Markup::escape_text(c.title) + "</b>");
+        auto dl = Gtk::make_managed<Gtk::Label>(c.detail);
+        dl->set_xalign(0.0f);
+        dl->set_wrap(true);
+        dl->set_hexpand(true);
+        text->append(*t);
+        text->append(*dl);
+        row->append(*icon);
+        row->append(*text);
+        m_pf_rows.append(*row);
+        if (auto lg = log::get(log::Area::Preflight))
+            lg->info("{} {}: {}", pf::status_name(c.status), c.id, c.detail);
+    }
+    m_pf_summary.set_text(std::to_string(green) + " of " + std::to_string(checks.size()) +
+                          " green" + (red ? ", " + std::to_string(red) + " red" : std::string{}) +
+                          ". Nothing is cleaned yet, so nothing is gated yet -- from the first clean on, "
+                          "a red row stops it.");
 }
 
 std::string Shell::recents_file() const {  // helper: XDG path (UI-side resolution)
