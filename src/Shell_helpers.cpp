@@ -6,6 +6,7 @@
 #include <gtkmm/label.h>
 #include <gtkmm/expander.h>
 #include <gtkmm/image.h>
+#include <gtkmm/flowboxchild.h>
 #include <glibmm/main.h>
 #include <glibmm/markup.h>
 #include <giomm/menuitem.h>
@@ -50,8 +51,8 @@ std::string Shell::home_dir() const {  // helper: $ROUSTER_HOME, else the real h
 void Shell::start_scan(const std::string& root) {  // helper: spawn the worker
     if (m_worker.joinable()) return;   // one scan at a time; Stop first
     m_progress = std::make_shared<scan::Progress>();
-    while (auto* c = m_scan_results.get_first_child()) m_scan_results.remove(*c);
-    m_scan_where.set_text("Scanning " + root + " -- read-only, nothing is changed.");
+    m_run_big.set_text("0 B");
+    m_run_caption.set_text("Looking through " + root);
     set_scanning(true);
     if (auto lg = log::get(log::Area::Scan)) lg->info("scan '{}' (home '{}')", root, m_home);
 
@@ -70,7 +71,7 @@ void Shell::start_scan(const std::string& root) {  // helper: spawn the worker
         }
         m_scan_finished.emit();
     });
-    m_tick = Glib::signal_timeout().connect(sigc::mem_fun(*this, &Shell::tick_progress), 150);
+    m_tick = Glib::signal_timeout().connect(sigc::mem_fun(*this, &Shell::tick_progress), 120);
 }
 
 void Shell::stop_scan() {  // helper: cancel + join (close, dtor)
@@ -79,117 +80,146 @@ void Shell::stop_scan() {  // helper: cancel + join (close, dtor)
     m_tick.disconnect();
 }
 
-bool Shell::tick_progress() {  // helper: repaint the live counters
+bool Shell::tick_progress() {  // helper: the big live counters
     if (!m_progress) return false;
-    m_scan_status.set_text(with_commas(m_progress->files.load()) + " files · " +
-                           scan::human_bytes(m_progress->bytes.load()) +
-                           (m_progress->cancel.load() ? " · stopping…" : ""));
+    m_run_big.set_text(scan::human_bytes(m_progress->bytes.load()));
+    m_run_caption.set_text(m_progress->cancel.load()
+        ? "Stopping…"
+        : with_commas(m_progress->files.load()) + " files in " + with_commas(m_progress->dirs.load()) +
+          " folders looked at");
     return true;
 }
 
-void Shell::set_scanning(bool on) {  // helper: buttons + spinner follow the state
+void Shell::set_scanning(bool on) {  // helper: which scan state shows; actions follow
     if (m_act_scan)   m_act_scan->set_enabled(!on);
     if (m_act_pick)   m_act_pick->set_enabled(!on);
     if (m_act_cancel) m_act_cancel->set_enabled(on);
-    m_cancel_button.set_visible(on);
-    if (on) m_spinner.start(); else m_spinner.stop();
-    m_spinner.set_visible(on);
+    if (on) { m_spinner.start(); m_scan_states.set_visible_child("running"); }
+    else      m_spinner.stop();
 }
 
-void Shell::paint_report() {  // helper: the summary, by kind
-    scan::Report r;
+namespace {
+const char* kind_css(scan::Kind k) {
+    switch (k) {
+        case scan::Kind::Regenerable: return "kind-regenerable";
+        case scan::Kind::Trash:       return "kind-trash";
+        case scan::Kind::State:       return "kind-state";
+        case scan::Kind::Settings:    return "kind-settings";
+        case scan::Kind::AppData:     return "kind-appdata";
+        case scan::Kind::Protected:   return "kind-protected";
+        case scan::Kind::Other:       return "kind-other";
+    }
+    return "kind-other";
+}
+constexpr scan::Kind kOrder[] = {scan::Kind::Regenerable, scan::Kind::Trash, scan::Kind::State,
+                                 scan::Kind::Settings, scan::Kind::AppData, scan::Kind::Protected,
+                                 scan::Kind::Other};
+Gtk::Label* text(const std::string& s, const char* css, float x = 0.0f) {
+    auto l = Gtk::make_managed<Gtk::Label>(s);
+    if (css) l->add_css_class(css);
+    l->set_xalign(x);
+    return l;
+}
+}  // namespace
+
+void Shell::paint_report() {  // helper: headline + one card per kind
     {
         std::lock_guard lk(m_report_mx);
-        r = m_report;
+        m_shown = m_report;
     }
-    while (auto* c = m_scan_results.get_first_child()) m_scan_results.remove(*c);
-
+    const scan::Report& r = m_shown;
     if (!r.refused.empty()) {
-        m_scan_where.set_text("Not scanned: " + r.refused);
-        m_scan_status.set_text("");
+        m_scan_sub.set_text("Not scanned: " + r.refused);
+        m_scan_states.set_visible_child("start");
         return;
     }
-    m_scan_where.set_text("Scanned " + r.root + (r.cancelled ? " -- stopped early; partial." : ".") +
-                          " Nothing was changed.");
     const auto kb = [&](scan::Kind k) { return r.by_kind[static_cast<int>(k)]; };
     std::uint64_t files = 0;
     for (const auto& b : r.by_kind) files += b.files;
-    std::string status = scan::human_bytes(r.total_bytes()) + " in " + with_commas(files) + " files";
-    if (r.errors) status += " · " + with_commas(r.errors) + " unreadable";
-    m_scan_status.set_text(status);
 
-    // The headline: what a later Sweep could give back without a second thought.
-    auto head = Gtk::make_managed<Gtk::Label>();
-    head->set_xalign(0.0f);
-    head->set_margin_bottom(6);
-    head->set_markup("<span size='large'>Found <b>" + scan::human_bytes(kb(scan::Kind::Regenerable).bytes) +
-                     "</b> regenerable</span>    <span alpha='70%'>+ " +
-                     scan::human_bytes(kb(scan::Kind::Trash).bytes) + " in the Trash</span>");
-    m_scan_results.append(*head);
+    m_res_big.set_text(scan::human_bytes(kb(scan::Kind::Regenerable).bytes));
+    m_res_caption.set_text(std::string("regenerable — caches and build output that rebuild themselves") +
+                           (kb(scan::Kind::Trash).bytes
+                                ? ".  Plus " + scan::human_bytes(kb(scan::Kind::Trash).bytes) + " already in the Trash."
+                                : "."));
+    std::string where = "Scanned " + r.root + " · " + scan::human_bytes(r.total_bytes()) + " in " +
+                        with_commas(files) + " files";
+    if (r.cancelled) where += " · stopped early, partial";
+    if (r.errors) where += " · " + with_commas(r.errors) + " unreadable";
+    if (!r.skipped.empty()) {
+        where += " · not entered (other filesystems): ";
+        for (std::size_t i = 0; i < r.skipped.size() && i < 6; ++i) where += (i ? ", ~/" : "~/") + r.skipped[i];
+        if (r.skipped.size() > 6) where += ", …";
+    }
+    where += ".  Nothing was changed.";
+    m_res_where.set_text(where);
+
+    while (auto* c = m_cards.get_first_child()) m_cards.remove(*c);
+    for (scan::Kind k : kOrder) {
+        const auto b = kb(k);
+        auto card = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 4);
+        card->add_css_class("card");
+        auto top = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        auto dot = Gtk::make_managed<Gtk::Box>();
+        dot->add_css_class("dot");
+        dot->add_css_class(kind_css(k));
+        dot->set_valign(Gtk::Align::CENTER);
+        top->append(*dot);
+        top->append(*text(scan::kind_name(k), "card-title"));
+        card->append(*top);
+        card->append(*text(scan::human_bytes(b.bytes), "card-big"));
+        card->append(*text(with_commas(b.files) + " files", "card-sub"));
+        auto child = Gtk::make_managed<Gtk::FlowBoxChild>();
+        child->set_name(std::to_string(static_cast<int>(k)));
+        child->set_child(*card);
+        m_cards.append(*child);
+        if (static_cast<int>(k) == m_sel_kind) m_cards.select_child(*child);
+    }
+    paint_detail();
+    m_scan_states.set_visible_child("results");
+}
+
+void Shell::paint_detail() {  // helper: the selected card's biggest folders
+    while (auto* c = m_detail.get_first_child()) m_detail.remove(*c);
+    const auto k = static_cast<scan::Kind>(m_sel_kind);
+    const auto b = m_shown.by_kind[static_cast<int>(k)];
+    auto head = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+    auto dot = Gtk::make_managed<Gtk::Box>();
+    dot->add_css_class("dot");
+    dot->add_css_class(kind_css(k));
+    dot->set_valign(Gtk::Align::CENTER);
+    head->append(*dot);
+    head->append(*text(std::string(scan::kind_name(k)) + " · " + scan::human_bytes(b.bytes), "card-title"));
+    m_detail.append(*head);
+    auto why = text(scan::kind_treatment(k), "dim");
+    why->set_wrap(true);
+    why->set_margin_bottom(6);
+    m_detail.append(*why);
 
     constexpr std::size_t kTop = 25;
-    const std::string home = r.home;
-    for (scan::Kind k : {scan::Kind::Regenerable, scan::Kind::Trash, scan::Kind::State, scan::Kind::Settings,
-                         scan::Kind::AppData, scan::Kind::Protected, scan::Kind::Other}) {
-        const auto b = kb(k);
-        auto ex = Gtk::make_managed<Gtk::Expander>();
-        ex->set_use_markup(true);
-        ex->set_label("<b>" + esc(scan::kind_name(k)) + "</b>    " + scan::human_bytes(b.bytes) +
-                      "  <span alpha='60%'>· " + with_commas(b.files) + " files</span>");
-        auto body = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 2);
-        body->set_margin_start(22);
-        body->set_margin_bottom(6);
-        auto why = Gtk::make_managed<Gtk::Label>(scan::kind_treatment(k));
-        why->set_xalign(0.0f);
-        why->set_wrap(true);
-        why->add_css_class("dim-label");
-        why->set_margin_bottom(4);
-        body->append(*why);
-
-        std::size_t shown = 0, more = 0;
-        std::uint64_t more_bytes = 0;
-        for (const auto& it : r.items) {
-            if (it.kind != k) continue;
-            if (shown == kTop) { ++more; more_bytes += it.bytes; continue; }
-            ++shown;
-            auto line = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 12);
-            auto sz = Gtk::make_managed<Gtk::Label>(scan::human_bytes(it.bytes));
-            sz->set_width_chars(9);
-            sz->set_xalign(1.0f);
-            auto path = Gtk::make_managed<Gtk::Label>("~/" + it.rel);
-            path->set_xalign(0.0f);
-            path->set_hexpand(true);
-            path->set_ellipsize(Pango::EllipsizeMode::MIDDLE);
-            path->set_tooltip_text(home + "/" + it.rel + "  —  " + with_commas(it.files) + " files");
-            line->append(*sz);
-            line->append(*path);
-            body->append(*line);
-        }
-        if (more) {
-            auto m = Gtk::make_managed<Gtk::Label>("… and " + with_commas(more) + " more (" +
-                                                   scan::human_bytes(more_bytes) + ")");
-            m->set_xalign(0.0f);
-            m->add_css_class("dim-label");
-            body->append(*m);
-        }
-        ex->set_child(*body);
-        ex->set_expanded(k == scan::Kind::Regenerable && shown > 0);
-        m_scan_results.append(*ex);
+    std::size_t shown = 0, more = 0;
+    std::uint64_t more_bytes = 0;
+    for (const auto& it : m_shown.items) {
+        if (it.kind != k) continue;
+        if (shown == kTop) { ++more; more_bytes += it.bytes; continue; }
+        ++shown;
+        auto line = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 14);
+        auto sz = text(scan::human_bytes(it.bytes), "detail-size", 1.0f);
+        sz->set_width_chars(9);
+        auto path = text("~/" + it.rel, "detail-path");
+        path->set_hexpand(true);
+        path->set_ellipsize(Pango::EllipsizeMode::MIDDLE);
+        path->set_tooltip_text(m_shown.home + "/" + it.rel + "  —  " + with_commas(it.files) + " files");
+        line->append(*sz);
+        line->append(*path);
+        m_detail.append(*line);
     }
-
-    if (!r.skipped.empty()) {
-        auto ex = Gtk::make_managed<Gtk::Expander>();
-        ex->set_label("Not scanned -- other filesystems (" + with_commas(r.skipped.size()) + ")");
-        auto body = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 2);
-        body->set_margin_start(22);
-        for (const auto& s : r.skipped) {
-            auto l = Gtk::make_managed<Gtk::Label>("~/" + s);
-            l->set_xalign(0.0f);
-            body->append(*l);
-        }
-        ex->set_child(*body);
-        m_scan_results.append(*ex);
-    }
+    if (k == scan::Kind::Other)
+        m_detail.append(*text("Your own files are totalled, not listed -- they are yours to organize.", "dim"));
+    else if (shown == 0)
+        m_detail.append(*text("Nothing of this kind here.", "dim"));
+    if (more)
+        m_detail.append(*text("… and " + with_commas(more) + " more (" + scan::human_bytes(more_bytes) + ")", "dim"));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -207,56 +237,51 @@ void Shell::paint_activity() {  // helper: the manifest's batches, newest first
     while (auto* c = m_act_list.get_first_child()) m_act_list.remove(*c);
     const bool can = m_door && m_door->can_undo();
     if (m_act_undo_action) m_act_undo_action->set_enabled(can);
-    m_act_undo.set_label(can ? "Undo \u201c" + m_door->undo_label() + "\u201d" : "Undo");
+    m_act_undo.set_label(can ? "Undo “" + m_door->undo_label() + "”" : "Undo");
     if (!m_door) return;
 
     for (const auto& u : m_door->unfinished()) {
-        auto l = Gtk::make_managed<Gtk::Label>("Interrupted last time (resolved by looking): " + u);
-        l->set_xalign(0.0f);
+        auto l = text("Interrupted last time (resolved by looking): " + u, "pf-amber");
         l->set_wrap(true);
-        l->add_css_class("pf-amber");
         m_act_list.append(*l);
     }
     const auto& batches = m_door->batches();
     if (batches.empty()) {
-        auto l = Gtk::make_managed<Gtk::Label>("Nothing done yet.");
-        l->set_xalign(0.0f);
-        l->add_css_class("dim-label");
-        m_act_list.append(*l);
+        m_act_list.append(*text("Nothing done yet.", "hero-caption", 0.5f));
         return;
     }
     const std::int64_t now = static_cast<std::int64_t>(std::time(nullptr));
     for (auto it = batches.rbegin(); it != batches.rend(); ++it) {
-        std::size_t done = 0, failed = 0, undone = 0;
-        auto body = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 2);
-        body->set_margin_start(22);
-        body->set_margin_bottom(6);
+        std::size_t done = 0, failed = 0;
+        auto body = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 3);
+        body->set_margin_top(6);
         for (auto id : it->records) {
             const dr::Record* r = m_door->record(id);
             if (!r) continue;
             const char* mark = "";
             switch (r->state) {
-                case dr::State::Done:   ++done;   mark = "\u2192"; break;
-                case dr::State::Undone: ++undone; mark = "\u21a9"; break;
-                default:                ++failed; mark = "\u2717"; break;
+                case dr::State::Done:   ++done;   mark = "→"; break;
+                case dr::State::Undone:           mark = "↩"; break;
+                default:                ++failed; mark = "✗"; break;
             }
-            auto l = Gtk::make_managed<Gtk::Label>(std::string(mark) + "  " + dr::verb_name(r->verb) + "  " + r->from +
-                                                   (r->error.empty() ? "" : "  -- " + r->error));
-            l->set_xalign(0.0f);
+            auto l = text(std::string(mark) + "  " + dr::verb_name(r->verb) + "  " + r->from +
+                          (r->error.empty() ? "" : "  -- " + r->error), "detail-path");
             l->set_ellipsize(Pango::EllipsizeMode::MIDDLE);
-            l->set_tooltip_text(r->from + "\n\u2192 " + r->to);
+            l->set_tooltip_text(r->from + "\n→ " + r->to);
             body->append(*l);
         }
-        std::string state = it->undone ? "undone" : std::to_string(done) + " done";
-        if (failed) state += ", " + std::to_string(failed) + " failed";
         const std::string age = core::preflight::human_age(now - it->when);
-        const std::string when = age == "just now" ? age : age + " ago";
+        std::string state = (age == "just now" ? age : age + " ago") + " · " +
+                            (it->undone ? std::string("undone") : std::to_string(done) + " done");
+        if (failed) state += ", " + std::to_string(failed) + " failed";
+        auto card = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 2);
+        card->add_css_class("card");
         auto ex = Gtk::make_managed<Gtk::Expander>();
         ex->set_use_markup(true);
-        ex->set_label("<b>" + Glib::Markup::escape_text(it->label) + "</b>    <span alpha='60%'>" +
-                      when + " \u00b7 " + state + "</span>");
+        ex->set_label("<b>" + esc(it->label) + "</b>    <span alpha='65%'>" + esc(state) + "</span>");
         ex->set_child(*body);
-        m_act_list.append(*ex);
+        card->append(*ex);
+        m_act_list.append(*card);
     }
 }
 
@@ -264,7 +289,7 @@ void Shell::paint_activity() {  // helper: the manifest's batches, newest first
 // Preflight (s003). gather() is a handful of syscalls -- fast enough for the UI
 // thread. The checklist itself is core::preflight::evaluate(), pure and tested.
 // ─────────────────────────────────────────────────────────────────────────────
-void Shell::paint_preflight() {  // helper: gather + evaluate + repaint the rows
+void Shell::paint_preflight() {  // helper: gather + evaluate + repaint the cards
     namespace pf = core::preflight;
     const pf::Inputs in = pf::gather(m_home);
     const auto checks = pf::evaluate(in);
@@ -274,36 +299,36 @@ void Shell::paint_preflight() {  // helper: gather + evaluate + repaint the rows
     for (const auto& c : checks) {
         if (c.status == pf::Status::Green) ++green;
         if (c.status == pf::Status::Red) ++red;
-        auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 12);
-        row->set_margin_bottom(8);
+        auto card = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 14);
+        card->add_css_class("card");
         auto icon = Gtk::make_managed<Gtk::Image>();
-        icon->set_valign(Gtk::Align::START);
-        icon->set_pixel_size(20);
+        icon->set_valign(Gtk::Align::CENTER);
+        icon->set_pixel_size(28);
+        const char* chip = "";
         switch (c.status) {
-            case pf::Status::Green: icon->set_from_icon_name("emblem-ok-symbolic");      icon->add_css_class("pf-green"); break;
-            case pf::Status::Amber: icon->set_from_icon_name("dialog-warning-symbolic"); icon->add_css_class("pf-amber"); break;
-            case pf::Status::Red:   icon->set_from_icon_name("dialog-error-symbolic");   icon->add_css_class("pf-red");   break;
+            case pf::Status::Green: icon->set_from_icon_name("emblem-ok-symbolic");      icon->add_css_class("pf-green"); chip = "OK";    break;
+            case pf::Status::Amber: icon->set_from_icon_name("dialog-warning-symbolic"); icon->add_css_class("pf-amber"); chip = "NOTE";  break;
+            case pf::Status::Red:   icon->set_from_icon_name("dialog-error-symbolic");   icon->add_css_class("pf-red");   chip = "STOP";  break;
         }
-        auto text = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 2);
-        auto t = Gtk::make_managed<Gtk::Label>();
-        t->set_xalign(0.0f);
-        t->set_markup("<b>" + Glib::Markup::escape_text(c.title) + "</b>");
-        auto dl = Gtk::make_managed<Gtk::Label>(c.detail);
-        dl->set_xalign(0.0f);
-        dl->set_wrap(true);
-        dl->set_hexpand(true);
-        text->append(*t);
-        text->append(*dl);
-        row->append(*icon);
-        row->append(*text);
-        m_pf_rows.append(*row);
+        auto words = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 2);
+        words->set_hexpand(true);
+        words->append(*text(c.title, "card-title"));
+        auto d = text(c.detail, "card-sub");
+        d->set_wrap(true);
+        words->append(*d);
+        auto ch = text(chip, "status-chip", 0.5f);
+        ch->add_css_class(c.status == pf::Status::Green ? "pf-green" : c.status == pf::Status::Amber ? "pf-amber" : "pf-red");
+        ch->set_valign(Gtk::Align::CENTER);
+        card->append(*icon);
+        card->append(*words);
+        card->append(*ch);
+        m_pf_rows.append(*card);
         if (auto lg = log::get(log::Area::Preflight))
             lg->info("{} {}: {}", pf::status_name(c.status), c.id, c.detail);
     }
-    m_pf_summary.set_text(std::to_string(green) + " of " + std::to_string(checks.size()) +
-                          " green" + (red ? ", " + std::to_string(red) + " red" : std::string{}) +
-                          ". Nothing is cleaned yet, so nothing is gated yet -- from the first clean on, "
-                          "a red row stops it.");
+    m_pf_summary.set_text(std::to_string(green) + " of " + std::to_string(checks.size()) + " checks green" +
+                          (red ? ", " + std::to_string(red) + " red" : std::string{}) +
+                          ". From the first clean on, a red check stops it.");
 }
 
 std::string Shell::recents_file() const {  // helper: XDG path (UI-side resolution)

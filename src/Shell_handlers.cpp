@@ -16,6 +16,15 @@
 
 namespace rouster {
 
+void Shell::on_nav(const std::string& page) {  // handler: a sidebar row was chosen
+    if (!m_page.empty()) remove_css_class("page-" + m_page);
+    m_page = page;
+    add_css_class("page-" + page);   // the window's gradient follows the module (rouster.css)
+    m_stack.set_visible_child(page);
+    if (page == "preflight") paint_preflight();
+    if (page == "activity") paint_activity();
+}
+
 void Shell::on_scan() {  // handler: Smart Scan the home folder
     start_scan(m_home);
 }

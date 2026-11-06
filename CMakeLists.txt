@@ -57,6 +57,7 @@ set(ROUSTER_GRESOURCE_XML "${CMAKE_CURRENT_SOURCE_DIR}/resources/rouster.gresour
 set(ROUSTER_RESOURCES_C   "${CMAKE_CURRENT_BINARY_DIR}/rouster-resources.c")
 file(GLOB ROUSTER_RESOURCE_FILES
      "${CMAKE_CURRENT_SOURCE_DIR}/resources/icons/scalable/apps/*.svg")
+list(APPEND ROUSTER_RESOURCE_FILES "${CMAKE_CURRENT_SOURCE_DIR}/resources/rouster.css")
 add_custom_command(
     OUTPUT  "${ROUSTER_RESOURCES_C}"
     COMMAND "${GLIB_COMPILE_RESOURCES}"

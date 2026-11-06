@@ -7,6 +7,9 @@
 #include "Log.hpp"
 
 #include <gtkmm/icontheme.h>
+#include <gtkmm/cssprovider.h>
+#include <gtkmm/settings.h>
+#include <gtkmm/stylecontext.h>
 #include <gdkmm/display.h>
 
 // The RESOURCE-PIPELINE paradigm's build-side seam. The app logo ships in a
@@ -53,16 +56,24 @@ void App::on_activate() {
     // inherits the answer to this question rather than carrying an opinion of
     // its own, and that is exactly why the bundle ships one symbolic SVG
     // instead of a light and a dark PNG.
-    appearance::follow_system();
+    // s005: Rouster wears its own dark skin (resources/rouster.css), always --
+    // the CleanMyMac look Scott asked for. GTK's dark variant is asked for so
+    // menus, popovers and the file chooser match it. Appearance.* (follow the
+    // desktop) stays compiled for a later "match the desktop" setting.
+    if (auto settings = Gtk::Settings::get_default())
+        settings->property_gtk_application_prefer_dark_theme() = true;
 
     // Register the compiled-in bundle and point the icon theme at its icon
     // prefix, so set_icon_name("rouster-logo-symbolic") resolves out of the binary
     // and GTK recolours it to the theme foreground -- no icon on the user's disk.
-    // NB: add_resource_path gets .../icons; GTK appends scalable/apps/ itself.
     g_resources_register(rouster_resources_get_resource());
     if (auto display = Gdk::Display::get_default()) {
         auto icons = Gtk::IconTheme::get_for_display(display);
+        // NB: add_resource_path gets .../icons; GTK appends scalable/apps/ itself.
         icons->add_resource_path("/io/github/scott8420/Rouster/icons");
+        auto css = Gtk::CssProvider::create();
+        css->load_from_resource("/io/github/scott8420/Rouster/rouster.css");
+        Gtk::StyleContext::add_provider_for_display(display, css, GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
     }
 
     m_shell = new Shell();       // lifetime owned by the application

@@ -2,7 +2,7 @@
 <!-- Rouster resource bundle. The resource-pipeline paradigm: an app asset carried
      the symbolic way (a currentColor SVG under the freedesktop icon-theme shape)
      so set_icon_name("rouster-logo-symbolic") resolves it out of the compiled-in
-     binary and GTK recolours it to the theme foreground -- no icon installed on
+     binary and GTK recolours it to the theme foreground - no icon installed on
      the user's disk.
 
      Gotcha the shape encodes: GTK's icon lookup is RIGID about the trailing
@@ -13,5 +13,15 @@
 <gresources>
   <gresource prefix="/io/github/scott8420/Rouster/icons/scalable/apps">
     <file preprocess="xml-stripblanks" alias="rouster-logo-symbolic.svg">icons/scalable/apps/rouster-logo-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="rouster-scan-symbolic.svg">icons/scalable/apps/rouster-scan-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="rouster-preflight-symbolic.svg">icons/scalable/apps/rouster-preflight-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="rouster-activity-symbolic.svg">icons/scalable/apps/rouster-activity-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="rouster-hero-scan.svg">icons/scalable/apps/rouster-hero-scan.svg</file>
+    <file preprocess="xml-stripblanks" alias="rouster-hero-preflight.svg">icons/scalable/apps/rouster-hero-preflight.svg</file>
+    <file preprocess="xml-stripblanks" alias="rouster-hero-activity.svg">icons/scalable/apps/rouster-hero-activity.svg</file>
+    <file preprocess="xml-stripblanks" alias="rouster-hero-done.svg">icons/scalable/apps/rouster-hero-done.svg</file>
+  </gresource>
+  <gresource prefix="/io/github/scott8420/Rouster">
+    <file>rouster.css</file>
   </gresource>
 </gresources>

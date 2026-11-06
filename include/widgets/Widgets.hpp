@@ -4,6 +4,7 @@
 #include <gtkmm/box.h>
 #include <gtkmm/button.h>
 #include <gtkmm/entry.h>
+#include <gtkmm/flowbox.h>
 #include <gtkmm/image.h>
 #include <gtkmm/label.h>
 #include <gtkmm/listbox.h>
@@ -21,6 +22,7 @@ namespace rouster::widgets {
 using Box            = Named<Gtk::Box>;
 using Button         = Named<Gtk::Button>;
 using Entry          = Named<Gtk::Entry>;
+using FlowBox        = Named<Gtk::FlowBox>;
 using Image          = Named<Gtk::Image>;
 using Label          = Named<Gtk::Label>;
 using ListBox        = Named<Gtk::ListBox>;

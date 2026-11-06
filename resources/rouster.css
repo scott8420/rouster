@@ -1,0 +1,120 @@
+/* Rouster's skin (s005). Its own dark look, always -- in the spirit of
+   CleanMyMac: a deep gradient per module, a frosted sidebar, one big round
+   action, results as cards. Plain GTK4 CSS: no libadwaita, no var() (GTK
+   4.14 in the build sandbox lacks it), no double hyphen inside a comment. */
+
+/* The window: no visible titlebar; the page gradient runs under it. */
+window.rouster { background-color: #1b1530; color: #f4f1fb; }
+window.rouster headerbar {
+  background: transparent; box-shadow: none; border: none;
+  min-height: 40px; color: #f4f1fb;
+}
+window.rouster headerbar button, window.rouster headerbar menubutton > button {
+  color: rgba(244,241,251,0.85); background: transparent; box-shadow: none; border: none;
+}
+window.rouster headerbar menubutton > button:checked { background-color: rgba(255,255,255,0.14); }
+window.rouster headerbar button:hover { background-color: rgba(255,255,255,0.10); }
+window.rouster .title { font-weight: 600; color: rgba(244,241,251,0.75); }
+
+/* Per module tint: the window carries .page-<name>. */
+window.rouster.page-scan {
+  background-image: radial-gradient(circle at 75% 15%, rgba(232,76,166,0.55), transparent 55%),
+                    linear-gradient(160deg, #3a1d6e 0%, #5b1f6b 55%, #2a1446 100%);
+}
+window.rouster.page-preflight {
+  background-image: radial-gradient(circle at 75% 15%, rgba(45,212,191,0.45), transparent 55%),
+                    linear-gradient(160deg, #10394a 0%, #134e5e 55%, #0c2734 100%);
+}
+window.rouster.page-activity {
+  background-image: radial-gradient(circle at 75% 15%, rgba(99,140,255,0.45), transparent 55%),
+                    linear-gradient(160deg, #1e2659 0%, #2b2f7a 55%, #151a40 100%);
+}
+
+/* Sidebar: frosted, icon + label rows, a soft pill for the selection. */
+.sidebar-pane { background-color: rgba(0,0,0,0.22); border-right: 1px solid rgba(255,255,255,0.06); }
+.sidebar-pane list { background: transparent; }
+.sidebar-pane row {
+  border-radius: 10px; margin: 2px 10px; padding: 8px 10px;
+  color: rgba(244,241,251,0.80); background: transparent;
+}
+.sidebar-pane row:hover { background-color: rgba(255,255,255,0.07); }
+.sidebar-pane row:selected { background-color: rgba(255,255,255,0.16); color: #ffffff; }
+.sidebar-pane row:focus-visible { outline: 2px solid rgba(255,255,255,0.4); outline-offset: -2px; }
+.sidebar-section {
+  font-size: 0.78em; font-weight: 700; letter-spacing: 1px;
+  color: rgba(244,241,251,0.45); margin: 14px 22px 4px 22px;
+}
+.sidebar-brand { font-size: 1.15em; font-weight: 800; margin: 6px 20px 8px 20px; }
+
+/* Hero: the centred landing of each module. */
+.hero-title { font-size: 2.1em; font-weight: 800; color: #ffffff; }
+.hero-sub { font-size: 1.05em; color: rgba(244,241,251,0.72); }
+.hero-big { font-size: 3.2em; font-weight: 800; color: #ffffff; }
+.hero-caption { font-size: 1.0em; color: rgba(244,241,251,0.70); }
+
+/* The one big round action. */
+button.orb {
+  min-width: 104px; min-height: 104px; border-radius: 9999px; padding: 0;
+  font-size: 1.25em; font-weight: 700; color: #ffffff; border: none;
+  background-image: linear-gradient(160deg, #ff6fb5 0%, #c43fd6 55%, #7a3cf0 100%);
+  box-shadow: 0 0 0 6px rgba(255,255,255,0.10), 0 10px 40px rgba(232,76,166,0.55);
+}
+button.orb:hover { box-shadow: 0 0 0 8px rgba(255,255,255,0.16), 0 12px 48px rgba(232,76,166,0.75); }
+button.orb:active { background-image: linear-gradient(160deg, #e85ea2 0%, #a933bb 55%, #6630d2 100%); }
+button.orb:disabled { opacity: 0.45; }
+window.page-preflight button.orb {
+  background-image: linear-gradient(160deg, #5eead4 0%, #14b8a6 55%, #0e7490 100%);
+  box-shadow: 0 0 0 6px rgba(255,255,255,0.10), 0 10px 40px rgba(45,212,191,0.45);
+}
+
+/* Quiet secondary buttons on the dark ground. */
+button.ghost {
+  border-radius: 9999px; padding: 6px 18px; border: 1px solid rgba(255,255,255,0.25);
+  background: rgba(255,255,255,0.06); color: #ffffff; box-shadow: none;
+}
+button.ghost:hover { background: rgba(255,255,255,0.14); }
+button.ghost:disabled { opacity: 0.4; }
+
+/* Cards. */
+.card {
+  background-color: rgba(255,255,255,0.08); border-radius: 16px; padding: 14px 16px;
+  border: 1px solid rgba(255,255,255,0.08);
+}
+.card:hover { background-color: rgba(255,255,255,0.12); }
+flowboxchild, flowboxchild:selected, flowboxchild:hover { padding: 0; border-radius: 16px; background: transparent; outline: none; }
+flowboxchild:focus-visible .card { border-color: rgba(255,255,255,0.45); }
+flowboxchild:selected .card, .card.selected { background-color: rgba(255,255,255,0.20); border-color: rgba(255,255,255,0.30); }
+.card-title { font-weight: 700; font-size: 1.0em; color: #ffffff; }
+.card-big { font-size: 1.6em; font-weight: 800; color: #ffffff; }
+.card-sub { font-size: 0.88em; color: rgba(244,241,251,0.65); }
+
+/* Kind dots: one colour per kind, the same everywhere. */
+.dot { min-width: 12px; min-height: 12px; border-radius: 9999px; }
+.kind-regenerable { background-color: #ff6fb5; }
+.kind-trash       { background-color: #fbbf24; }
+.kind-state       { background-color: #a78bfa; }
+.kind-settings    { background-color: #60a5fa; }
+.kind-appdata     { background-color: #34d399; }
+.kind-protected   { background-color: #f87171; }
+.kind-other       { background-color: #94a3b8; }
+
+/* Detail list under the cards. */
+.detail { background-color: rgba(0,0,0,0.18); border-radius: 14px; padding: 10px 14px; }
+.detail-size { font-feature-settings: "tnum"; color: rgba(244,241,251,0.85); }
+.detail-path { color: #ffffff; }
+.dim { color: rgba(244,241,251,0.60); }
+
+/* Preflight status colours (rows and the summary orb). */
+.pf-green { color: #4ade80; }
+.pf-amber { color: #fbbf24; }
+.pf-red   { color: #f87171; }
+.status-chip {
+  border-radius: 9999px; padding: 2px 10px; font-size: 0.8em; font-weight: 700;
+  background-color: rgba(255,255,255,0.10);
+}
+
+/* Big spinner while scanning. */
+spinner.big { min-width: 64px; min-height: 64px; color: #ffffff; }
+
+scrolledwindow, viewport { background: transparent; }
+expander title { color: #ffffff; }
