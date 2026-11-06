@@ -153,6 +153,48 @@ bool make_fixture(const fs::path& home) {
 // Files only (path, mode, size, mtime) -- what a user sees. Directory mtimes
 // move whenever something is renamed in or out, so "put back exactly" is
 // judged on the files and the shape of the tree.
+// An in-memory dconf for the door's Settings verb (s012d): dump / load / reset,
+// key paths -> values. `fail_load` makes the next load fail.
+struct FakeDconf {
+    std::map<std::string, std::string> keys;
+    bool fail_load = false;
+    std::vector<std::string> calls;
+    std::string dump() const {
+        std::map<std::string, std::vector<std::string>> dirs;
+        for (const auto& [k, v] : keys) {
+            const auto cut = k.rfind('/');
+            const std::string dir = k.substr(1, cut == 0 ? 0 : cut - 1);
+            dirs[dir.empty() ? "/" : dir].push_back(k.substr(cut + 1) + "=" + v);
+        }
+        std::string out;
+        for (const auto& [d, ls] : dirs) {
+            out += "[" + d + "]\n";
+            for (const auto& l : ls) out += l + "\n";
+            out += "\n";
+        }
+        return out;
+    }
+    core::vcs::Run operator()(const std::vector<std::string>& a, const std::string& in) {
+        core::vcs::Run r;
+        calls.push_back(a.size() > 1 ? a[1] : "");
+        if (a.size() >= 3 && a[1] == "dump") { r.code = 0; r.out = dump(); }
+        else if (a.size() >= 3 && a[1] == "load") {
+            if (fail_load) { r.code = 1; r.err = "error: fake failure\n"; return r; }
+            const auto ks = core::door::dconf_keys(in);
+            std::size_t i = 0;
+            std::istringstream s(in);
+            for (std::string l; std::getline(s, l);) {
+                if (l.empty() || l[0] == '#' || l[0] == '[') continue;
+                const auto eq = l.find('=');
+                if (eq != std::string::npos && i < ks.size()) keys[ks[i++]] = l.substr(eq + 1);
+            }
+            r.code = 0;
+        } else if (a.size() >= 3 && a[1] == "reset") { keys.erase(a[2]); r.code = 0; }
+        else r.code = 127;
+        return r;
+    }
+};
+
 std::string files_snapshot(const fs::path& root) {
     std::vector<std::string> rows;
     for (auto it = fs::recursive_directory_iterator(root); it != fs::recursive_directory_iterator(); ++it) {
@@ -392,6 +434,16 @@ int main(int argc, char** argv) {
                         make_archive_fixture(argv[2]) &&                                    // s009
                         make_organize_fixture(argv[2]) &&                                   // s010
                         make_profile_fixture(argv[2]);                                      // s012
+        // s012d: a few settings in the FIXTURE's own dconf (never the desktop's),
+        // when dconf + dbus-run-session are here; skipped quietly when not.
+        if (ok) {
+            const auto r = core::door::fixture_dconf(argv[2])(
+                {"dconf", "load", "/"},
+                "[org/gnome/desktop/interface]\ncolor-scheme='prefer-dark'\nclock-format='24h'\n\n"
+                "[org/gnome/desktop/wm/preferences]\nbutton-layout='appmenu:minimize,close'\n");
+            std::cout << (r.code == 0 ? "fixture dconf: 3 settings in " : "fixture dconf: not seeded (no dconf / dbus-run-session) -- ")
+                      << argv[2] << "/.config/dconf\n";
+        }
         std::cout << (ok ? "fixture: " : "fixture FAILED (exists and not empty?): ") << argv[2] << "\n";
         return ok ? 0 : 1;
     }
@@ -902,6 +954,9 @@ int main(int argc, char** argv) {
                 if (l.find("/.local/share/Trash/") == std::string::npos) out += l + "\n";
             return out;
         };
+        auto fake_dconf = std::make_shared<FakeDconf>();
+        fake_dconf->keys = {{"/org/x/a", "1"}, {"/org/y/c", "'z'"}};
+        door.set_dconf([fake_dconf](const std::vector<std::string>& a, const std::string& in) { return (*fake_dconf)(a, in); });
         for (Verb v : dr::verbs()) {
             const std::string name = dr::verb_name(v);
             const std::string before = files_snapshot(home);
@@ -916,6 +971,32 @@ int main(int argc, char** argv) {
                 case Verb::MakeDir: a.verb = v; a.to = H + "/Documents/made"; break;
                 case Verb::Copy: a.verb = v; a.from = H + "/Documents/report.pdf"; a.to = H + "/Documents/report v2.pdf"; break;
                 case Verb::Dedupe: a.verb = v; a.from = H + "/Documents/twin-a.bin"; a.to = H + "/Documents/twin-b.bin"; break;
+                case Verb::Settings: a.verb = v; a.content = "[org/x]\na=2\nb=3\n"; break;
+            }
+            if (v == Verb::Settings) {
+                // Changes settings, not files: the user's files stay; Rouster's records gain the two saved dumps.
+                const auto keys_before = fake_dconf->keys;
+                const auto outside_data = [&](const std::string& snap) {
+                    std::istringstream in(snap);
+                    std::string o;
+                    for (std::string l; std::getline(in, l);) if (l.find("/.local/share/rouster") == std::string::npos) o += l + "\n";
+                    return o;
+                };
+                const auto r = door.run(plan(name + " one", {a}));
+                check("gate/settings: done through the door", r.ok && r.done == 1, r.messages.empty() ? "" : r.messages.front());
+                check("gate/settings: one step", door.batches().size() == batches + 1 && door.undo_label() == name + " one");
+                const auto* rec = door.record(door.batches().back().records.front());
+                struct stat bs{};
+                check("gate/settings: loaded (a=2, b=3 new, c kept); what they were saved first, 0600, in Rouster's records",
+                      fake_dconf->keys.at("/org/x/a") == "2" && fake_dconf->keys.at("/org/x/b") == "3" &&
+                      fake_dconf->keys.at("/org/y/c") == "'z'" && rec && rec->from.rfind(data + "/settings-", 0) == 0 &&
+                      ::lstat(rec->from.c_str(), &bs) == 0 && (bs.st_mode & 0777) == 0600 &&
+                      fake_dconf->calls.size() == 2 && fake_dconf->calls[0] == "dump" && fake_dconf->calls[1] == "load");
+                check("gate/settings: no user file changed", outside_data(files_snapshot(home)) == outside_data(before));
+                const auto u = door.undo();
+                check("gate/settings: undo -> b reset, a back to 1 -- the settings exactly as before",
+                      u.ok && fake_dconf->keys == keys_before, u.messages.empty() ? "" : u.messages.front());
+                continue;
             }
             if (v == Verb::Dedupe) {
                 // Moves nothing: the tree is the same before and after; the blocks are what change.
@@ -956,6 +1037,46 @@ int main(int argc, char** argv) {
             for (const auto& e : fs::directory_iterator(home / "Documents"))
                 if (e.path().filename().string().rfind(".rouster-", 0) == 0) stray = true;
             check("gate: no .rouster- staging names left", !stray);
+        }
+        {   // s012d: the Settings verb's policy, a failed load, a crash
+            const auto set = [](std::string ini) { dr::Action a; a.verb = dr::Verb::Settings; a.content = std::move(ini); return a; };
+            dr::Action named = set("[a]\nk=1\n");
+            named.to = H + "/Documents/x";
+            check("door/settings: refused -- a file named, not a dump, a key before any section, empty",
+                  !door.refusal(named).empty() && !door.refusal(set("hello world\n")).empty() &&
+                  !door.refusal(set("k=1\n[a]\n")).empty() && !door.refusal(set("")).empty() &&
+                  !door.refusal(set("[a/../b]\nk=1\n")).empty() && door.refusal(set("# c\n[a]\nk=1\n\n")).empty());
+            check("door/settings: keys -- sections, the root, comments skipped",
+                  dr::dconf_keys("[/]\nr=1\n[org/a]\n# no\nk=2\nj='x=y'\n") ==
+                      std::vector<std::string>{"/r", "/org/a/k", "/org/a/j"});
+            const auto keys0 = fake_dconf->keys;
+            fake_dconf->fail_load = true;
+            const auto f = door.run(dr::Plan{"settings fail", {set("[org/x]\na=9\n")}, true});
+            fake_dconf->fail_load = false;
+            check("door/settings: a failed load -> failed, said, settings unchanged",
+                  !f.ok && f.failed == 1 && !f.messages.empty() && f.messages[0].find("GNOME settings") != std::string::npos &&
+                  fake_dconf->keys == keys0, f.messages.empty() ? "" : f.messages.front());
+            door.undo();
+            // A crash after the intent: the manifest has no outcome line.
+            const auto ok = door.run(dr::Plan{"settings crash", {set("[org/x]\na=7\nz=1\n")}, true});
+            {
+                std::ifstream in(data + "/manifest.jsonl");
+                std::string all, l, kept;
+                while (std::getline(in, l)) all += l + "\n";
+                const auto cut = all.rfind("{\"id\"");   // the last line: its "done"
+                kept = all.substr(0, cut);
+                std::ofstream o(data + "/manifest.jsonl", std::ios::trunc);
+                o << kept;
+            }
+            dr::Door again(H, data);
+            again.set_dconf([fake_dconf](const std::vector<std::string>& a, const std::string& in) { return (*fake_dconf)(a, in); });
+            again.load();
+            bool noted = false;
+            for (const auto& u : again.unfinished()) if (u.find("settings load") != std::string::npos) noted = true;
+            const auto u = again.undo();
+            check("door/settings: a crash mid-load -> counted done, noted; Undo puts the saved settings back",
+                  ok.ok && noted && u.ok && fake_dconf->keys == keys0, u.messages.empty() ? "" : u.messages.front());
+            door.load();
         }
         {   // create-verb policy
             dr::Action w; w.verb = Verb::Write; w.to = H + "/Documents/report.pdf"; w.content = "x";
@@ -2458,6 +2579,15 @@ int main(int argc, char** argv) {
             check("restore: a protected file that is the same is just Same -- no line to run", ok && c2.find(".ssh") == std::string::npos);
             put_bytes(home, ".ssh/config", ssh_now);
         }
+        {
+            const fs::path link = home / ".config/systemd/user/default.target.wants/sync.service";
+            fs::remove(link, ec);
+            std::string c3;
+            for (const auto& c : pr::look_back(H, B5, fake2).commands) c3 += c.line + "\n";
+            check("restore: the service's link gone from home -> 'systemctl --user enable sync.service'",
+                  c3.find("systemctl --user enable sync.service") != std::string::npos, c3);
+            fs::create_symlink("../sync.service", link, ec);
+        }
         const std::string pre = files_snapshot(home);
         pr::Restore rb = pr::look_back(H, B5, fake2);
         check("restore: look changes nothing", files_snapshot(home) == pre && rb.refused.empty() && rb.host == f5.host);
@@ -2476,10 +2606,11 @@ int main(int argc, char** argv) {
               row(".bashrc")->diff.find("+# changed after Look") != std::string::npos, row(".bashrc") ? row(".bashrc")->diff : "");
         std::string cmds;
         for (const auto& c : rb.commands) cmds += c.line + "\n";
-        check("restore: commands -- ssh config by hand, the missing flatpak, enable the service; dconf the same -> no line",
+        check("restore: commands -- ssh config by hand, the missing flatpak; dconf the same -> no line; "
+              "the service enabled now -> no systemctl line (s012c)",
               cmds.find("cp -i ") != std::string::npos && cmds.find(".ssh/config") != std::string::npos &&
               cmds.find("flatpak install -y --user 'flathub' 'org.gnome.Fixture'") != std::string::npos &&
-              cmds.find("systemctl --user enable sync.service") != std::string::npos &&
+              cmds.find("systemctl") == std::string::npos &&
               cmds.find("dconf load") == std::string::npos, cmds);
         check("restore: refused -- not a bundle", !pr::look_back(H, H + "/Documents", fake2).refused.empty() &&
               !pr::look_back(H, B5 + "/../" + pr::bundle_name(f5.host, now + 600), fake2).refused.empty());
@@ -2517,6 +2648,259 @@ int main(int argc, char** argv) {
         dup.to = H + "/.bashrc";
         check("door: a create onto an existing file is still refused without the Trash before it",
               !door.refusal(dup, {}).empty() && door.refusal(dup, {}, {H + "/.bashrc"}).empty());
+
+        // -- A fixture's dconf is the fixture's own (s012d, RULES: fixtures, never the real home).
+        {
+            const auto av = dr::fixture_dconf_argv(H, {"dconf", "load", "/"});
+            check("settings: a fixture's dconf runs with XDG_CONFIG_HOME=<fixture>/.config on a private bus",
+                  av.size() == 7 && av[0] == "env" && av[1] == "XDG_CONFIG_HOME=" + H + "/.config" && av[2] == "dbus-run-session" &&
+                  av[4] == "dconf");
+            const bool tools = core::vcs::child({"dconf", "help"}, 10).code != 127 &&
+                               core::vcs::child({"dbus-run-session", "--version"}, 10).code != 127;
+            if (tools) {
+                const auto real_before = core::vcs::child({"dconf", "dump", "/"}, 20);
+                const auto fx = dr::fixture_dconf(H);
+                const auto l = fx({"dconf", "load", "/"}, "[org/rouster/selftest]\nfixture=true\n");
+                const auto d = fx({"dconf", "dump", "/"}, "");
+                const auto via_runner = pr::fixture_runner(H)({"dconf", "dump", "/"});
+                const auto real_after = core::vcs::child({"dconf", "dump", "/"}, 20);
+                check("settings: (real dconf) a load into the fixture lands in the fixture's database, not yours",
+                      l.code == 0 && d.out.find("fixture=true") != std::string::npos &&
+                      via_runner.out.find("fixture=true") != std::string::npos && fs::exists(home / ".config/dconf/user") &&
+                      real_after.out == real_before.out && real_after.out.find("org/rouster/selftest") == std::string::npos,
+                      l.err + d.err);
+                fx({"dconf", "reset", "-f", "/org/rouster/selftest/"}, "");
+            }
+        }
+
+        // -- GNOME settings (s012d): key by key, unchecked, one Settings step, exact undo.
+        {
+            dconf_out = "[org/gnome/desktop/interface]\ncolor-scheme='default'\nclock-format='24h'\n";
+            pr::Restore rs = pr::look_back(H, B5, fake2);
+            std::string lines;
+            for (const auto& c : rs.commands) lines += c.line;
+            check("settings: look -- 1 key would change (shown now / backup), 1 set since is kept, unchecked, no line to run",
+                  rs.settings.there && rs.settings.differs && !rs.settings.checked && rs.settings.changes == 1 &&
+                  rs.settings.kept == 1 && rs.settings.what.find("color-scheme\n    now:    'default'\n    backup: 'prefer-dark'") !=
+                                               std::string::npos &&
+                  lines.find("dconf") == std::string::npos, rs.settings.what);
+            for (auto& b : rs.files) b.checked = false;
+            std::vector<std::string> ds;
+            check("settings: unchecked -> not in the plan", pr::restore_plan(H, rs, ds).actions.empty());
+            rs.settings.checked = true;
+            dr::Plan ps = pr::restore_plan(H, rs, ds);
+            check("settings: checked -> ONE Settings action, the bundle's dump",
+                  ps.actions.size() == 1 && ps.actions[0].verb == dr::Verb::Settings &&
+                  ps.actions[0].content.find("prefer-dark") != std::string::npos && door.refusal(ps.actions[0]).empty());
+            auto fd = std::make_shared<FakeDconf>();
+            fd->keys = {{"/org/gnome/desktop/interface/color-scheme", "'default'"},
+                        {"/org/gnome/desktop/interface/clock-format", "'24h'"}};
+            const auto k0 = fd->keys;
+            door.set_dconf([fd](const std::vector<std::string>& a, const std::string& in) { return (*fd)(a, in); });
+            const std::string files0 = outside(files_snapshot(home), "/.local/share/rouster");
+            ps.previewed = true;
+            const auto r = door.run(ps);
+            check("settings: run -> dark again, the clock you set since kept, no file of yours touched",
+                  r.ok && fd->keys.at("/org/gnome/desktop/interface/color-scheme") == "'prefer-dark'" &&
+                  fd->keys.at("/org/gnome/desktop/interface/clock-format") == "'24h'" &&
+                  outside(files_snapshot(home), "/.local/share/rouster") == files0, r.messages.empty() ? "" : r.messages.front());
+            const auto u = door.undo();
+            check("settings: undo -> exactly as before", u.ok && fd->keys == k0, u.messages.empty() ? "" : u.messages.front());
+            dconf_out = read_all(B5 + "/gnome/dconf.ini");
+            pr::Restore same = pr::look_back(H, B5, fake2);
+            bool noted = false;
+            for (const auto& n : same.notes) if (n.find("GNOME settings") != std::string::npos) noted = true;
+            check("settings: the same as now -> not offered, a note", same.settings.there && !same.settings.differs && noted);
+        }
+        fs::remove_all(home, ec);
+    }
+
+
+    // -- Secrets (s012c): tar in memory, gpg --symmetric, open, compare ------
+    {
+        std::cout << "\n-- secrets --\n";
+        namespace sc = core::secrets;
+        namespace pr = core::profile;
+        namespace dr = core::door;
+        std::error_code ec;
+        const fs::path home = fs::temp_directory_path() / "rouster_selftest_secrets";
+        fs::remove_all(home, ec);
+        const std::string H = home.string();
+        check("secrets: fixture", make_profile_fixture(home));
+        put_bytes(home, ".ssh/known_hosts", "github.com ssh-ed25519 AAAAfixture\n");
+        put_bytes(home, ".ssh/id_ed25519.pub", "ssh-ed25519 AAAAfixture me@box\n");
+        put_bytes(home, ".gnupg/private-keys-v1.d/ABCD.key", std::string("\x00\x01binary\xff key", 15));
+        put_bytes(home, ".gnupg/pubring.kbx", "kbx");
+        put_bytes(home, ".gnupg/.#lk0x1234.box.99", "lock");
+        put_bytes(home, ".gnupg/pubring.kbx.lock", "lock");
+        put_bytes(home, ".local/share/keyrings/login.keyring", "GnomeKeyring\n");
+        fs::create_symlink("/etc/hostname", home / ".ssh/linked", ec);
+        fs::permissions(home / ".ssh/id_ed25519", fs::perms::owner_read | fs::perms::owner_write, ec);
+        fs::permissions(home / ".gnupg", fs::perms::owner_all, ec);
+        fs::create_directories(home / ".local/share/rouster", ec);   // Rouster's own (the door's manifest lives here)
+
+        // tar
+        {
+            std::vector<sc::Entry> in = {{".ssh", true, 0700, 1700000000, ""},
+                                         {".ssh/id", false, 0600, 1700000001, std::string("a\0b\xff", 4)},
+                                         {".ssh/" + std::string(80, 'd'), true, 0700, 0, ""},
+                                         {".ssh/" + std::string(80, 'd') + "/" + std::string(60, 'f'), false, 0644, 5, "x"},
+                                         {".ssh/empty", false, 0600, 5, ""}};
+            const std::string t = sc::tar(in);
+            std::vector<sc::Entry> out;
+            std::string why;
+            bool same = sc::untar(t, out, why) && out.size() == in.size();
+            for (std::size_t i = 0; same && i < in.size(); ++i)
+                same = out[i].path == in[i].path && out[i].dir == in[i].dir && out[i].mode == in[i].mode &&
+                       out[i].mtime == in[i].mtime && out[i].bytes == in[i].bytes;
+            check("secrets: tar round trip -- folders, modes, times, binary bytes, a long path (ustar prefix)", same, why);
+            std::string bad = t;
+            bad[600] ^= 0x10;   // inside the second header
+            check("secrets: a damaged header is refused", !sc::untar(bad, out, why) && why.find("damaged") != std::string::npos);
+            std::string dots = sc::tar({{"../escape", false, 0600, 0, "x"}});
+            check("secrets: a path that leaves home is refused", !sc::untar(dots, out, why) && why.find("leaves") != std::string::npos);
+            check("secrets: an archive cut short is refused", !sc::untar(t.substr(0, 700), out, why));
+            const fs::path tf = fs::temp_directory_path() / "rouster_selftest_secrets.tar";
+            put_bytes(tf.parent_path(), tf.filename().string(), t);
+            const auto lst = core::vcs::child({"tar", "-tvf", tf.string()}, 10);
+            fs::remove(tf, ec);
+            check("secrets: GNU tar reads our archive (the by-hand line works)",
+                  lst.code == 127 || (lst.code == 0 && lst.out.find(".ssh/id") != std::string::npos &&
+                                      lst.out.find(std::string(60, 'f')) != std::string::npos &&
+                                      lst.out.find("-rw-------") != std::string::npos), lst.err + lst.out);
+        }
+
+        // feed: stdin and fd 3, and a child that stops reading early
+        {
+            const auto a = core::vcs::feed({"cat"}, "hello stdin", "", 10);
+            const auto b = core::vcs::feed({"sh", "-c", "cat <&3"}, "", "on fd three", 10);
+            const auto c = core::vcs::feed({"sh", "-c", "head -c 3; cat <&3 >/dev/null"}, std::string(4 << 20, 'z'), "pw", 10);
+            const auto d = core::vcs::feed({"sh", "-c", "read x; echo \"[$x]\"; cat <&3"}, "line\n", "", 10);
+            check("feed: stdin reaches the child; fd 3 reaches it; a child that stops reading doesn't take Rouster down",
+                  a.code == 0 && a.out == "hello stdin" && b.code == 0 && b.out == "on fd three" && c.code == 0 &&
+                  c.out == "zzz" && d.out == "[line]\n", c.err);
+        }
+
+        check("secrets: passphrase rules -- empty, short, once, mismatched, fine",
+              !sc::passphrase_problem("", "").empty() && !sc::passphrase_problem("short", "short").empty() &&
+              !sc::passphrase_problem("long enough", "").empty() &&
+              !sc::passphrase_problem("long enough", "long enougH").empty() &&
+              sc::passphrase_problem("long enough", "long enough").empty());
+
+        const std::string before = files_snapshot(home);
+        const sc::Found sf = sc::find(H);
+        std::string got;
+        for (const auto& x : sf.files) got += x + " ";
+        check("secrets: find lists ~/.ssh, ~/.gnupg, keyrings -- no lock files, the link noted not followed",
+              std::find(sf.files.begin(), sf.files.end(), ".ssh/id_ed25519") != sf.files.end() &&
+              std::find(sf.files.begin(), sf.files.end(), ".gnupg/private-keys-v1.d/ABCD.key") != sf.files.end() &&
+              std::find(sf.files.begin(), sf.files.end(), ".local/share/keyrings/login.keyring") != sf.files.end() &&
+              got.find("lock") == std::string::npos && got.find(".#lk") == std::string::npos &&
+              got.find("linked") == std::string::npos && !sf.notes.empty() && sf.notes[0].find("linked") != std::string::npos &&
+              sf.per_root[0] == 4 && sf.per_root[1] == 2 && sf.per_root[2] == 1, got);
+        check("secrets: find changes nothing", files_snapshot(home) == before);
+        pr::Found pf = pr::find(H, [](const std::vector<std::string>&) { core::vcs::Run r; r.code = 127; return r; });
+        check("secrets: the profile Look carries the list", pf.secrets.files == sf.files);
+
+        const bool have_gpg = core::vcs::child({"gpg", "--version"}, 10).code == 0;
+        if (!have_gpg) {
+            check("secrets: gpg not installed -- pack says so", sc::pack(H, sf, "a passphrase", sc::real_gpg()).error.find("gpg") != std::string::npos);
+        } else {
+            std::vector<std::vector<std::string>> argvs;
+            const sc::Gpg rec = [&](const std::vector<std::string>& a, const std::string& in, const std::string& pass) {
+                argvs.push_back(a);
+                return core::vcs::feed(a, in, pass, 120);
+            };
+            const std::string pass = "correct horse battery";
+            const std::string gnupg_before = files_snapshot(home / ".gnupg");
+            const auto pk = sc::pack(H, sf, pass, rec);
+            bool leak = false;
+            for (const auto& a : argvs) for (const auto& s : a) if (s.find(pass) != std::string::npos) leak = true;
+            check("secrets: pack -> encrypted bytes, checked to open again", pk.error.empty() && !pk.data.empty() && pk.files == 7 &&
+                  argvs.size() == 2, pk.error);
+            check("secrets: the passphrase is never on gpg's argv; gpg runs in Rouster's own homedir",
+                  !leak && !argvs.empty() &&
+                  std::find(argvs[0].begin(), argvs[0].end(), sc::gpg_home(H)) != argvs[0].end() &&
+                  std::find(argvs[0].begin(), argvs[0].end(), "--passphrase-fd") != argvs[0].end());
+            check("secrets: no plaintext in the bytes (the key, the keyring)",
+                  pk.data.find("NOT A REAL KEY") == std::string::npos && pk.data.find("GnomeKeyring") == std::string::npos);
+            check("secrets: your ~/.gnupg is only read", files_snapshot(home / ".gnupg") == gnupg_before);
+            check("secrets: pack refuses a short passphrase", !sc::pack(H, sf, "short", rec).error.empty());
+
+            // Into a bundle, through the door.
+            const auto fake = [](const std::vector<std::string>& a) {
+                core::vcs::Run r;
+                r.code = a[0] == "dconf" ? 0 : 127;
+                r.out = a[0] == "dconf" ? "[x]\ny=1\n" : "";
+                return r;
+            };
+            pr::Found f = pr::find(H, fake);
+            std::string B;
+            std::vector<std::string> dropped;
+            dr::Plan p = pr::plan(H, f, "", 1762400000, B, dropped, pk.data, pk.files);
+            const auto w = std::find_if(p.actions.begin(), p.actions.end(),
+                                        [](auto& a) { return a.to.ends_with(std::string("/") + sc::kFile); });
+            check("secrets: the plan writes secrets.tar.gpg, 0600", w != p.actions.end() && w->verb == dr::Verb::Write &&
+                  w->mode == 0600 && w->content == pk.data);
+            dr::Door door(H, H + "/.local/share/rouster");
+            p.previewed = true;
+            const auto r = door.run(p);
+            struct stat st{};
+            const bool there = ::lstat((B + "/" + sc::kFile).c_str(), &st) == 0 && (st.st_mode & 0777) == 0600;
+            std::ifstream ptxt(B + "/PROFILE.txt");
+            std::ostringstream ps;
+            ps << ptxt.rdbuf();
+            check("secrets: run -> the file in the bundle (0600); PROFILE.txt says how to open it",
+                  r.ok && there && ps.str().find("7 files in secrets.tar.gpg") != std::string::npos &&
+                  ps.str().find("--skip-old-files") != std::string::npos, r.messages.empty() ? "" : r.messages.front());
+            const pr::Restore lb = pr::look_back(H, B, fake);
+            check("secrets: look back sees the encrypted file", lb.secrets == pk.data.size());
+            check("secrets: no plaintext secret lands in the bundle",
+                  !fs::exists(B + "/home/.ssh/id_ed25519") && !fs::exists(B + "/home/.gnupg"));
+
+            const std::string snap = files_snapshot(home);
+            const auto wrong = sc::open(H, B, "not the passphrase", sc::real_gpg());
+            check("secrets: the wrong passphrase -> 'doesn't open it', nothing listed",
+                  wrong.error.find("doesn't open") != std::string::npos && wrong.rows.empty(), wrong.error);
+            const auto same = sc::open(H, B, pass, sc::real_gpg());
+            bool all_same = same.error.empty() && same.rows.size() == 7 && same.commands.empty();
+            for (const auto& row : same.rows) all_same = all_same && row.state == sc::State::Same;
+            check("secrets: open -> all 7 the same, no lines to run", all_same, same.error);
+            fs::rename(home / ".ssh/id_ed25519", home / "moved_key", ec);
+            put_bytes(home, ".ssh/known_hosts", "changed\n");
+            const std::string snap2 = files_snapshot(home);
+            const auto o = sc::open(H, B, pass, sc::real_gpg());
+            const auto st_of = [&](const std::string& rel) {
+                for (const auto& row : o.rows) if (row.rel == rel) return std::string(sc::state_name(row.state));
+                return std::string("?");
+            };
+            std::string lines;
+            for (const auto& c : o.commands) lines += c.line + "\n";
+            check("secrets: key gone -> missing, known_hosts changed -> differs, the rest same",
+                  st_of(".ssh/id_ed25519") == "missing" && st_of(".ssh/known_hosts") == "differs" &&
+                  st_of(".ssh/config") == "same", lines);
+            check("secrets: lines -- unpack with --skip-old-files; unpack beside into a 700 folder",
+                  o.commands.size() == 2 && lines.find("tar -xvf - --skip-old-files -C ~") != std::string::npos &&
+                  lines.find("mkdir -m 700 ~/'secrets-from-") != std::string::npos, lines);
+            check("secrets: open changes nothing", files_snapshot(home) == snap2 && snap != snap2);
+            // The line works: run it, passphrase on stdin via loopback, in the fixture as ~.
+            const std::string line = "gpg --batch --pinentry-mode loopback --passphrase-fd 3 --homedir " + sc::gpg_home(H) +
+                                     " -d '" + B + "/" + sc::kFile + "' | tar -xf - --skip-old-files -C '" + H + "'";
+            const auto ran = core::vcs::feed({"sh", "-c", line}, "", pass, 60);
+            core::vcs::child({"gpgconf", "--homedir", sc::gpg_home(H), "--kill", "gpg-agent"}, 10);
+            std::ifstream kin(home / ".ssh/id_ed25519");
+            std::ostringstream ks;
+            ks << kin.rdbuf();
+            std::ifstream hin(home / ".ssh/known_hosts");
+            std::ostringstream hs;
+            hs << hin.rdbuf();
+            check("secrets: gpg -d | tar --skip-old-files puts the key back (mode 600) and leaves the changed one",
+                  ran.code == 0 && ks.str() == "NOT A REAL KEY" && hs.str() == "changed\n" &&
+                  (fs::status(home / ".ssh/id_ed25519").permissions() & fs::perms::all) ==
+                      (fs::perms::owner_read | fs::perms::owner_write), ran.err);
+            auto u = door.undo();
+            check("secrets: undo -> the bundle goes to the Trash", u.ok && !fs::exists(B));
+        }
         fs::remove_all(home, ec);
     }
 
@@ -2528,6 +2912,7 @@ int main(int argc, char** argv) {
     //   selftest.cpp  -- it builds and tears down fixtures;
     //   Known.cpp     -- Rouster's own setting (promoted names), in its own data dir;
     //   Settings.cpp  -- Rouster's own files (rules.json), in its own data dir;
+    //   Pipe.cpp      -- s012c: write() only into the pipes of the child it made (gpg's stdin, fd 3);
 //   Stones.*      -- the in-memory undo demo: its verbs are NAMED remove /
     //                    rename and touch no disk (goes when a real model
     //                    adopts Undo.hpp);
@@ -2536,7 +2921,7 @@ int main(int argc, char** argv) {
         std::cout << "\n-- source gate --\n";
         const fs::path root = ROUSTER_SOURCE_DIR;
         const std::set<std::string> allowed = {"src/core/Door.cpp", "src/core/Recents.cpp", "src/selftest.cpp",
-            "src/core/Stones.cpp", "include/core/Stones.hpp", "src/core/Known.cpp", "src/core/Settings.cpp", "src/Registry.cpp", "include/Registry.hpp"};
+            "src/core/Stones.cpp", "include/core/Stones.hpp", "src/core/Known.cpp", "src/core/Settings.cpp", "src/core/Pipe.cpp", "src/Registry.cpp", "include/Registry.hpp"};
         const std::vector<std::string> calls = {"rename", "renameat", "renameat2", "unlink", "unlinkat", "rmdir",
             "remove", "remove_all", "copy_file", "copy", "create_directory", "create_directories", "create_symlink",
             "create_hard_link", "resize_file", "truncate", "write", "fopen", "mkdir", "symlink", "link", "chmod",

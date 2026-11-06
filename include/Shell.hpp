@@ -17,6 +17,8 @@
 
 #include <gtkmm/dropdown.h>
 #include <gtkmm/textview.h>
+#include <gtkmm/passwordentry.h>
+#include <gtkmm/checkbutton.h>
 #include <atomic>
 
 #include <memory>
@@ -136,6 +138,9 @@ private:
     void on_profile_open();                      // category: handler: open the bundle in Files
     void on_profile_look_back(const std::string& name);   // category: handler: a backup's Restore... -> worker: diff against home
     void on_profile_looked();                    // category: handler: the restore look finished (Dispatcher, UI thread)
+    void on_profile_packed();                    // category: handler: s012c -- the secrets are encrypted (Dispatcher, UI thread)
+    void on_profile_open_secrets();              // category: handler: s012c -- restore's Open -> worker: decrypt in memory + compare
+    void on_profile_secrets_opened();            // category: handler: s012c -- the secrets were opened (Dispatcher, UI thread)
     void on_profile_restore();                   // category: handler: checked rows -> Trash + Copy plan -> the door                       // category: handler: checked rows -> a plan (archive or put back) -> the door
     void on_pj_home();                           // category: handler: back to templates + projects (re-read)
     void on_pj_new(std::size_t tmpl);            // category: handler: a template's New project... -> the form
@@ -202,6 +207,7 @@ private:
     void archive_gate();
     void stop_profile();                         // category: helper: cancel + join (close, dtor)
     void paint_profile();                        // category: helper: cards per group, rows with checks, what wasn't gathered
+    void profile_backup(std::string secrets, std::size_t secret_files);   // category: helper: plan + the door (after any encrypting)
     void profile_gate();                         // category: helper: the act button's label + whether it may act
     void paint_profile_start();                  // category: helper: the earlier backups, each with Restore...
     void paint_profile_restore();                // category: helper: the restore preview -- files by state, diffs, commands
@@ -424,6 +430,18 @@ private:
     core::profile::Restore m_pr_rs;               // checks live here (UI thread only)
     core::profile::Restore m_pr_rs_found;         // written by the worker
     Glib::Dispatcher m_profile_looked;
+    // Secrets (s012c): opt-in on the backup, opened on the restore.
+    Gtk::CheckButton*    m_pr_sec_on = nullptr;     // painted with the results; off by default
+    Gtk::PasswordEntry*  m_pr_pass1 = nullptr;
+    Gtk::PasswordEntry*  m_pr_pass2 = nullptr;
+    Gtk::Label*          m_pr_sec_state = nullptr;  // the passphrase line under the boxes
+    Gtk::PasswordEntry*  m_pr_rs_pass = nullptr;    // restore: the passphrase to open with
+    bool                 m_pr_packing = false;      // the worker is encrypting (the act button waits)
+    core::secrets::Packed m_pr_packed;              // worker -> UI (m_pr_mx)
+    core::secrets::Opened m_pr_sec;                 // restore: what the secrets hold vs home (UI thread)
+    core::secrets::Opened m_pr_sec_found;           // worker -> UI (m_pr_mx)
+    Glib::Dispatcher     m_profile_packed;
+    Glib::Dispatcher     m_profile_sec_opened;
 
     // Projects (s010): home | new | preview | project | done.
     widgets::Box     m_pj_page;

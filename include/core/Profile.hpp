@@ -1,6 +1,7 @@
 #pragma once
 #include "core/Door.hpp"
 #include "core/Git.hpp"
+#include "core/Secrets.hpp"
 
 #include <cstdint>
 #include <functional>
@@ -70,11 +71,15 @@ struct Found {
     std::uint64_t            errors = 0;
     std::vector<std::string> bundles;   // earlier bundles, newest first (names under ~/Archive/Profile)
     std::string              refused;
+    secrets::Found           secrets;   // s012c: listed only; read and encrypted at the click, if opted in
 };
 
 // How find() runs a program (the selftest passes a fake). Default: vcs::child.
 using Runner = std::function<vcs::Run(const std::vector<std::string>& argv)>;
 Runner real_runner(const std::atomic<bool>* cancel = nullptr);
+// s012d: with a fixture home (ROUSTER_HOME), dconf reads the fixture's own
+// database (door::fixture_dconf_argv); everything else runs as real_runner.
+Runner fixture_runner(const std::string& home, const std::atomic<bool>* cancel = nullptr);
 
 // The fixed dotfile list, relative to home.
 const std::vector<std::string>& dotfiles();
@@ -90,8 +95,11 @@ Found find(const std::string& home, const Runner& run);
 // Each file is looked at again first; anything changed or gone is left out
 // and named in `dropped`. A bundle name already taken gets -2, -3.
 // `bundle` is set to the bundle's absolute path. previewed stays false.
+// s012c: `secrets` -- the encrypted bytes from secrets::pack() ("" = not
+// opted in) -- becomes one more Write, secrets.tar.gpg, mode 0600.
 door::Plan plan(const std::string& home, const Found& found, const std::string& notes,
-                std::int64_t now, std::string& bundle, std::vector<std::string>& dropped);
+                std::int64_t now, std::string& bundle, std::vector<std::string>& dropped,
+                const std::string& secrets = {}, std::size_t secret_files = 0);
 
 // ── Restore (s012b) ─────────────────────────────────────────────────────────
 // READ-ONLY look at a bundle against what is in home now. Every file under the
@@ -106,7 +114,7 @@ door::Plan plan(const std::string& home, const Found& found, const std::string& 
 //   Blocked   -- a folder or a link where the file would go: not offered.
 // What Rouster doesn't do itself comes back as commands for you to run:
 // missing dnf / flatpak packages, enabling user services, fc-cache, the
-// extensions to fetch, and (until s012d) `dconf load`.
+// extensions to fetch. GNOME settings are a door step since s012d.
 enum class State { Same, Missing, Differs, Protected, Blocked };
 const char* state_name(State s);
 
@@ -127,6 +135,22 @@ struct Command {
     std::string line;                // the shell line, ready to paste
 };
 
+// GNOME settings (s012d): the bundle's dconf dump against `dconf dump /` now,
+// key by key. Offered UNCHECKED (it changes your live set-up); restoring is one
+// door Settings step -- the current settings are saved first, Undo puts them
+// back exactly. Keys you set since that the backup doesn't name stay.
+struct SettingsBack {
+    bool          there = false;     // the bundle has gnome/dconf.ini
+    bool          differs = false;   // loading it would change something
+    bool          checked = false;
+    std::size_t   changes = 0;       // keys the load would set to another value (or set at all)
+    std::size_t   kept = 0;          // keys set now that the backup doesn't name (left as they are)
+    std::string   what;              // the changes, one key per block: path / now / backup
+    std::string   from;              // the bundle's dconf.ini
+    std::int64_t  from_mtime_ns = 0;
+    std::string   error;             // dconf couldn't be read now
+};
+
 struct Restore {
     std::string              bundle; // absolute
     std::string              name;   // its folder name
@@ -135,6 +159,8 @@ struct Restore {
     std::vector<Command>     commands;
     std::vector<std::string> notes;
     std::string              refused;
+    std::uint64_t            secrets = 0;   // s012c: size of secrets.tar.gpg in the bundle (0 = none)
+    SettingsBack             settings;      // s012d
 };
 
 // Earlier bundles under ~/Archive/Profile (those holding PROFILE.txt), newest first.
@@ -143,13 +169,14 @@ std::vector<std::string> bundles(const std::string& home);
 Restore look_back(const std::string& home, const std::string& bundle, const Runner& run);
 
 // The checked Missing / Differs rows: MakeDir for missing folders (parents
-// first), then per file [Trash what is there] + Copy from the bundle. Each row
+// first), then per file [Trash what is there] + Copy from the bundle; then,
+// if checked, ONE Settings action loading the bundle's dconf.ini (s012d). Each row
 // is looked at again first; anything changed since the look is left out and
 // named. previewed stays false.
 door::Plan restore_plan(const std::string& home, const Restore& r, std::vector<std::string>& dropped);
 
 // The PROFILE.txt text for these items (public so the selftest can read it).
 std::string profile_txt(const Found& found, const std::vector<const Item*>& items, std::int64_t now,
-                        const std::string& notes);
+                        const std::string& notes, std::size_t secret_files = 0);
 
 }  // namespace rouster::core::profile

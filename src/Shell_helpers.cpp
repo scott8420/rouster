@@ -278,11 +278,14 @@ void Shell::paint_activity() {  // helper: the manifest's batches, newest first
                 default:                ++failed; mark = "✗"; break;
             }
             // A created thing's `from` is the door's staging name: show what was made (and, for a copy, from what).
-            const std::string what = r->verb == dr::Verb::Copy ? r->src + " → " + r->to : dr::creates(r->verb) ? r->to : r->from;
+            const std::string what = r->verb == dr::Verb::Settings ? std::string("GNOME settings (dconf load /)")
+                                   : r->verb == dr::Verb::Copy ? r->src + " → " + r->to : dr::creates(r->verb) ? r->to : r->from;
             auto l = text(std::string(mark) + "  " + dr::verb_name(r->verb) + "  " + what +
                           (r->error.empty() ? "" : "  -- " + r->error), "detail-path");
             l->set_ellipsize(Pango::EllipsizeMode::MIDDLE);
-            l->set_tooltip_text((dr::creates(r->verb) ? (r->src.empty() ? std::string("made") : r->src) : r->from) + "\n→ " + r->to);
+            l->set_tooltip_text(r->verb == dr::Verb::Settings
+                                    ? "what they were, saved first: " + r->from + "\nwhat was loaded: " + r->src
+                                    : (dr::creates(r->verb) ? (r->src.empty() ? std::string("made") : r->src) : r->from) + "\n→ " + r->to);
             body->append(*l);
         }
         const std::string age = core::preflight::human_age(now - it->when);
@@ -1430,28 +1433,119 @@ void Shell::paint_profile() {  // helper: cards per group, rows with checks, wha
             auto path = text(it.label, "detail-path");
             path->set_hexpand(true);
             path->set_ellipsize(Pango::EllipsizeMode::MIDDLE);
-            std::string tip = "-> " + it.dest + (it.read ? "\nread and written (it sits in a protected folder)" : "");
-            if (it.made) tip += "\n\n" + it.content.substr(0, 1500) + (it.content.size() > 1500 ? "\n..." : "");
-            path->set_tooltip_text(tip);
+            path->set_tooltip_text("-> " + it.dest + (it.read ? "\nread and written (it sits in a protected folder)" : ""));
             row->append(*cb);
             row->append(*sz);
             row->append(*path);
             if (!it.note.empty()) row->append(*text(it.note, "dim", 1.0f));
             card->append(*row);
+            if (it.made) {
+                // s012c: a made row (dconf dump, a list) opens in place, whole -- a
+                // tooltip vanished when the mouse moved and was cut at 1500 chars.
+                // The label is built on first open (a dconf dump can be 100 KB).
+                auto ex = Gtk::make_managed<Gtk::Expander>("What it holds");
+                ex->set_margin_start(40);
+                ex->property_expanded().signal_changed().connect([this, ex, i] {
+                    if (!ex->get_expanded() || ex->get_child() || i >= m_pr_shown.items.size()) return;
+                    auto sc = Gtk::make_managed<Gtk::ScrolledWindow>();
+                    sc->set_policy(Gtk::PolicyType::AUTOMATIC, Gtk::PolicyType::AUTOMATIC);
+                    sc->set_max_content_height(360);
+                    sc->set_propagate_natural_height(true);
+                    auto d = text(m_pr_shown.items[i].content, "pr-diff");
+                    d->set_selectable(true);
+                    d->set_wrap(false);
+                    d->set_valign(Gtk::Align::START);
+                    sc->set_child(*d);
+                    ex->set_child(*sc);
+                });
+                card->append(*ex);
+            }
         }
         m_pr_list.append(*card);
     }
     if (items.empty()) m_pr_list.append(*text("Nothing found to back up.", "hero-caption", 0.5f));
 
-    auto miss = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 4);
-    miss->add_css_class("detail");
-    miss->append(*text("Not in this backup", "card-title"));
-    std::string body = "Secrets -- ssh keys, gpg, keyrings -- wait for their own step (opt-in, encrypted).";
-    for (const auto& n : m_pr_shown.notes) body += "\n" + n;
-    auto mb = text(body, "dim");
-    mb->set_wrap(true);
-    miss->append(*mb);
-    m_pr_list.append(*miss);
+    // s012c: secrets -- opt-in, encrypted, a passphrase typed now and never kept.
+    m_pr_sec_on = nullptr;
+    m_pr_pass1 = m_pr_pass2 = nullptr;
+    m_pr_sec_state = nullptr;
+    {
+        const auto& sf = m_pr_shown.secrets;
+        auto card = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 6);
+        card->add_css_class("card");
+        auto head = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 10);
+        auto dot = Gtk::make_managed<Gtk::Box>();
+        dot->add_css_class("dot");
+        dot->add_css_class("pr-secrets-dot");
+        dot->set_valign(Gtk::Align::CENTER);
+        head->append(*dot);
+        auto t = text("Secrets -- ssh keys, gpg, keyrings", "card-title");
+        t->set_hexpand(true);
+        head->append(*t);
+        head->append(*text(sf.files.empty() ? std::string("none found")
+                                            : scan::human_bytes(sf.bytes) + " · " + with_commas(sf.files.size()) +
+                                                  (sf.files.size() == 1 ? " file" : " files"),
+                           "card-sub", 1.0f));
+        card->append(*head);
+        auto why = text("Left out unless you choose. Chosen, they go in as ONE file, secrets.tar.gpg, encrypted with gpg "
+                        "(AES256) under a passphrase you type here. Rouster never stores it -- lose it and they can't be "
+                        "opened, by you or anyone.", "dim");
+        why->set_wrap(true);
+        card->append(*why);
+        if (!sf.files.empty()) {
+            static const char* where[3] = {"~/.ssh", "~/.gnupg", "~/.local/share/keyrings"};
+            std::string list;
+            for (int k = 0; k < 3; ++k)
+                if (sf.per_root[k])
+                    list += (list.empty() ? "" : " · ") + std::string(where[k]) + " " + with_commas(sf.per_root[k]);
+            card->append(*text(list, "detail-path"));
+            for (const auto& n : sf.notes) card->append(*text(n, "dim"));
+            auto on = Gtk::make_managed<Gtk::CheckButton>("Include them, encrypted");
+            on->set_active(false);
+            m_pr_sec_on = on;
+            card->append(*on);
+            auto box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 10);
+            box->set_margin_start(28);
+            auto p1 = Gtk::make_managed<Gtk::PasswordEntry>();
+            auto p2 = Gtk::make_managed<Gtk::PasswordEntry>();
+            p1->set_show_peek_icon(true);
+            p2->set_show_peek_icon(true);
+            p1->set_property("placeholder-text", Glib::ustring("Passphrase"));
+            p2->set_property("placeholder-text", Glib::ustring("The same again"));
+            p1->set_hexpand(true);
+            p2->set_hexpand(true);
+            box->append(*p1);
+            box->append(*p2);
+            box->set_sensitive(false);
+            m_pr_pass1 = p1;
+            m_pr_pass2 = p2;
+            card->append(*box);
+            auto state = text("", "dim");
+            state->set_margin_start(28);
+            state->set_wrap(true);
+            m_pr_sec_state = state;
+            card->append(*state);
+            on->signal_toggled().connect([this, box, on] {
+                box->set_sensitive(on->get_active());
+                if (on->get_active() && m_pr_pass1) m_pr_pass1->grab_focus();
+                profile_gate();
+            });
+            p1->signal_changed().connect([this] { profile_gate(); });
+            p2->signal_changed().connect([this] { profile_gate(); });
+        }
+        m_pr_list.append(*card);
+    }
+    if (!m_pr_shown.notes.empty()) {
+        auto miss = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 4);
+        miss->add_css_class("detail");
+        miss->append(*text("Not in this backup", "card-title"));
+        std::string body;
+        for (const auto& n : m_pr_shown.notes) body += (body.empty() ? "" : "\n") + n;
+        auto mb = text(body, "dim");
+        mb->set_wrap(true);
+        miss->append(*mb);
+        m_pr_list.append(*miss);
+    }
     profile_gate();
 }
 
@@ -1465,11 +1559,26 @@ void Shell::profile_gate() {  // helper: the act button's label + whether it may
     m_pr_big.set_text(scan::human_bytes(bytes));
     m_pr_caption.set_text("chosen, of " + scan::human_bytes(all) + " · " + with_commas(n) + " of " +
                           with_commas(m_pr_shown.items.size()) + " items · from " + m_pr_shown.host);
-    m_pr_go.set_label(n ? "Back up " + scan::human_bytes(bytes) : "Back up");
-    const bool busy = m_pr_worker.joinable() || door_busy();
-    m_pr_gate.set_text(n ? "One new folder in ~/Archive/Profile; nothing else changes. Undo sends it to the Trash."
-                         : "Nothing checked.");
-    if (m_act_pr_run) m_act_pr_run->set_enabled(n > 0 && !busy);
+    // s012c: secrets, if chosen, need a passphrase typed twice.
+    const bool sec = m_pr_sec_on && m_pr_sec_on->get_active() && !m_pr_shown.secrets.files.empty();
+    std::string problem;
+    if (sec && m_pr_pass1 && m_pr_pass2) {
+        std::string a = m_pr_pass1->get_text(), b = m_pr_pass2->get_text();
+        problem = core::secrets::passphrase_problem(a, b);
+        core::secrets::wipe(a);
+        core::secrets::wipe(b);
+    }
+    if (m_pr_sec_state)
+        m_pr_sec_state->set_text(!sec ? std::string()
+                                 : problem.empty() ? "The two match. Keep it somewhere safe -- Rouster won't."
+                                                   : problem);
+    m_pr_go.set_label(n ? "Back up " + scan::human_bytes(bytes) + (sec ? " + secrets" : "") : "Back up");
+    const bool busy = m_pr_worker.joinable() || door_busy() || m_pr_packing;
+    m_pr_gate.set_text(!n ? "Nothing checked."
+                       : sec && !problem.empty() ? "Secrets: " + problem
+                       : std::string("One new folder in ~/Archive/Profile; nothing else changes. Undo sends it to the Trash.") +
+                             (sec ? " The secrets go in encrypted." : ""));
+    if (m_act_pr_run) m_act_pr_run->set_enabled(n > 0 && !busy && problem.empty());
 }
 
 void Shell::paint_profile_start() {  // helper: the earlier backups, each with Restore...
@@ -1561,6 +1670,160 @@ void Shell::paint_profile_restore() {  // helper: the restore preview -- files b
     if (!foot.empty()) card->append(*text(foot, "dim"));
     m_pr_rs_list.append(*card);
 
+    // A line to run yourself, with its Copy (s012c: no hyphens, word breaks first).
+    const auto add_line = [this](Gtk::Box& into, const std::string& what_s, const std::string& line_s) {
+        auto what = text(what_s, nullptr);
+        what->set_margin_top(6);
+        what->set_wrap(true);
+        into.append(*what);
+        auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 10);
+        auto line = text(line_s, "pr-diff");
+        line->set_selectable(true);
+        line->set_wrap(true);
+        line->set_wrap_mode(Pango::WrapMode::WORD_CHAR);
+        Pango::AttrList attrs;
+        auto nohy = Pango::Attribute::create_attr_insert_hyphens(false);
+        attrs.insert(nohy);
+        line->set_attributes(attrs);
+        line->set_hexpand(true);
+        row->append(*line);
+        auto copy_btn = Gtk::make_managed<Gtk::Button>("Copy");
+        copy_btn->add_css_class("ghost");
+        copy_btn->set_valign(Gtk::Align::START);
+        copy_btn->signal_clicked().connect([this, l = line_s] { get_clipboard()->set_text(l); });
+        row->append(*copy_btn);
+        into.append(*row);
+    };
+
+    // s012d: GNOME settings -- key by key; unchecked (it changes the live desktop).
+    if (m_pr_rs.settings.there && (m_pr_rs.settings.differs || !m_pr_rs.settings.error.empty())) {
+        const auto& st = m_pr_rs.settings;
+        auto gc = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 6);
+        gc->add_css_class("card");
+        gc->append(*text("GNOME settings", "card-title"));
+        if (!st.error.empty()) {
+            auto e = text("Can't compare: " + st.error + ".", "dim");
+            e->set_wrap(true);
+            gc->append(*e);
+        } else {
+            auto w = text("Not checked: this changes your desktop as soon as it runs. Your settings now are saved first; "
+                          "Undo puts them back exactly. Keys you set since the backup that it doesn't name stay as they are.",
+                          "dim");
+            w->set_wrap(true);
+            gc->append(*w);
+            auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 12);
+            row->add_css_class("sweep-row");
+            auto cb = Gtk::make_managed<Gtk::CheckButton>();
+            cb->set_active(st.checked);
+            cb->signal_toggled().connect([this, cb] {
+                m_pr_rs.settings.checked = cb->get_active();
+                profile_restore_gate();
+            });
+            auto chip = text("differs", "status-chip", 0.5f);
+            chip->add_css_class("pf-amber");
+            chip->set_width_chars(9);
+            auto what = text(with_commas(st.changes) + (st.changes == 1 ? " key" : " keys") + " would change" +
+                                 (st.kept ? " · " + with_commas(st.kept) + " set since, kept" : std::string()),
+                             "detail-path");
+            what->set_hexpand(true);
+            row->append(*cb);
+            row->append(*chip);
+            row->append(*what);
+            gc->append(*row);
+            auto ex = Gtk::make_managed<Gtk::Expander>("What would change");
+            ex->set_margin_start(40);
+            ex->property_expanded().signal_changed().connect([this, ex] {
+                if (!ex->get_expanded() || ex->get_child()) return;
+                auto sc = Gtk::make_managed<Gtk::ScrolledWindow>();
+                sc->set_policy(Gtk::PolicyType::AUTOMATIC, Gtk::PolicyType::AUTOMATIC);
+                sc->set_max_content_height(360);
+                sc->set_propagate_natural_height(true);
+                auto d = text(m_pr_rs.settings.what, "pr-diff");
+                d->set_selectable(true);
+                d->set_wrap(false);
+                d->set_valign(Gtk::Align::START);
+                sc->set_child(*d);
+                ex->set_child(*sc);
+            });
+            gc->append(*ex);
+        }
+        m_pr_rs_list.append(*gc);
+    }
+
+    // s012c: the encrypted secrets -- opened in memory with the passphrase;
+    // never written by Rouster (they belong in never-touch folders).
+    m_pr_rs_pass = nullptr;
+    if (m_pr_rs.secrets) {
+        namespace sc = core::secrets;
+        auto sc_card = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 6);
+        sc_card->add_css_class("card");
+        auto head = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 10);
+        auto t = text("Secrets -- ssh keys, gpg, keyrings", "card-title");
+        t->set_hexpand(true);
+        head->append(*t);
+        head->append(*text(scan::human_bytes(m_pr_rs.secrets) + " encrypted", "card-sub", 1.0f));
+        sc_card->append(*head);
+        if (m_pr_sec.rows.empty()) {
+            auto w = text("This backup holds them in secrets.tar.gpg. Type the passphrase it was made with to compare them "
+                          "with what you have now -- opened in memory only; nothing is written.", "dim");
+            w->set_wrap(true);
+            sc_card->append(*w);
+            auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 10);
+            auto pe = Gtk::make_managed<Gtk::PasswordEntry>();
+            pe->set_show_peek_icon(true);
+            pe->set_property("placeholder-text", Glib::ustring("Passphrase"));
+            pe->set_hexpand(true);
+            pe->set_sensitive(!m_pr_worker.joinable());
+            m_pr_rs_pass = pe;
+            auto open_btn = Gtk::make_managed<Gtk::Button>("Open");
+            open_btn->add_css_class("ghost");
+            open_btn->signal_clicked().connect([this] { on_profile_open_secrets(); });
+            // Enter opens too. gtkmm 4.10 wraps no signal_activate() on PasswordEntry; the GTK signal is there.
+            g_signal_connect(pe->gobj(), "activate",
+                             G_CALLBACK(+[](GtkPasswordEntry*, gpointer self) { static_cast<Shell*>(self)->on_profile_open_secrets(); }),
+                             this);
+            row->append(*pe);
+            row->append(*open_btn);
+            sc_card->append(*row);
+            if (!m_pr_sec.error.empty()) {
+                auto e = text(m_pr_sec.error, "pf-red");
+                e->set_wrap(true);
+                sc_card->append(*e);
+            }
+        } else {
+            std::size_t same = 0;
+            for (const auto& r : m_pr_sec.rows) {
+                if (r.state == sc::State::Same) { ++same; continue; }
+                auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 12);
+                row->add_css_class("sweep-row");
+                auto chip = text(sc::state_name(r.state), "status-chip", 0.5f);
+                chip->add_css_class(r.state == sc::State::Missing ? "pf-green" : r.state == sc::State::Differs ? "pf-amber" : "pf-red");
+                chip->set_width_chars(9);
+                auto path = text("~/" + r.rel, "detail-path");
+                path->set_hexpand(true);
+                path->set_ellipsize(Pango::EllipsizeMode::MIDDLE);
+                auto sz = text(scan::human_bytes(r.bytes), "detail-size", 1.0f);
+                sz->set_width_chars(9);
+                row->append(*chip);
+                row->append(*path);
+                row->append(*sz);
+                sc_card->append(*row);
+            }
+            sc_card->append(*text(same == m_pr_sec.rows.size()
+                                      ? "All " + with_commas(same) + " are the same as now -- nothing to put back."
+                                      : with_commas(same) + (same == 1 ? " is" : " are") + " the same as now.",
+                                  "dim"));
+            if (!m_pr_sec.commands.empty()) {
+                auto w = text("Rouster never writes into ~/.ssh, ~/.gnupg or the keyrings. These lines do it; gpg asks for "
+                              "the passphrase again.", "dim");
+                w->set_wrap(true);
+                sc_card->append(*w);
+                for (const auto& c : m_pr_sec.commands) add_line(*sc_card, c.what, c.line);
+            }
+        }
+        m_pr_rs_list.append(*sc_card);
+    }
+
     if (!m_pr_rs.commands.empty() || !m_pr_rs.notes.empty()) {
         auto cc = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 6);
         cc->add_css_class("card");
@@ -1570,23 +1833,7 @@ void Shell::paint_profile_restore() {  // helper: the restore preview -- files b
         w->set_wrap(true);
         cc->append(*w);
         for (const auto& c : m_pr_rs.commands) {
-            auto what = text(c.what, nullptr);
-            what->set_margin_top(6);
-            what->set_wrap(true);
-            cc->append(*what);
-            auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 10);
-            auto line = text(c.line, "pr-diff");
-            line->set_selectable(true);
-            line->set_wrap(true);
-            line->set_wrap_mode(Pango::WrapMode::CHAR);
-            line->set_hexpand(true);
-            row->append(*line);
-            auto copy_btn = Gtk::make_managed<Gtk::Button>("Copy");
-            copy_btn->add_css_class("ghost");
-            copy_btn->set_valign(Gtk::Align::START);
-            copy_btn->signal_clicked().connect([this, l = c.line] { get_clipboard()->set_text(l); });
-            row->append(*copy_btn);
-            cc->append(*row);
+            add_line(*cc, c.what, c.line);
         }
         for (const auto& n : m_pr_rs.notes) cc->append(*text(n, "dim"));
         m_pr_rs_list.append(*cc);
@@ -1601,16 +1848,22 @@ void Shell::profile_restore_gate() {  // helper: the restore button's label + wh
             ++n;
             if (b.state == core::profile::State::Differs) ++swaps;
         }
-    m_pr_rs_go.set_label(n ? "Restore " + with_commas(n) + (n == 1 ? " file" : " files") : "Restore");
+    const bool set = m_pr_rs.settings.differs && m_pr_rs.settings.checked;   // s012d
+    m_pr_rs_go.set_label(n && set ? "Restore " + with_commas(n) + (n == 1 ? " file" : " files") + " + settings"
+                         : n      ? "Restore " + with_commas(n) + (n == 1 ? " file" : " files")
+                         : set    ? std::string("Restore GNOME settings")
+                                  : std::string("Restore"));
     const bool busy = m_pr_worker.joinable() || door_busy();
     if (m_pf_red)
         m_pr_rs_gate.set_text("Preflight has a red check. Restore waits until it clears -- see Preflight.");
-    else if (!n)
+    else if (!n && !set)
         m_pr_rs_gate.set_text("Nothing checked.");
     else
-        m_pr_rs_gate.set_text(swaps ? with_commas(swaps) + " replaced (the one there goes to the Trash); one step, Undo swaps back."
-                                    : "Nothing there is replaced; one step, Undo takes it back.");
-    m_pr_rs_go.set_sensitive(n > 0 && !busy && !m_pf_red);
+        m_pr_rs_gate.set_text((swaps ? with_commas(swaps) + " replaced (the one there goes to the Trash)."
+                                     : n ? std::string("Nothing there is replaced.") : std::string()) +
+                              (set ? std::string(n ? " " : "") + "Your settings now are saved first." : std::string()) +
+                              " One step; Undo puts it all back.");
+    m_pr_rs_go.set_sensitive((n > 0 || set) && !busy && !m_pf_red);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

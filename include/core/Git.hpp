@@ -27,4 +27,12 @@ Run git(const std::string& dir, const std::vector<std::string>& args, int timeou
 // *cancel. argv[0] is looked up on PATH; code 127 = not found.
 Run child(const std::vector<std::string>& argv, int timeout_s, const std::atomic<bool>* cancel = nullptr);
 
+// s012c (secrets): a program fed through pipes -- `in` on its stdin, `fd3` on
+// file descriptor 3 (gpg's --passphrase-fd 3: a secret never goes on argv or
+// in the environment). Otherwise as child(). Lives in Pipe.cpp, the one file
+// besides the door allowed to say write(): it writes ONLY into the pipes of
+// the child it made.
+Run feed(const std::vector<std::string>& argv, const std::string& in, const std::string& fd3, int timeout_s,
+         const std::atomic<bool>* cancel = nullptr);
+
 }  // namespace rouster::core::vcs

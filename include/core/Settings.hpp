@@ -12,4 +12,9 @@ namespace rouster::core {
 
 bool save_own(const std::string& data_dir, const std::string& name, const std::string& text);
 
+// s012c: a private folder of Rouster's own in the data folder (mode 0700), made
+// if missing -- gpg's homedir for secrets (gpg won't make a --homedir itself).
+// `name` must be a plain name. true if it is there (a real folder) afterwards.
+bool own_dir(const std::string& data_dir, const std::string& name);
+
 }  // namespace rouster::core

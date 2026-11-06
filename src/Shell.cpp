@@ -170,6 +170,8 @@ Shell::~Shell() { m_rl_timer.disconnect(); stop_scan(); stop_sweep(); stop_dev()
 void Shell::build_ui() {
     m_home = home_dir();
     m_door = std::make_unique<core::door::Door>(m_home, data_dir());
+    if (const char* h = std::getenv("ROUSTER_HOME"); h && *h)   // s012d: a fixture's settings are the fixture's own
+        m_door->set_dconf(core::door::fixture_dconf(m_home));
     m_door->load();
     build_shell();     // zone
     build_pages();     // zone
@@ -195,6 +197,8 @@ void Shell::build_ui() {
     m_archive_finished.connect(sigc::mem_fun(*this, &Shell::on_archive_found));
     m_profile_finished.connect(sigc::mem_fun(*this, &Shell::on_profile_found));
     m_profile_looked.connect(sigc::mem_fun(*this, &Shell::on_profile_looked));
+    m_profile_packed.connect(sigc::mem_fun(*this, &Shell::on_profile_packed));
+    m_profile_sec_opened.connect(sigc::mem_fun(*this, &Shell::on_profile_secrets_opened));
     paint_profile_start();
     m_known = core::load_known(data_dir() + "/known.json");
 

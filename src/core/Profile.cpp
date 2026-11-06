@@ -206,6 +206,13 @@ Runner real_runner(const std::atomic<bool>* cancel) {
     return [cancel](const std::vector<std::string>& argv) { return vcs::child(argv, 60, cancel); };
 }
 
+Runner fixture_runner(const std::string& home, const std::atomic<bool>* cancel) {
+    return [home, cancel](const std::vector<std::string>& argv) {
+        if (!argv.empty() && argv[0] == "dconf") return vcs::child(door::fixture_dconf_argv(home, argv), 60, cancel);
+        return vcs::child(argv, 60, cancel);
+    };
+}
+
 std::string bundle_name(const std::string& host, std::int64_t now) {
     std::string h;
     for (char c : host) h += (std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '.') ? c : '-';
@@ -232,7 +239,8 @@ Found find(const std::string& home, const Runner& run) {
     {
         const auto r = run({"dconf", "dump", "/"});
         if (r.code == 0 && !r.out.empty()) {
-            if (r.out.size() > door::kWriteMax) f.notes.push_back("dconf: the dump is over " + scan::human_bytes(door::kWriteMax) + ", left out");
+            if (r.out.find_first_not_of(" \n") == std::string::npos) f.notes.push_back("dconf: nothing set (every key at its default)");
+            else if (r.out.size() > door::kWriteMax) f.notes.push_back("dconf: the dump is over " + scan::human_bytes(door::kWriteMax) + ", left out");
             else g.made(Group::Gnome, "gnome/dconf.ini", "dconf dump /", r.out, "every key you changed");
         } else {
             f.notes.push_back(r.code == 127 ? "dconf: not installed" : "dconf: " + (first_line(r.err).empty() ? "no output" : first_line(r.err)));
@@ -335,18 +343,24 @@ Found find(const std::string& home, const Runner& run) {
     for (const auto& it : f.items) f.bytes += it.bytes;
 
     f.bundles = bundles(home);
+    f.secrets = secrets::find(home);   // s012c: listed only
     return f;
 }
 
 std::string profile_txt(const Found& found, const std::vector<const Item*>& items, std::int64_t now,
-                        const std::string& notes) {
+                        const std::string& notes, std::size_t secret_files) {
     std::string s;
     s += "Rouster profile backup\n";
     s += "host: " + found.host + "\n";
     s += "made: " + stamp(now, true) + "\n";
     s += "items: " + std::to_string(items.size()) + "\n\n";
     s += "A snapshot of how this machine is set up -- not a backup of your files.\n";
-    s += "Secrets (ssh keys, gpg, keyrings) are NOT in it.\n\n";
+    if (secret_files)
+        s += "Secrets (ssh keys, gpg, keyrings): " + std::to_string(secret_files) + " files in " + secrets::kFile +
+             ", encrypted with gpg --symmetric (AES256).\nThe passphrase is not stored anywhere -- without it they "
+             "can't be opened.\n\n";
+    else
+        s += "Secrets (ssh keys, gpg, keyrings) are NOT in it.\n\n";
     for (int gi = 0; gi < kGroupCount; ++gi) {
         const auto g = static_cast<Group>(gi);
         bool head = false;
@@ -364,7 +378,8 @@ std::string profile_txt(const Found& found, const std::vector<const Item*>& item
         s += "\n";
     }
     if (!notes.empty()) s += "== Notes: see NOTES.md\n\n";
-    s += "== Putting it back by hand (Rouster's own Restore, which shows the differences first, comes later)\n";
+    s += "== Putting it back by hand (or in Rouster: Profile backup -> Your backups -> Restore..., which shows\n"
+         "   the differences first and has Undo)\n";
     s += "files:      look first, then: cp -an home/. ~/      (-n: never overwrites)\n";
     s += "GNOME:      dconf load / < gnome/dconf.ini           (replaces the keys it names)\n";
     s += "extensions: one by one from extensions.gnome.org (gnome/extensions.txt)\n";
@@ -372,11 +387,16 @@ std::string profile_txt(const Found& found, const std::vector<const Item*>& item
     s += "fonts:      fc-cache -f\n";
     s += "dnf:        sudo dnf install $(grep -v '^#' packages/dnf.txt)\n";
     s += "flatpak:    flatpak install <origin> <application>, per line of packages/flatpak.txt\n";
+    if (secret_files)
+        s += "secrets:    gpg -d " + std::string(secrets::kFile) +
+             " | tar -xvf - --skip-old-files -C ~      (never replaces)\n"
+             "            to look first: gpg -d " + secrets::kFile + " | tar -tvf -\n";
     return s;
 }
 
 door::Plan plan(const std::string& home, const Found& found, const std::string& notes,
-                std::int64_t now, std::string& bundle, std::vector<std::string>& dropped) {
+                std::int64_t now, std::string& bundle, std::vector<std::string>& dropped,
+                const std::string& secrets, std::size_t secret_files) {
     door::Plan p;
     std::string name = bundle_name(found.host, now);
     {
@@ -453,10 +473,20 @@ door::Plan plan(const std::string& home, const Found& found, const std::string& 
         a.reason = "your notes";
         p.actions.push_back(std::move(a));
     }
+    if (!secrets.empty()) {
+        door::Action a;
+        a.verb = door::Verb::Write;
+        a.to = bundle + "/" + secrets::kFile;
+        a.content = secrets;
+        a.mode = 0600;
+        a.bytes = a.content.size();
+        a.reason = "ssh keys, gpg, keyrings -- " + std::to_string(secret_files) + " files, encrypted";
+        p.actions.push_back(std::move(a));
+    }
     door::Action t;
     t.verb = door::Verb::Write;
     t.to = bundle + "/PROFILE.txt";
-    t.content = profile_txt(found, keep, now, notes);
+    t.content = profile_txt(found, keep, now, notes, secrets.empty() ? 0 : secret_files);
     t.bytes = t.content.size();
     t.reason = "what is in this backup, and how to put it back";
     p.actions.push_back(std::move(t));
@@ -559,6 +589,10 @@ Restore look_back(const std::string& home, const std::string& bundle, const Runn
         if (l.rfind("made: ", 0) == 0) r.made = l.substr(6);
     }
 
+    // s012c: encrypted secrets, opened only when the passphrase is typed.
+    if (::lstat((bundle + "/" + secrets::kFile).c_str(), &st) == 0 && S_ISREG(st.st_mode))
+        r.secrets = static_cast<std::uint64_t>(st.st_size);
+
     // Files.
     bool fonts = false;
     const std::function<void(const std::string&, int)> walk = [&](const std::string& rel, int depth) {
@@ -608,14 +642,45 @@ Restore look_back(const std::string& home, const std::string& bundle, const Runn
             r.commands.push_back({"~/" + b.rel + " -- Rouster never writes in a protected folder",
                                   "cp -i " + quote(b.from) + " ~/" + quote(b.rel)});
 
-    // GNOME settings: until s012d, the line to run.
-    if (::lstat((bundle + "/gnome/dconf.ini").c_str(), &st) == 0) {
+    // GNOME settings (s012d): key by key, what loading the backup would change.
+    if (::lstat((bundle + "/gnome/dconf.ini").c_str(), &st) == 0 && S_ISREG(st.st_mode)) {
+        auto& s = r.settings;
+        s.there = true;
+        s.from = bundle + "/gnome/dconf.ini";
+        s.from_mtime_ns = ns(st);
+        const std::string backup = read_text(s.from);
         const auto d = run({"dconf", "dump", "/"});
-        if (d.code == 0 && d.out == read_text(bundle + "/gnome/dconf.ini"))
-            r.notes.push_back("GNOME settings: the same as now");
-        else
-            r.commands.push_back({"GNOME settings (Rouster's own, with Undo, comes in s012d)",
-                                  "dconf load / < " + quote(bundle + "/gnome/dconf.ini")});
+        if (d.code != 0) {
+            s.error = d.code == 127 ? "dconf is not installed" : "dconf dump failed";
+        } else if (const auto bad = door::dconf_problem(backup); !bad.empty()) {
+            s.error = "the backup's dconf.ini doesn't read as a dump (" + bad + ")";
+        } else {
+            const auto values = [](const std::string& ini) {
+                std::map<std::string, std::string> m;
+                const auto keys = door::dconf_keys(ini);
+                std::size_t k = 0;
+                std::istringstream in(ini);
+                for (std::string l; std::getline(in, l);) {
+                    if (l.empty() || l[0] == '#' || l.front() == '[') continue;
+                    const auto eq = l.find('=');
+                    if (eq == std::string::npos || k >= keys.size()) continue;
+                    m[keys[k++]] = l.substr(eq + 1);
+                }
+                return m;
+            };
+            const auto now = values(d.out), was = values(backup);
+            for (const auto& [k, v] : was) {
+                const auto it = now.find(k);
+                if (it != now.end() && it->second == v) continue;
+                ++s.changes;
+                s.what += k + "\n    now:    " + (it == now.end() ? std::string("(default)") : it->second) +
+                          "\n    backup: " + v + "\n";
+            }
+            for (const auto& [k, v] : now)
+                if (!was.count(k)) ++s.kept;
+            s.differs = s.changes > 0;
+            if (!s.differs) r.notes.push_back("GNOME settings: the backup's are all as they are now");
+        }
     }
     if (::lstat((bundle + "/gnome/extensions.txt").c_str(), &st) == 0) {
         std::string missing;
@@ -641,6 +706,12 @@ Restore look_back(const std::string& home, const std::string& bundle, const Runn
             if (arrow == std::string::npos) continue;
             const std::string where = l.substr(0, arrow), to = l.substr(arrow + 4);
             const std::string unit = where.substr(where.rfind('/') + 1);
+            // s012c: only what isn't so now -- the same link already in home
+            // means the unit is already enabled (or masked) there.
+            struct stat ls{};
+            if (where.find("..") == std::string::npos &&
+                ::lstat((home + "/.config/systemd/user/" + where).c_str(), &ls) == 0 && S_ISLNK(ls.st_mode))
+                continue;
             if (to == "/dev/null") mask.insert(unit);
             else if (where.find(".wants/") != std::string::npos || where.find(".requires/") != std::string::npos) enable.insert(unit);
         }
@@ -648,7 +719,7 @@ Restore look_back(const std::string& home, const std::string& bundle, const Runn
         if (!enable.empty()) { line += " && systemctl --user enable"; for (const auto& u : enable) line += " " + u; }
         if (!mask.empty()) { line += " && systemctl --user mask"; for (const auto& u : mask) line += " " + u; }
         if (!enable.empty() || !mask.empty())
-            r.commands.push_back({"User services: enable what was enabled (after the files are back)", line});
+            r.commands.push_back({"User services: enable what was enabled and isn't now (after the files are back)", line});
     }
     if (fonts) r.commands.push_back({"Fonts: after restoring them", "fc-cache -f"});
 
@@ -742,6 +813,21 @@ door::Plan restore_plan(const std::string& home, const Restore& r, std::vector<s
         c.bytes = b->bytes;
         c.reason = std::string("from the backup (") + state_name(b->state) + " now)";
         p.actions.push_back(std::move(c));
+    }
+    // s012d: GNOME settings, last -- one Settings step (the door saves what they are now).
+    if (r.settings.checked && r.settings.differs) {
+        struct stat st{};
+        if (::lstat(r.settings.from.c_str(), &st) != 0 || ns(st) != r.settings.from_mtime_ns) {
+            dropped.push_back("GNOME settings -- the backup's dconf.ini changed since the look");
+        } else {
+            door::Action a;
+            a.verb = door::Verb::Settings;
+            a.content = read_text(r.settings.from);
+            a.bytes = a.content.size();
+            a.reason = "GNOME settings from the backup -- " + std::to_string(r.settings.changes) +
+                       (r.settings.changes == 1 ? " key" : " keys") + " (what they are now is saved first)";
+            p.actions.push_back(std::move(a));
+        }
     }
     return p;
 }

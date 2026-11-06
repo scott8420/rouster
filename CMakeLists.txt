@@ -33,11 +33,13 @@ add_library(rouster_core STATIC
     # Duplicates (s008): size -> head/tail -> full hash, folders, keep rules; read-only.
     src/core/Dups.cpp
     src/core/Git.cpp
+    src/core/Pipe.cpp
     # Organize (s010): templates, naming, file into project, new version; read-only.
     src/core/Organize.cpp
     # Rules (s011): Hazel-style rules on watched folders; read-only. Settings: Rouster's own rules.json.
     src/core/Rules.cpp
     src/core/Profile.cpp
+    src/core/Secrets.cpp
     src/core/Settings.cpp
     # Known (s007b): the names promoted to known-optional -- Rouster's own setting.
     src/core/Known.cpp

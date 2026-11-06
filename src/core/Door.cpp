@@ -38,13 +38,14 @@ const char* verb_name(Verb v) {
         case Verb::Dedupe: return "dedupe";
         case Verb::MakeDir: return "mkdir";
         case Verb::Copy: return "copy";
+        case Verb::Settings: return "settings";
     }
     return "?";
 }
 bool creates(Verb v) { return v == Verb::Write || v == Verb::Clone || v == Verb::MakeDir || v == Verb::Copy; }
 
 const std::vector<Verb>& verbs() {
-    static const std::vector<Verb> v = {Verb::Trash, Verb::Move, Verb::Write, Verb::Clone, Verb::Dedupe, Verb::MakeDir, Verb::Copy};
+    static const std::vector<Verb> v = {Verb::Trash, Verb::Move, Verb::Write, Verb::Clone, Verb::Dedupe, Verb::MakeDir, Verb::Copy, Verb::Settings};
     return v;
 }
 
@@ -107,12 +108,64 @@ std::string ident_json(const Identity& i) {
 
 }  // namespace
 
+std::vector<std::string> dconf_keys(const std::string& ini) {
+    std::vector<std::string> out;
+    std::string section;
+    std::istringstream in(ini);
+    for (std::string l; std::getline(in, l);) {
+        if (l.empty() || l[0] == '#') continue;
+        if (l.front() == '[' && l.back() == ']') { section = l.substr(1, l.size() - 2); continue; }
+        const auto eq = l.find('=');
+        if (eq == std::string::npos || section.empty()) continue;
+        std::string dir = section == "/" ? "" : section;
+        while (!dir.empty() && dir.back() == '/') dir.pop_back();
+        out.push_back((dir.empty() || dir[0] != '/' ? "/" : "") + dir + (dir.empty() ? "" : "/") + l.substr(0, eq));
+    }
+    return out;
+}
+
+std::string dconf_problem(const std::string& ini) {
+    if (ini.empty()) return "nothing to load";
+    if (ini.size() > kWriteMax) return "too big to load";
+    std::string section;
+    std::istringstream in(ini);
+    int n = 0;
+    for (std::string l; std::getline(in, l);) {
+        ++n;
+        if (l.empty() || l[0] == '#') continue;
+        if (l.front() == '[') {
+            if (l.back() != ']' || l.size() < 3) return "line " + std::to_string(n) + " is not a [section]";
+            section = l.substr(1, l.size() - 2);
+            if (section.find("..") != std::string::npos || section.find("//") != std::string::npos)
+                return "line " + std::to_string(n) + ": a strange path";
+            continue;
+        }
+        const auto eq = l.find('=');
+        if (section.empty() || eq == std::string::npos || eq == 0 || l.substr(0, eq).find('/') != std::string::npos)
+            return "line " + std::to_string(n) + " is not key=value under a [section]";
+    }
+    return {};
+}
+
+std::vector<std::string> fixture_dconf_argv(const std::string& home, const std::vector<std::string>& argv) {
+    std::vector<std::string> out = {"env", "XDG_CONFIG_HOME=" + home + "/.config", "dbus-run-session", "--"};
+    out.insert(out.end(), argv.begin(), argv.end());
+    return out;
+}
+
+DconfRunner fixture_dconf(const std::string& home) {
+    return [home](const std::vector<std::string>& argv, const std::string& in) {
+        return vcs::feed(fixture_dconf_argv(home, argv), in, "", 60);
+    };
+}
+
 Door::Door(const std::string& home, const std::string& data_dir) {
     std::error_code ec;
     m_home = fs::weakly_canonical(home, ec).string();
     m_data = fs::weakly_canonical(data_dir, ec).string();
     m_manifest = m_data + "/manifest.jsonl";
     m_trash = m_home + "/.local/share/Trash";
+    m_dconf = [](const std::vector<std::string>& argv, const std::string& in) { return vcs::feed(argv, in, "", 60); };
 }
 
 Record* Door::find(std::uint64_t id) {
@@ -181,6 +234,11 @@ bool Door::load() {
     // A crash between intent and outcome: look where the thing is now.
     for (auto& r : m_records) {
         if (r.state != State::Intent) continue;
+        if (r.verb == Verb::Settings) {   // can't be looked at: count it done -- Undo is safe either way
+            r.state = State::Done;
+            m_unfinished.push_back("settings load -- may or may not have happened; Undo puts the saved settings back");
+            continue;
+        }
         Identity at_to{}, at_from{};
         if (identity_of(r.to, at_to) && at_to == r.ident) r.state = State::Done;
         else if (identity_of(r.from, at_from) && at_from == r.ident) r.state = State::Failed;
@@ -205,6 +263,11 @@ std::string Door::refusal(const Action& a, const std::vector<std::string>& made,
         return p.empty() || p[0] != '/' || fs::path(p).lexically_normal().string() != p ||
                (p.size() > 1 && p.back() == '/');
     };
+    if (a.verb == Verb::Settings) {   // no path: settings, through dconf
+        if (!a.from.empty() || !a.to.empty()) return "a settings load names no file";
+        if (auto why = dconf_problem(a.content); !why.empty()) return "not a dconf dump: " + why;
+        return {};
+    }
     if (!creates(a.verb)) {
         if (bad(a.from)) return "not a clean absolute path: " + a.from;
         if (!inside(a.from, m_home) || a.from == m_home) return "outside the home folder: " + a.from;
@@ -401,7 +464,7 @@ bool Door::do_create(Record& r, const Action& a) {
     if (r.verb == Verb::MakeDir) {
         if (::mkdir(r.from.c_str(), 0755) != 0) { r.error = std::strerror(errno); return false; }
     } else if (r.verb == Verb::Write) {
-        const int fd = ::open(r.from.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
+        const int fd = ::open(r.from.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, a.mode & 0700 ? a.mode & 0777 : 0644);
         if (fd < 0) { r.error = std::strerror(errno); return false; }
         const bool wrote = ::write(fd, a.content.data(), a.content.size()) == static_cast<ssize_t>(a.content.size()) &&
                            ::fsync(fd) == 0;
@@ -494,7 +557,8 @@ Result Door::run(const Plan& plan) {
         r.to = a.to;
         if (r.verb == Verb::Copy) r.src = a.from;
         r.when = now_s();
-        if (creates(r.verb)) { if (!do_create(r, a)) { /* r.error set */ } }
+        if (r.verb == Verb::Settings) { if (!prep_settings(r, a)) { /* r.error set */ } }
+        else if (creates(r.verb)) { if (!do_create(r, a)) { /* r.error set */ } }
         else if (r.verb == Verb::Dedupe) { if (!identity_of(r.to, r.ident)) r.error = "vanished before it could be shared"; }
         else if (!identity_of(r.from, r.ident)) { r.error = "vanished before it could be moved"; }
         else if (r.verb == Verb::Trash && !do_trash(r)) { /* r.error set */ }
@@ -511,13 +575,15 @@ Result Door::run(const Plan& plan) {
             m_records.push_back(r);
             batch.records.push_back(r.id);
             Record& live = m_records.back();
-            const bool acted = live.verb == Verb::Dedupe ? do_dedupe(live) : rename_noreplace(live.from, live.to) == 0;
+            const bool acted = live.verb == Verb::Dedupe     ? do_dedupe(live)
+                             : live.verb == Verb::Settings ? do_settings(live)
+                                                           : rename_noreplace(live.from, live.to) == 0;
             if (acted) {
                 live.state = State::Done;
                 append(json{{"t", "done"}, {"id", live.id}}.dump());
                 ++res.done;
             } else {
-                if (live.verb != Verb::Dedupe)
+                if (live.verb != Verb::Dedupe && live.verb != Verb::Settings)
                     live.error = errno == EXDEV ? "on another filesystem -- Rouster never copies-and-deletes"
                                                 : std::string(std::strerror(errno));
                 if (!live.info.empty()) ::unlink(live.info.c_str());
@@ -525,19 +591,77 @@ Result Door::run(const Plan& plan) {
                 live.state = State::Failed;
                 append(json{{"t", "failed"}, {"id", live.id}, {"error", live.error}}.dump());
                 ++res.failed;
-                res.messages.push_back("failed: " + (creates(live.verb) || live.verb == Verb::Dedupe ? live.to : live.from) +
+                res.messages.push_back("failed: " + (live.verb == Verb::Settings ? std::string("GNOME settings")
+                                                     : creates(live.verb) || live.verb == Verb::Dedupe ? live.to : live.from) +
                                        " -- " + live.error);
             }
         } else {
             ++res.failed;
-            res.messages.push_back("failed: " + (creates(r.verb) ? r.to : r.from) + " -- " + r.error);
+            res.messages.push_back("failed: " + (r.verb == Verb::Settings ? std::string("GNOME settings")
+                                                 : creates(r.verb) ? r.to : r.from) + " -- " + r.error);
         }
     }
     res.ok = res.failed == 0 && res.done == plan.actions.size();
     return res;
 }
 
+bool Door::prep_settings(Record& r, const Action& a) {
+    const auto now = m_dconf({"dconf", "dump", "/"}, "");
+    if (now.code != 0) {
+        r.error = now.code == 127 ? "dconf is not installed" : "dconf dump failed: " + now.err.substr(0, now.err.find('\n'));
+        return false;
+    }
+    // Rouster's own records, beside the manifest: what the settings were, and what is loaded.
+    std::error_code ec;
+    fs::create_directories(m_data, ec);
+    r.from = m_data + "/settings-" + std::to_string(r.id) + ".before.ini";
+    r.src = m_data + "/settings-" + std::to_string(r.id) + ".load.ini";
+    r.to = "dconf:/";
+    for (const auto& [path, text] : {std::pair{r.from, &now.out}, std::pair{r.src, &a.content}}) {
+        const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+        if (fd < 0) { r.error = "could not save " + path + ": " + std::strerror(errno); return false; }
+        const bool ok = ::write(fd, text->data(), text->size()) == static_cast<ssize_t>(text->size()) && ::fsync(fd) == 0;
+        ::close(fd);
+        if (!ok) { r.error = "could not save " + path; return false; }
+    }
+    return true;
+}
+
+bool Door::do_settings(Record& r) {
+    std::ifstream in(r.src, std::ios::binary);
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    const auto l = m_dconf({"dconf", "load", "/"}, ss.str());
+    if (l.code != 0) { r.error = "dconf load failed: " + l.err.substr(0, l.err.find('\n')); return false; }
+    return true;
+}
+
+bool Door::undo_settings(Record& r, std::string& why) {
+    const auto slurp = [](const std::string& p, std::string& out) {
+        std::ifstream in(p, std::ios::binary);
+        if (!in) return false;
+        std::ostringstream ss;
+        ss << in.rdbuf();
+        out = ss.str();
+        return true;
+    };
+    std::string before, loaded;
+    if (!slurp(r.from, before) || !slurp(r.src, loaded)) { why = "the saved settings are gone: " + r.from; return false; }
+    const auto had = dconf_keys(before);
+    for (const auto& k : dconf_keys(loaded)) {
+        if (std::find(had.begin(), had.end(), k) != had.end()) continue;
+        const auto x = m_dconf({"dconf", "reset", k}, "");
+        if (x.code != 0) { why = "dconf reset " + k + " failed: " + x.err.substr(0, x.err.find('\n')); return false; }
+    }
+    if (!before.empty()) {
+        const auto l = m_dconf({"dconf", "load", "/"}, before);
+        if (l.code != 0) { why = "dconf load failed: " + l.err.substr(0, l.err.find('\n')); return false; }
+    }
+    return true;
+}
+
 bool Door::undo_one(Record& r, std::string& why) {
+    if (r.verb == Verb::Settings) return undo_settings(r, why);
     Identity now{};
     if (!identity_of(r.to, now)) { why = "no longer at " + r.to; return false; }
     if (r.verb == Verb::Dedupe) {   // nothing moved: the copy must still be the copy, then the step is closed

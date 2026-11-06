@@ -375,7 +375,7 @@ void Shell::on_profile_find() {  // handler: gather the set-up (worker: dconf, d
     if (auto lg = log::get(log::Area::Profile)) lg->info("find (home '{}')", m_home);
     m_pr_worker = std::thread([this, home = m_home] {
         const auto t0 = std::chrono::steady_clock::now();
-        core::profile::Found f = core::profile::find(home, core::profile::real_runner(&m_pr_cancel));
+        core::profile::Found f = core::profile::find(home, (std::getenv("ROUSTER_HOME") && *std::getenv("ROUSTER_HOME") ? core::profile::fixture_runner(home, &m_pr_cancel) : core::profile::real_runner(&m_pr_cancel)));
         const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
         if (auto lg = log::get(log::Area::Profile)) {
             lg->info("found {} items ({}), {} earlier backups, {} ms{}", f.items.size(), core::scan::human_bytes(f.bytes),
@@ -419,13 +419,67 @@ void Shell::on_profile_found() {  // handler: the worker finished (Dispatcher ->
 void Shell::on_profile_run() {  // handler: checked rows -> a plan (one new folder) -> the door
     if (!m_door || door_busy() || m_pr_worker.joinable()) return;
     if (m_pr_states.get_visible_child_name() != "results") return;   // preview first: only from the list
+    const bool sec = m_pr_sec_on && m_pr_sec_on->get_active() && !m_pr_shown.secrets.files.empty();
+    if (!sec) { profile_backup({}, 0); return; }
+    // s012c: the secrets first -- read, tarred and encrypted on a worker; the
+    // passphrase leaves the boxes now and is wiped when gpg is done with it.
+    std::string a = m_pr_pass1 ? std::string(m_pr_pass1->get_text()) : std::string();
+    std::string b = m_pr_pass2 ? std::string(m_pr_pass2->get_text()) : std::string();
+    const std::string problem = core::secrets::passphrase_problem(a, b);
+    core::secrets::wipe(b);
+    if (!problem.empty()) { core::secrets::wipe(a); profile_gate(); return; }
+    if (m_pr_pass1) m_pr_pass1->set_text("");
+    if (m_pr_pass2) m_pr_pass2->set_text("");
+    m_pr_cancel = false;
+    m_pr_packing = true;
+    profile_gate();
+    m_pr_gate.set_text("Encrypting the secrets (gpg)...");
+    if (auto lg = log::get(log::Area::Profile))
+        lg->info("secrets: encrypting {} files ({})", m_pr_shown.secrets.files.size(),
+                 core::scan::human_bytes(m_pr_shown.secrets.bytes));
+    m_pr_worker = std::thread([this, home = m_home, found = m_pr_shown.secrets, pass = std::move(a)]() mutable {
+        auto pk = core::secrets::pack(home, found, pass, core::secrets::real_gpg(&m_pr_cancel));
+        core::secrets::wipe(pass);
+        {
+            std::lock_guard lk(m_pr_mx);
+            m_pr_packed = std::move(pk);
+        }
+        m_profile_packed.emit();
+    });
+}
+
+void Shell::on_profile_packed() {  // handler: s012c -- the secrets are encrypted (Dispatcher, UI thread)
+    if (m_pr_worker.joinable()) m_pr_worker.join();
+    m_pr_packing = false;
+    core::secrets::Packed pk;
+    {
+        std::lock_guard lk(m_pr_mx);
+        pk = std::move(m_pr_packed);
+        m_pr_packed = {};
+    }
+    if (auto lg = log::get(log::Area::Profile)) {
+        lg->info("secrets: {} files, tar {}, encrypted {}{}", pk.files, core::scan::human_bytes(pk.raw),
+                 core::scan::human_bytes(pk.data.size()), pk.error.empty() ? "" : " FAILED: " + pk.error);
+        for (const auto& n : pk.notes) lg->info("  secrets: {}", n);
+    }
+    if (!pk.error.empty()) {
+        profile_gate();
+        m_pr_gate.set_text("Not backed up -- secrets: " + pk.error + ". Uncheck them to back up the rest.");
+        return;
+    }
+    profile_backup(std::move(pk.data), pk.files);
+}
+
+void Shell::profile_backup(std::string secrets, std::size_t secret_files) {  // helper: plan + the door (after any encrypting)
+    if (!m_door || door_busy()) return;
     const std::string notes = m_pr_notes ? std::string(m_pr_notes->get_buffer()->get_text()) : std::string();
     if (!core::save_own(data_dir(), "profile-notes.md", notes))
         if (auto lg = log::get(log::Area::Profile)) lg->warn("could not save {}/profile-notes.md", data_dir());
     std::vector<std::string> dropped;
     std::string bundle;
     core::door::Plan plan = core::profile::plan(m_home, m_pr_shown, notes, static_cast<std::int64_t>(std::time(nullptr)),
-                                                bundle, dropped);
+                                                bundle, dropped, secrets, secret_files);
+    core::secrets::wipe(secrets);   // ciphertext, but no reason to keep a copy
     std::size_t files = 0;
     std::uint64_t bytes = 0;
     for (const auto& a : plan.actions)
@@ -446,7 +500,12 @@ void Shell::on_profile_run() {  // handler: checked rows -> a plan (one new fold
     const std::string left = dropped.empty() ? "" : " " + std::to_string(dropped.size()) + " left out (changed since Look) -- see the log.";
     if (r.ok) {
         m_pr_done_big.set_text("Backed up " + core::scan::human_bytes(bytes));
-        m_pr_done_caption.set_text(tilde + " -- " + std::to_string(files) + " files, PROFILE.txt says what each is and how "
+        m_pr_done_caption.set_text(tilde + " -- " + std::to_string(files) + " files" +
+                                   (secret_files ? " (" + std::to_string(secret_files) +
+                                                       " secrets inside secrets.tar.gpg, encrypted -- keep the passphrase "
+                                                       "somewhere safe; Rouster doesn't)"
+                                                 : std::string()) +
+                                   ". PROFILE.txt says what each is and how "
                                    "to put it back. Nothing else changed; Undo sends the folder to the Trash." + left);
     } else if (r.done == 0) {
         m_pr_done_big.set_text("Nothing made");
@@ -476,9 +535,10 @@ void Shell::on_profile_look_back(const std::string& name) {  // handler: a backu
     m_pr_spinner.start();
     m_pr_states.set_visible_child("running");
     const std::string bundle = m_home + "/" + core::profile::kRoot + "/" + name;
+    m_pr_sec = {};   // s012c: secrets are opened again for each look
     if (auto lg = log::get(log::Area::Profile)) lg->info("look back at '{}'", bundle);
     m_pr_worker = std::thread([this, home = m_home, bundle] {
-        auto r = core::profile::look_back(home, bundle, core::profile::real_runner(&m_pr_cancel));
+        auto r = core::profile::look_back(home, bundle, (std::getenv("ROUSTER_HOME") && *std::getenv("ROUSTER_HOME") ? core::profile::fixture_runner(home, &m_pr_cancel) : core::profile::real_runner(&m_pr_cancel)));
         if (auto lg = log::get(log::Area::Profile)) {
             std::size_t n[5] = {};
             for (const auto& b : r.files) ++n[static_cast<int>(b.state)];
@@ -513,6 +573,46 @@ void Shell::on_profile_looked() {  // handler: the restore look finished (Dispat
     m_pr_states.set_visible_child("restore");
 }
 
+void Shell::on_profile_open_secrets() {  // handler: s012c -- restore's Open -> worker: decrypt in memory + compare
+    if (m_pr_worker.joinable() || !m_pr_rs_pass || m_pr_rs.secrets == 0) return;
+    std::string pass = m_pr_rs_pass->get_text();
+    if (pass.empty()) return;
+    m_pr_rs_pass->set_text("");
+    m_pr_rs_pass->set_sensitive(false);
+    m_pr_cancel = false;
+    if (auto lg = log::get(log::Area::Profile)) lg->info("secrets: opening {}/{}", m_pr_rs.bundle, core::secrets::kFile);
+    m_pr_worker = std::thread([this, home = m_home, bundle = m_pr_rs.bundle, pass = std::move(pass)]() mutable {
+        auto o = core::secrets::open(home, bundle, pass, core::secrets::real_gpg(&m_pr_cancel));
+        core::secrets::wipe(pass);
+        {
+            std::lock_guard lk(m_pr_mx);
+            m_pr_sec_found = std::move(o);
+        }
+        m_profile_sec_opened.emit();
+    });
+}
+
+void Shell::on_profile_secrets_opened() {  // handler: s012c -- the secrets were opened (Dispatcher, UI thread)
+    if (m_pr_worker.joinable()) m_pr_worker.join();
+    {
+        std::lock_guard lk(m_pr_mx);
+        m_pr_sec = std::move(m_pr_sec_found);
+        m_pr_sec_found = {};
+    }
+    if (auto lg = log::get(log::Area::Profile)) {
+        std::size_t n[4] = {};
+        for (const auto& r : m_pr_sec.rows) ++n[static_cast<int>(r.state)];
+        lg->info("secrets: {} same, {} missing, {} differ, {} blocked; {} lines{}", n[0], n[1], n[2], n[3],
+                 m_pr_sec.commands.size(), m_pr_sec.error.empty() ? "" : " -- " + m_pr_sec.error);
+    }
+    // The focused entry is about to go: drop focus first (else GTK warns, and
+    // focus lands on the first selectable line and selects it all).
+    unset_focus();
+    paint_profile_restore();
+    if (m_pr_rs_pass) m_pr_rs_pass->grab_focus();   // a wrong passphrase: ready to type again
+    else m_pr_rs_go.grab_focus();
+}
+
 void Shell::on_profile_restore() {  // handler: checked rows -> Trash + Copy plan -> the door
     if (!m_door || door_busy() || m_pr_worker.joinable()) return;
     if (m_pr_states.get_visible_child_name() != "restore") return;   // preview first
@@ -521,15 +621,18 @@ void Shell::on_profile_restore() {  // handler: checked rows -> Trash + Copy pla
     std::vector<std::string> dropped;
     core::door::Plan plan = core::profile::restore_plan(m_home, m_pr_rs, dropped);
     std::size_t files = 0, swaps = 0;
+    bool settings = false;   // s012d
     for (const auto& a : plan.actions) {
         if (a.verb == core::door::Verb::Copy) ++files;
         if (a.verb == core::door::Verb::Trash) ++swaps;
+        if (a.verb == core::door::Verb::Settings) settings = true;
     }
     if (auto lg = log::get(log::Area::Profile)) {
-        lg->info("restore '{}': {} actions, {} files, {} replaced", plan.label, plan.actions.size(), files, swaps);
+        lg->info("restore '{}': {} actions, {} files, {} replaced{}", plan.label, plan.actions.size(), files, swaps,
+                 settings ? ", GNOME settings (" + std::to_string(m_pr_rs.settings.changes) + " keys)" : std::string());
         for (const auto& d : dropped) lg->info("  left out: {}", d);
     }
-    if (!files) {
+    if (!files && !settings) {
         m_pr_rs_gate.set_text(dropped.empty() ? std::string("Nothing to do.") : dropped.front() + " -- go Back and look again.");
         return;
     }
@@ -542,8 +645,11 @@ void Shell::on_profile_restore() {  // handler: checked rows -> Trash + Copy pla
     m_pr_bundle = m_pr_rs.bundle;
     const std::string left = dropped.empty() ? "" : " " + std::to_string(dropped.size()) + " left out (changed since the look) -- see the log.";
     if (r.ok) {
-        m_pr_done_big.set_text("Restored " + std::to_string(files) + (files == 1 ? " file" : " files"));
+        m_pr_done_big.set_text(files && settings ? "Restored " + std::to_string(files) + (files == 1 ? " file" : " files") + " + settings"
+                               : files           ? "Restored " + std::to_string(files) + (files == 1 ? " file" : " files")
+                                                 : std::string("Restored GNOME settings"));
         m_pr_done_caption.set_text((swaps ? std::to_string(swaps) + " replaced -- the ones that were there are in the Trash. " : std::string()) +
+                                   (settings ? "GNOME settings loaded; what they were is saved. " : std::string()) +
                                    (m_pr_rs.commands.empty() ? std::string() : "The lines to run yourself stay on the restore page (Restore... again). ") +
                                    "Undo takes it all back." + left);
     } else if (r.done == 0) {
