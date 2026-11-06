@@ -8,6 +8,7 @@
 
 #include <cerrno>
 #include <chrono>
+#include <utility>
 
 // Git.cpp -- git as a child process. Prompts, askpass and optional locks off;
 // no stdin; its own process group so a timeout takes ssh with it. Whether a
@@ -18,14 +19,15 @@ extern char** environ;
 
 namespace rouster::core::vcs {
 
+namespace {
+Run spawn(std::vector<std::string> argv_s, std::vector<std::string> env_s, int timeout_s,
+          const std::atomic<bool>* cancel);
+}  // namespace
+
 Run git(const std::string& dir, const std::vector<std::string>& args, int timeout_s,
         const std::atomic<bool>* cancel) {
-    Run r;
     std::vector<std::string> argv_s = {"git", "-C", dir};
     argv_s.insert(argv_s.end(), args.begin(), args.end());
-    std::vector<char*> argv;
-    for (auto& a : argv_s) argv.push_back(a.data());
-    argv.push_back(nullptr);
 
     // The environment: the user's, with prompts and optional locks off.
     std::vector<std::string> env_s;
@@ -43,6 +45,27 @@ Run git(const std::string& dir, const std::vector<std::string>& args, int timeou
     env_s.push_back("SSH_ASKPASS=/bin/true");
     env_s.push_back("LC_ALL=C");
     env_s.push_back("GIT_SSH_COMMAND=ssh -o BatchMode=yes -o ConnectTimeout=10");
+    return spawn(std::move(argv_s), std::move(env_s), timeout_s, cancel);
+}
+
+Run child(const std::vector<std::string>& argv_in, int timeout_s, const std::atomic<bool>* cancel) {
+    std::vector<std::string> env_s;
+    for (char** e = environ; e && *e; ++e) {
+        const std::string kv = *e;
+        if (!kv.starts_with("LC_ALL=")) env_s.push_back(kv);
+    }
+    env_s.push_back("LC_ALL=C");
+    return spawn(argv_in, std::move(env_s), timeout_s, cancel);
+}
+
+namespace {
+Run spawn(std::vector<std::string> argv_s, std::vector<std::string> env_s, int timeout_s,
+          const std::atomic<bool>* cancel) {
+    Run r;
+    if (argv_s.empty()) return r;
+    std::vector<char*> argv;
+    for (auto& a : argv_s) argv.push_back(a.data());
+    argv.push_back(nullptr);
     std::vector<char*> envp;
     for (auto& e : env_s) envp.push_back(e.data());
     envp.push_back(nullptr);
@@ -60,7 +83,7 @@ Run git(const std::string& dir, const std::vector<std::string>& args, int timeou
         ::dup2(err[1], 2);
         ::close(0);                 // no stdin: nothing can wait on a prompt
         ::setpgid(0, 0);            // its own group, so a timeout kills ssh too
-        ::execvpe("git", argv.data(), envp.data());
+        ::execvpe(argv[0], argv.data(), envp.data());
         ::_exit(127);
     }
     ::close(out[1]);
@@ -94,5 +117,6 @@ Run git(const std::string& dir, const std::vector<std::string>& args, int timeou
     r.code = (!killed && WIFEXITED(st)) ? WEXITSTATUS(st) : -1;
     return r;
 }
+}  // namespace
 
 }  // namespace rouster::core::vcs

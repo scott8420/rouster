@@ -1371,6 +1371,107 @@ void Shell::pj_done(const core::door::Result& r, const std::string& big, const s
 
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Profile backup (s012a). The worker runs core::profile::find (read-only:
+// files, dconf dump, dnf -C, flatpak list); the cards are the preview; checks
+// live in m_pr_shown. Rows beyond kProfileShown in a group are never checked.
+// ─────────────────────────────────────────────────────────────────────────────
+void Shell::stop_profile() {  // helper: cancel + join (close, dtor)
+    m_pr_cancel = true;
+    if (m_pr_worker.joinable()) m_pr_worker.join();
+}
+
+void Shell::paint_profile() {  // helper: cards per group, rows with checks, what wasn't gathered
+    namespace pr = core::profile;
+    while (auto* c = m_pr_list.get_first_child()) m_pr_list.remove(*c);
+    auto& items = m_pr_shown.items;
+    for (int gi = 0; gi < pr::kGroupCount; ++gi) {
+        const auto g = static_cast<pr::Group>(gi);
+        std::uint64_t gbytes = 0;
+        std::size_t n = 0;
+        for (const auto& it : items) if (it.group == g) { gbytes += it.bytes; ++n; }
+        if (!n) continue;
+        auto card = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 4);
+        card->add_css_class("card");
+        auto head = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        auto dot = Gtk::make_managed<Gtk::Box>();
+        dot->add_css_class("dot");
+        dot->add_css_class("pr-dot");
+        dot->set_valign(Gtk::Align::CENTER);
+        head->append(*dot);
+        auto title = text(pr::group_name(g), "card-title");
+        title->set_hexpand(true);
+        head->append(*title);
+        head->append(*text(scan::human_bytes(gbytes) + " · " + with_commas(n) + (n == 1 ? " item" : " items"), "card-sub", 1.0f));
+        card->append(*head);
+        auto why = text(pr::group_why(g), "dim");
+        why->set_wrap(true);
+        why->set_margin_bottom(4);
+        card->append(*why);
+        std::size_t shown = 0;
+        for (std::size_t i = 0; i < items.size(); ++i) {
+            if (items[i].group != g) continue;
+            if (shown++ == kProfileShown) {
+                card->append(*text("... and " + with_commas(n - kProfileShown) + " more, left out (not shown, not checked)", "dim"));
+                for (std::size_t k = i; k < items.size(); ++k) if (items[k].group == g) items[k].checked = false;
+                break;
+            }
+            const auto& it = items[i];
+            auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 12);
+            row->add_css_class("sweep-row");
+            auto cb = Gtk::make_managed<Gtk::CheckButton>();
+            cb->set_active(it.checked);
+            cb->signal_toggled().connect([this, cb, i] {
+                if (i < m_pr_shown.items.size()) m_pr_shown.items[i].checked = cb->get_active();
+                profile_gate();
+            });
+            auto sz = text(scan::human_bytes(it.bytes), "detail-size", 1.0f);
+            sz->set_width_chars(9);
+            auto path = text(it.label, "detail-path");
+            path->set_hexpand(true);
+            path->set_ellipsize(Pango::EllipsizeMode::MIDDLE);
+            std::string tip = "-> " + it.dest + (it.read ? "\nread and written (it sits in a protected folder)" : "");
+            if (it.made) tip += "\n\n" + it.content.substr(0, 1500) + (it.content.size() > 1500 ? "\n..." : "");
+            path->set_tooltip_text(tip);
+            row->append(*cb);
+            row->append(*sz);
+            row->append(*path);
+            if (!it.note.empty()) row->append(*text(it.note, "dim", 1.0f));
+            card->append(*row);
+        }
+        m_pr_list.append(*card);
+    }
+    if (items.empty()) m_pr_list.append(*text("Nothing found to back up.", "hero-caption", 0.5f));
+
+    auto miss = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 4);
+    miss->add_css_class("detail");
+    miss->append(*text("Not in this backup", "card-title"));
+    std::string body = "Secrets -- ssh keys, gpg, keyrings -- wait for their own step (opt-in, encrypted).";
+    for (const auto& n : m_pr_shown.notes) body += "\n" + n;
+    auto mb = text(body, "dim");
+    mb->set_wrap(true);
+    miss->append(*mb);
+    m_pr_list.append(*miss);
+    profile_gate();
+}
+
+void Shell::profile_gate() {  // helper: the act button's label + whether it may act
+    std::uint64_t bytes = 0, all = 0;
+    std::size_t n = 0;
+    for (const auto& it : m_pr_shown.items) {
+        all += it.bytes;
+        if (it.checked) { bytes += it.bytes; ++n; }
+    }
+    m_pr_big.set_text(scan::human_bytes(bytes));
+    m_pr_caption.set_text("chosen, of " + scan::human_bytes(all) + " · " + with_commas(n) + " of " +
+                          with_commas(m_pr_shown.items.size()) + " items · from " + m_pr_shown.host);
+    m_pr_go.set_label(n ? "Back up " + scan::human_bytes(bytes) : "Back up");
+    const bool busy = m_pr_worker.joinable() || door_busy();
+    m_pr_gate.set_text(n ? "One new folder in ~/Archive/Profile; nothing else changes. Undo sends it to the Trash."
+                         : "Nothing checked.");
+    if (m_act_pr_run) m_act_pr_run->set_enabled(n > 0 && !busy);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Dev projects (s007). The worker runs core::dev::find (read-only, git with
 // optional locks off); the cards are the preview; checks live in m_dv_shown.
 // ─────────────────────────────────────────────────────────────────────────────

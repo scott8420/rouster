@@ -6,6 +6,7 @@
 #include "core/Dev.hpp"      // s007: dev projects
 #include "core/Dups.hpp"     // s008: duplicates
 #include "core/Archive.hpp"  // s009: archive
+#include "core/Profile.hpp"  // s012: profile backup
 #include "core/Organize.hpp" // s010: templates, naming, file into project
 #include "core/Rules.hpp"    // s011: rules on watched folders
 
@@ -15,6 +16,8 @@
 #include <glibmm/dispatcher.h>
 
 #include <gtkmm/dropdown.h>
+#include <gtkmm/textview.h>
+#include <atomic>
 
 #include <memory>
 #include <optional>
@@ -59,6 +62,8 @@
 //   "Where do Projects act?"             -> Shell_handlers.cpp (on_pj_create / on_pj_file / on_pj_confirm -> m_door->run)
 //   "Where is the Rules page?"           -> Shell_zones.cpp   (build_rules_page); painting: Shell_helpers.cpp (paint_rules)
 //   "Where do rules act?"                -> Shell_handlers.cpp (on_rl_run, on_rl_tick -> m_door->run)
+//   "Where is the Profile backup page?"  -> Shell_zones.cpp   (build_profile_page); rows: Shell_helpers.cpp (paint_profile)
+//   "Where does a profile backup act?"   -> Shell_handlers.cpp (on_profile_run -> m_door->run)
 //   "Where does a write go?"             -> core/Door.* -- nowhere else (the selftest's source gate)
 // ─────────────────────────────────────────────────────────────────────────────
 namespace rouster {
@@ -85,6 +90,7 @@ private:
     void build_archive_page();                   // category: zone: Archive (s009)
     void build_projects_page();                  // category: zone: Projects (s010)
     void build_rules_page();                     // category: zone: Rules (s011)
+    void build_profile_page();                   // category: zone: Profile backup (s012a)
     void build_preflight_page();                 // category: zone: Preflight (s003)
     void build_activity_page();                  // category: zone: Activity (s004)
     Glib::RefPtr<Gio::Menu> build_menu();        // category: zone: hamburger model
@@ -123,7 +129,11 @@ private:
     void on_archive_found();                     // category: handler: the worker finished (Dispatcher, UI thread)
     void on_archive_view(bool stored);           // category: handler: Old files / In the archive
     void on_archive_months(int months);          // category: handler: the "untouched for" choice -> look again
-    void on_archive_run();                       // category: handler: checked rows -> a plan (archive or put back) -> the door
+    void on_archive_run();
+    void on_profile_find();                      // category: handler: gather the set-up (worker: dconf, dnf, flatpak)
+    void on_profile_found();                     // category: handler: the worker finished (Dispatcher, UI thread)
+    void on_profile_run();                       // category: handler: checked rows -> a plan (one new folder) -> the door
+    void on_profile_open();                      // category: handler: open the bundle in Files                       // category: handler: checked rows -> a plan (archive or put back) -> the door
     void on_pj_home();                           // category: handler: back to templates + projects (re-read)
     void on_pj_new(std::size_t tmpl);            // category: handler: a template's New project... -> the form
     void on_pj_form();                           // category: handler: id / title typed -> the plan again
@@ -186,7 +196,10 @@ private:
     void stop_archive();                         // category: helper: cancel + join (close, dtor)
     bool tick_archive();                         // category: helper: the live counters while looking
     void paint_archive();                        // category: helper: view switch, cards per top folder / the stored list
-    void archive_gate();                         // category: helper: the act button's label + whether it may act
+    void archive_gate();
+    void stop_profile();                         // category: helper: cancel + join (close, dtor)
+    void paint_profile();                        // category: helper: cards per group, rows with checks, what wasn't gathered
+    void profile_gate();                         // category: helper: the act button's label + whether it may act                         // category: helper: the act button's label + whether it may act
     void paint_projects();                       // category: helper: the home state -- templates, projects
     void paint_pj_plan(Gtk::Box& box, const core::door::Plan& plan);   // category: helper: a plan, step by step (the preview)
     void paint_pj_project();                     // category: helper: the open project -- the queue, what's in it
@@ -370,6 +383,31 @@ private:
     core::archive::Found                  m_ar_found;
     sigc::connection                      m_ar_tick;
     Glib::RefPtr<Gio::SimpleAction>       m_act_ar_find, m_act_ar_cancel, m_act_ar_run;
+
+    // Profile backup (s012a): start | running | results | done.
+    widgets::Box     m_pr_page;
+    widgets::Stack   m_pr_states;
+    widgets::Label   m_pr_sub;
+    widgets::Label   m_pr_last;        // the newest earlier backup, on the start page
+    widgets::Button  m_pr_find;
+    widgets::Spinner m_pr_spinner;
+    widgets::Label   m_pr_big;
+    widgets::Label   m_pr_caption;
+    widgets::Box     m_pr_list;
+    widgets::Button  m_pr_go;
+    widgets::Label   m_pr_gate;
+    widgets::Label   m_pr_done_big;
+    widgets::Label   m_pr_done_caption;
+    Gtk::TextView*   m_pr_notes = nullptr;        // free-form notes (Rouster's own profile-notes.md)
+    core::profile::Found m_pr_shown;              // checks live here (UI thread only)
+    std::string      m_pr_bundle;                 // the last bundle made
+    static constexpr std::size_t kProfileShown = 400;   // rows painted per group; unpainted rows are never checked
+    Glib::Dispatcher                  m_profile_finished;
+    std::thread                       m_pr_worker;
+    std::mutex                        m_pr_mx;
+    std::atomic<bool>                 m_pr_cancel{false};
+    core::profile::Found              m_pr_found;
+    Glib::RefPtr<Gio::SimpleAction>   m_act_pr_find, m_act_pr_run;
 
     // Projects (s010): home | new | preview | project | done.
     widgets::Box     m_pj_page;

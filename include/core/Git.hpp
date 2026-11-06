@@ -22,4 +22,9 @@ struct Run {
 Run git(const std::string& dir, const std::vector<std::string>& args, int timeout_s,
         const std::atomic<bool>* cancel = nullptr);
 
+// Any other program the same way (s012, profile backup: dconf, dnf, flatpak):
+// no stdin, its own process group, LC_ALL=C, killed after timeout_s or on
+// *cancel. argv[0] is looked up on PATH; code 127 = not found.
+Run child(const std::vector<std::string>& argv, int timeout_s, const std::atomic<bool>* cancel = nullptr);
+
 }  // namespace rouster::core::vcs

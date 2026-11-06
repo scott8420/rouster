@@ -37,6 +37,7 @@ add_library(rouster_core STATIC
     src/core/Organize.cpp
     # Rules (s011): Hazel-style rules on watched folders; read-only. Settings: Rouster's own rules.json.
     src/core/Rules.cpp
+    src/core/Profile.cpp
     src/core/Settings.cpp
     # Known (s007b): the names promoted to known-optional -- Rouster's own setting.
     src/core/Known.cpp

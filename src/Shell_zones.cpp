@@ -10,6 +10,7 @@
 #include <gdk/gdk.h>
 #include <gtkmm/dropdown.h>
 #include <gtkmm/stringlist.h>
+#include <gtkmm/textview.h>
 
 // Shell_zones.cpp -- ZONES. Construction of the named regions: the window frame,
 // the sidebar, each module page, and the menu model. The look is CSS
@@ -100,6 +101,7 @@ void Shell::build_sidebar() {  // zone: brand + sections + module rows
     item("archive", "rouster-archive-symbolic", "Archive");
     section("SAFETY");
     item("preflight", "rouster-preflight-symbolic", "Preflight");
+    item("profile", "rouster-profile-symbolic", "Profile backup");
     item("activity", "rouster-activity-symbolic", "Activity");
 
     m_nav.signal_row_selected().connect([this](Gtk::ListBoxRow* row) {
@@ -119,6 +121,7 @@ void Shell::build_pages() {  // zone: the module pages
     build_projects_page();
     build_rules_page();
     build_dev_page();
+    build_profile_page();
     build_preflight_page();
     build_activity_page();
 }
@@ -652,6 +655,156 @@ void Shell::build_archive_page() {  // zone: Archive
 
     m_ar_page.append(m_ar_states);
     m_stack.add(m_ar_page, "archive", "Archive");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Profile backup (s012a, §4.8) -- the Sweep shape. Four states:
+//   start   : hero, one line, the orb ("Look"), the newest earlier backup.
+//   running : spinner; Look asks dconf, dnf (cache only) and flatpak.
+//   results : cards per group with a check per row, what couldn't be
+//             gathered, the notes box. THE PREVIEW. The act bar makes one new
+//             folder under ~/Archive/Profile -- it changes nothing else.
+//   done    : where it went; Open folder / Undo / Activity / Look again.
+// ─────────────────────────────────────────────────────────────────────────────
+void Shell::build_profile_page() {  // zone: Profile backup
+    m_pr_states.set_transition_type(Gtk::StackTransitionType::CROSSFADE);
+    m_pr_states.set_transition_duration(220);
+    m_pr_states.set_vexpand(true);
+
+    // start
+    auto start = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 14);
+    start->set_valign(Gtk::Align::CENTER);
+    start->set_halign(Gtk::Align::CENTER);
+    start->set_margin(40);
+    start->append(*hero("rouster-hero-profile", 128));
+    start->append(*label("Profile backup", "hero-title"));
+    m_pr_sub.add_css_class("hero-sub");
+    m_pr_sub.set_wrap(true);
+    m_pr_sub.set_justify(Gtk::Justification::CENTER);
+    m_pr_sub.set_max_width_chars(52);
+    m_pr_sub.set_text("How this machine is set up -- dotfiles, GNOME settings, extensions, autostart, user "
+                      "services, fonts, and what you installed -- gathered into one folder in "
+                      "~/Archive/Profile. Your own files aren't in it, and nothing else changes.");
+    start->append(m_pr_sub);
+    m_pr_last.add_css_class("dim");
+    start->append(m_pr_last);
+    m_pr_find.set_label("Look");
+    m_pr_find.add_css_class("orb");
+    m_pr_find.set_halign(Gtk::Align::CENTER);
+    m_pr_find.set_margin_top(18);
+    m_pr_find.set_action_name("win.profile-find");
+    start->append(m_pr_find);
+    m_pr_states.add(*start, "start");
+
+    // running
+    auto run = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 12);
+    run->set_valign(Gtk::Align::CENTER);
+    run->set_halign(Gtk::Align::CENTER);
+    m_pr_spinner.add_css_class("big");
+    m_pr_spinner.set_halign(Gtk::Align::CENTER);
+    run->append(m_pr_spinner);
+    run->append(*label("Gathering", "hero-big"));
+    run->append(*label("dotfiles, dconf, extensions, services, fonts, packages", "hero-caption"));
+    m_pr_states.add(*run, "running");
+
+    // results
+    auto res_page = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 0);
+    auto scroll = Gtk::make_managed<Gtk::ScrolledWindow>();
+    scroll->set_policy(Gtk::PolicyType::NEVER, Gtk::PolicyType::AUTOMATIC);
+    scroll->set_vexpand(true);
+    auto res = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 14);
+    res->set_margin_start(32);
+    res->set_margin_end(32);
+    res->set_margin_top(12);
+    res->set_margin_bottom(16);
+    auto head = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 20);
+    head->append(*hero("rouster-hero-profile", 88));
+    auto words = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 2);
+    words->set_valign(Gtk::Align::CENTER);
+    words->set_hexpand(true);
+    m_pr_big.add_css_class("hero-big");
+    m_pr_big.set_xalign(0.0f);
+    m_pr_caption.add_css_class("hero-caption");
+    m_pr_caption.set_xalign(0.0f);
+    m_pr_caption.set_wrap(true);
+    words->append(m_pr_big);
+    words->append(m_pr_caption);
+    head->append(*words);
+    auto again = Gtk::make_managed<Gtk::Button>("Look again");
+    again->add_css_class("ghost");
+    again->set_valign(Gtk::Align::CENTER);
+    again->set_action_name("win.profile-find");
+    head->append(*again);
+    res->append(*head);
+    res->append(m_pr_list);
+
+    // Notes: what can't be packaged. Kept between backups (Rouster's own file).
+    auto notes = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 6);
+    notes->add_css_class("card");
+    notes->append(*label("Notes", "card-title", 0.0f));
+    notes->append(*label("For what can't be packaged -- \"custom Nautilus in /usr/local: rebuild from "
+                         "~/Develop/nautilus at tag 50.2.2\". Saved with each backup as NOTES.md.", "dim", 0.0f));
+    m_pr_notes = Gtk::make_managed<Gtk::TextView>();
+    m_pr_notes->set_name("shell.profile.notes");
+    m_pr_notes->add_css_class("pr-notes");
+    m_pr_notes->set_wrap_mode(Gtk::WrapMode::WORD_CHAR);
+    m_pr_notes->set_size_request(-1, 90);
+    m_pr_notes->set_top_margin(8);
+    m_pr_notes->set_bottom_margin(8);
+    m_pr_notes->set_left_margin(10);
+    m_pr_notes->set_right_margin(10);
+    notes->append(*m_pr_notes);
+    res->append(*notes);
+    scroll->set_child(*res);
+    res_page->append(*scroll);
+
+    auto bar = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 16);
+    bar->add_css_class("act-bar");
+    m_pr_gate.add_css_class("dim");
+    m_pr_gate.set_xalign(0.0f);
+    m_pr_gate.set_hexpand(true);
+    m_pr_gate.set_wrap(true);
+    bar->append(m_pr_gate);
+    m_pr_go.add_css_class("act");
+    m_pr_go.set_action_name("win.profile-run");
+    bar->append(m_pr_go);
+    res_page->append(*bar);
+    m_pr_states.add(*res_page, "results");
+
+    // done
+    auto done = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 12);
+    done->set_valign(Gtk::Align::CENTER);
+    done->set_halign(Gtk::Align::CENTER);
+    done->set_margin(40);
+    done->append(*hero("rouster-hero-done", 112));
+    m_pr_done_big.add_css_class("hero-big");
+    done->append(m_pr_done_big);
+    m_pr_done_caption.add_css_class("hero-sub");
+    m_pr_done_caption.set_wrap(true);
+    m_pr_done_caption.set_justify(Gtk::Justification::CENTER);
+    m_pr_done_caption.set_max_width_chars(58);
+    done->append(m_pr_done_caption);
+    auto btns = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 12);
+    btns->set_halign(Gtk::Align::CENTER);
+    btns->set_margin_top(12);
+    auto open = Gtk::make_managed<Gtk::Button>("Open folder");
+    open->add_css_class("ghost");
+    open->signal_clicked().connect([this] { on_profile_open(); });
+    auto undo = Gtk::make_managed<Gtk::Button>("Undo");
+    undo->add_css_class("ghost");
+    undo->set_action_name("win.undo");
+    auto act = Gtk::make_managed<Gtk::Button>("Activity");
+    act->add_css_class("ghost");
+    act->signal_clicked().connect([this] { go_to("activity"); });
+    auto more = Gtk::make_managed<Gtk::Button>("Look again");
+    more->add_css_class("ghost");
+    more->set_action_name("win.profile-find");
+    for (auto* b : {open, undo, act, more}) btns->append(*b);
+    done->append(*btns);
+    m_pr_states.add(*done, "done");
+
+    m_pr_page.append(m_pr_states);
+    m_stack.add(m_pr_page, "profile", "Profile backup");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -5,6 +5,7 @@
 #include "Registry.hpp"
 #include "core/Recents.hpp"
 #include "core/Known.hpp"
+#include "core/Settings.hpp"
 
 #include <algorithm>
 
@@ -17,6 +18,8 @@
 #include <chrono>
 #include <cctype>
 #include <cstring>
+#include <fstream>
+#include <sstream>
 #include <ctime>
 #include <filesystem>
 
@@ -82,6 +85,11 @@ void Shell::on_undo() {  // handler: undo the last batch, through the door
     if (m_ar_states.get_visible_child_name() == "done") {
         m_ar_sub.set_text("Undone -- everything is back where it was. Look again to see it.");
         m_ar_states.set_visible_child("start");
+    }
+    if (m_pr_states.get_visible_child_name() == "done") {
+        m_pr_sub.set_text("Undone -- the backup went to the Trash (its files and folders, one by one). Look again to make another.");
+        m_pr_last.set_text("");
+        m_pr_states.set_visible_child("start");
     }
     if (m_du_states.get_visible_child_name() == "done") {
         m_du_sub.set_text("Undone. A Trash step is back where it was; a shared step is closed -- the files were "
@@ -352,6 +360,111 @@ void Shell::on_dups_acted() {  // handler: the door finished (Dispatcher -> UI t
     m_du_states.set_visible_child("done");
     dups_gate();
     paint_activity();
+}
+
+// ── Profile backup (s012a) ───────────────────────────────────────────────────
+void Shell::on_profile_find() {  // handler: gather the set-up (worker: dconf, dnf, flatpak)
+    if (m_pr_worker.joinable() || door_busy()) return;
+    m_pr_cancel = false;
+    if (m_act_pr_find) m_act_pr_find->set_enabled(false);
+    if (m_act_pr_run) m_act_pr_run->set_enabled(false);
+    m_pr_spinner.start();
+    m_pr_states.set_visible_child("running");
+    if (auto lg = log::get(log::Area::Profile)) lg->info("find (home '{}')", m_home);
+    m_pr_worker = std::thread([this, home = m_home] {
+        const auto t0 = std::chrono::steady_clock::now();
+        core::profile::Found f = core::profile::find(home, core::profile::real_runner(&m_pr_cancel));
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+        if (auto lg = log::get(log::Area::Profile)) {
+            lg->info("found {} items ({}), {} earlier backups, {} ms{}", f.items.size(), core::scan::human_bytes(f.bytes),
+                     f.bundles.size(), ms, f.refused.empty() ? "" : " REFUSED: " + f.refused);
+            for (const auto& n : f.notes) lg->info("  not gathered: {}", n);
+        }
+        {
+            std::lock_guard lk(m_pr_mx);
+            m_pr_found = std::move(f);
+        }
+        m_profile_finished.emit();
+    });
+}
+
+void Shell::on_profile_found() {  // handler: the worker finished (Dispatcher -> UI thread)
+    if (m_pr_worker.joinable()) m_pr_worker.join();
+    m_pr_spinner.stop();
+    if (m_act_pr_find) m_act_pr_find->set_enabled(true);
+    {
+        std::lock_guard lk(m_pr_mx);
+        m_pr_shown = m_pr_found;
+    }
+    m_pr_last.set_text(m_pr_shown.bundles.empty() ? std::string()
+                       : "Newest backup: ~/" + std::string(core::profile::kRoot) + "/" + m_pr_shown.bundles.front() +
+                             (m_pr_shown.bundles.size() > 1 ? " (" + std::to_string(m_pr_shown.bundles.size()) + " in all)" : ""));
+    if (!m_pr_shown.refused.empty()) {
+        m_pr_sub.set_text("Not looked: " + m_pr_shown.refused);
+        m_pr_states.set_visible_child("start");
+        return;
+    }
+    if (m_pr_notes && m_pr_notes->get_buffer()->get_text().empty()) {
+        std::ifstream in(data_dir() + "/profile-notes.md");
+        std::ostringstream ss;
+        ss << in.rdbuf();
+        m_pr_notes->get_buffer()->set_text(ss.str());
+    }
+    paint_profile();
+    m_pr_states.set_visible_child("results");
+}
+
+void Shell::on_profile_run() {  // handler: checked rows -> a plan (one new folder) -> the door
+    if (!m_door || door_busy() || m_pr_worker.joinable()) return;
+    if (m_pr_states.get_visible_child_name() != "results") return;   // preview first: only from the list
+    const std::string notes = m_pr_notes ? std::string(m_pr_notes->get_buffer()->get_text()) : std::string();
+    if (!core::save_own(data_dir(), "profile-notes.md", notes))
+        if (auto lg = log::get(log::Area::Profile)) lg->warn("could not save {}/profile-notes.md", data_dir());
+    std::vector<std::string> dropped;
+    std::string bundle;
+    core::door::Plan plan = core::profile::plan(m_home, m_pr_shown, notes, static_cast<std::int64_t>(std::time(nullptr)),
+                                                bundle, dropped);
+    std::size_t files = 0;
+    std::uint64_t bytes = 0;
+    for (const auto& a : plan.actions)
+        if (a.verb != core::door::Verb::MakeDir) { ++files; bytes += a.bytes; }
+    if (auto lg = log::get(log::Area::Profile)) {
+        lg->info("run '{}': {} actions, {} files, {}", plan.label, plan.actions.size(), files, core::scan::human_bytes(bytes));
+        for (const auto& d : dropped) lg->info("  left out: {}", d);
+    }
+    plan.previewed = true;   // the list on screen was the preview
+    const auto r = m_door->run(plan);
+    if (auto lg = log::get(log::Area::Profile)) {
+        lg->info("run: {} done, {} failed", r.done, r.failed);
+        for (const auto& m : r.messages) lg->warn("  {}", m);
+    }
+    m_pr_bundle = bundle;
+    const std::string tilde = "~/" + bundle.substr(m_home.size() + 1);
+    const std::string left = dropped.empty() ? "" : " " + std::to_string(dropped.size()) + " left out (changed since Look) -- see the log.";
+    if (r.ok) {
+        m_pr_done_big.set_text("Backed up " + core::scan::human_bytes(bytes));
+        m_pr_done_caption.set_text(tilde + " -- " + std::to_string(files) + " files, PROFILE.txt says what each is and how "
+                                   "to put it back. Nothing else changed; Undo sends the folder to the Trash." + left);
+    } else if (r.done == 0) {
+        m_pr_done_big.set_text("Nothing made");
+        m_pr_done_caption.set_text(r.messages.empty() ? std::string("The door refused the plan.") : r.messages.front());
+    } else {
+        m_pr_done_big.set_text(std::to_string(r.done) + " of " + std::to_string(plan.actions.size()));
+        m_pr_done_caption.set_text("steps done; " + std::to_string(r.failed) + " could not: " +
+                                   (r.messages.empty() ? std::string("see Activity") : r.messages.front()) +
+                                   ". Undo sends what was made to the Trash.");
+    }
+    m_pr_states.set_visible_child("done");
+    paint_activity();
+}
+
+void Shell::on_profile_open() {  // handler: open the bundle in Files
+    if (m_pr_bundle.empty()) return;
+    try {
+        Gio::AppInfo::launch_default_for_uri(Glib::filename_to_uri(m_pr_bundle));
+    } catch (const Glib::Error& e) {
+        if (auto lg = log::get(log::Area::Profile)) lg->warn("could not open {}: {}", m_pr_bundle, e.what());
+    }
 }
 
 // ── Archive (s009) ───────────────────────────────────────────────────────────

@@ -45,6 +45,10 @@ window.rouster.page-rules {
   background-image: radial-gradient(circle at 75% 15%, rgba(167,139,250,0.45), transparent 55%),
                     linear-gradient(160deg, #2a1a52 0%, #3b2275 55%, #1c1238 100%);
 }
+window.rouster.page-profile {
+  background-image: radial-gradient(circle at 75% 15%, rgba(163,230,53,0.40), transparent 55%),
+                    linear-gradient(160deg, #22330d 0%, #34501a 55%, #16220a 100%);
+}
 window.rouster.page-preflight {
   background-image: radial-gradient(circle at 75% 15%, rgba(45,212,191,0.45), transparent 55%),
                     linear-gradient(160deg, #10394a 0%, #134e5e 55%, #0c2734 100%);
@@ -224,3 +228,15 @@ window.page-rules button.act {
   background-image: linear-gradient(160deg, #c4b5fd 0%, #7c3aed 100%);
   box-shadow: 0 6px 22px rgba(167,139,250,0.35);
 }
+
+/* Profile backup (s012a). */
+.pr-dot { background-color: #a3e635; }
+window.page-profile button.orb {
+  background-image: linear-gradient(160deg, #d9f99d 0%, #84cc16 55%, #4d7c0f 100%);
+  box-shadow: 0 0 0 6px rgba(255,255,255,0.10), 0 10px 40px rgba(163,230,53,0.45);
+}
+window.page-profile button.act {
+  background-image: linear-gradient(160deg, #d9f99d 0%, #65a30d 100%);
+  box-shadow: 0 6px 22px rgba(163,230,53,0.35);
+}
+window.rouster textview.pr-notes, window.rouster textview.pr-notes text { background-color: rgba(0,0,0,0.25); color: #ffffff; border-radius: 8px; }

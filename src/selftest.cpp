@@ -29,6 +29,7 @@
 #include "core/Organize.hpp"
 #include "core/Rules.hpp"
 #include "core/Settings.hpp"
+#include "core/Profile.hpp"
 
 #include <algorithm>
 #include <array>
@@ -362,6 +363,26 @@ bool make_organize_fixture(const fs::path& home) {
     return ok;
 }
 
+// A set-up home (s012): dotfiles, an ssh config, an extension, autostart, a
+// user unit enabled by a link, a font -- what a profile backup gathers.
+bool make_profile_fixture(const fs::path& home) {
+    bool ok = true;
+    ok &= put_bytes(home, ".bashrc", "# fixture bashrc\nalias ll='ls -l'\n");
+    ok &= put_bytes(home, ".gitconfig", "[user]\n\tname = Fixture\n");
+    ok &= put_bytes(home, ".ssh/config", "Host gh\n  HostName github.com\n");
+    ok &= put_bytes(home, ".ssh/id_ed25519", "NOT A REAL KEY");
+    ok &= put_bytes(home, ".local/share/gnome-shell/extensions/dash@fixture/metadata.json",
+                    "{\"uuid\":\"dash@fixture\",\"name\":\"Dash Fixture\",\"version\":7}");
+    ok &= put_bytes(home, ".config/autostart/notes.desktop", "[Desktop Entry]\nName=Notes\nExec=true\n");
+    ok &= put_bytes(home, ".config/systemd/user/sync.service", "[Service]\nExecStart=/bin/true\n");
+    std::error_code ec;
+    fs::create_directories(home / ".config/systemd/user/default.target.wants", ec);
+    fs::create_symlink("../sync.service", home / ".config/systemd/user/default.target.wants/sync.service", ec);
+    ok &= !ec;
+    ok &= put(home, ".local/share/fonts/Fixture Sans.otf", 20000);
+    return ok;
+}
+
 int main(int argc, char** argv) {
     // `--make-fixture DIR`: build the fixture home for an Xvfb drive, then stop.
     if (argc == 3 && std::string(argv[1]) == "--make-fixture") {
@@ -369,7 +390,8 @@ int main(int argc, char** argv) {
                         make_dev_fixture(argv[2], std::string(argv[2]) + "_remotes") &&   // s007
                         make_dups_fixture(argv[2]) &&                                       // s008
                         make_archive_fixture(argv[2]) &&                                    // s009
-                        make_organize_fixture(argv[2]);                                     // s010
+                        make_organize_fixture(argv[2]) &&                                   // s010
+                        make_profile_fixture(argv[2]);                                      // s012
         std::cout << (ok ? "fixture: " : "fixture FAILED (exists and not empty?): ") << argv[2] << "\n";
         return ok ? 0 : 1;
     }
@@ -2268,6 +2290,143 @@ int main(int argc, char** argv) {
                   st.size() == 5 && std::none_of(st.begin(), st.end(), [](auto& x) { return x.enabled; }) &&
                   rl::problem(st[0], H).empty(), rl::problem(st[0], H));
         }
+        fs::remove_all(home, ec);
+    }
+
+    // -- Profile backup: find (read-only) -> plan (MakeDir + Copy + Write) -> door (s012a)
+    {
+        std::cout << "\n-- profile --\n";
+        namespace pr = core::profile;
+        namespace dr = core::door;
+        const fs::path home = fs::temp_directory_path() / "rouster_selftest_profile";
+        std::error_code ec;
+        fs::remove_all(home, ec);
+        fs::create_directories(home / ".local/share/Trash/files", ec);
+        fs::create_directories(home / ".local/share/Trash/info", ec);
+        fs::create_directories(home / ".local/share/rouster", ec);
+        const std::string H = home.string();
+        check("profile: fixture", make_profile_fixture(home));
+        put(home, "fixes/.bashrc", 10);          // never gathered: not a dotfile path
+        put(home, "Documents/letter.odt", 3000); // your files: not a profile
+
+        std::vector<std::vector<std::string>> asked;
+        std::string dconf_out = "[org/gnome/desktop/interface]\ncolor-scheme='prefer-dark'\n";
+        const pr::Runner fake = [&](const std::vector<std::string>& a) {
+            asked.push_back(a);
+            core::vcs::Run r;
+            if (a[0] == "dconf") { r.code = 0; r.out = dconf_out; }
+            else if (a[0] == "dnf") { r.code = 127; }
+            else if (a[0] == "flatpak") { r.code = 0; r.out = "org.gnome.Fixture\tflathub\tuser\n"; }
+            return r;
+        };
+        check("profile: bundle name -- host and minute, unsafe characters made safe",
+              pr::bundle_name("my box/1", 0).rfind("my-box-1-", 0) == 0 && pr::bundle_name("", 0).rfind("host-", 0) == 0);
+
+        const std::string before = files_snapshot(home);
+        pr::Found f = pr::find(H, fake);
+        check("profile: find changes nothing", files_snapshot(home) == before && f.refused.empty());
+        std::set<std::string> dests;
+        for (const auto& it : f.items) dests.insert(it.dest);
+        const std::set<std::string> want = {"home/.bashrc", "home/.gitconfig", "home/.ssh/config", "gnome/dconf.ini",
+            "gnome/extensions.txt", "home/.config/autostart/notes.desktop", "home/.config/systemd/user/sync.service",
+            "units/enabled.txt", "home/.local/share/fonts/Fixture Sans.otf", "packages/flatpak.txt"};
+        std::string got;
+        for (const auto& d : dests) got += d + " ";
+        check("profile: exactly the set-up -- dotfiles, dconf, extensions list, autostart, units, fonts, flatpak",
+              dests == want, got);
+        const auto item = [&](const std::string& d) -> pr::Item* {
+            for (auto& it : f.items) if (it.dest == d) return &it;
+            return nullptr;
+        };
+        check("profile: never the ssh key, never the extension's files, never your documents",
+              !dests.count("home/.ssh/id_ed25519") && !dests.count("home/Documents/letter.odt") &&
+              !dests.count("home/.local/share/gnome-shell/extensions/dash@fixture/metadata.json"));
+        check("profile: ~/.ssh/config is READ (protected folder), the rest are copied",
+              item("home/.ssh/config") && item("home/.ssh/config")->read && item("home/.bashrc") &&
+              !item("home/.bashrc")->read && !item("home/.bashrc")->made);
+        check("profile: the extension listed by uuid and name",
+              item("gnome/extensions.txt") && item("gnome/extensions.txt")->content.find("dash@fixture\tDash Fixture\t7") != std::string::npos);
+        check("profile: the enabled unit listed from its link",
+              item("units/enabled.txt") &&
+              item("units/enabled.txt")->content.find("default.target.wants/sync.service -> ../sync.service") != std::string::npos);
+        bool cache_only = false;
+        for (const auto& a : asked) if (a[0] == "dnf") cache_only = a.size() > 1 && a[1] == "-C";
+        check("profile: dnf asked cache-only; missing dnf is a note, not a failure",
+              cache_only && std::find(f.notes.begin(), f.notes.end(), "dnf: not installed") != f.notes.end());
+        check("profile: everything pre-checked", std::all_of(f.items.begin(), f.items.end(), [](auto& it) { return it.checked; }));
+
+        dr::Door door(H, H + "/.local/share/rouster");
+        door.load();
+        item("home/.gitconfig")->checked = false;
+        const std::int64_t now = 1800000000;
+        std::string bundle;
+        std::vector<std::string> dropped;
+        dr::Plan p = pr::plan(H, f, "custom Nautilus: rebuild from ~/Develop/nautilus", now, bundle, dropped);
+        std::size_t mk = 0, cp = 0, wr = 0;
+        for (const auto& a : p.actions)
+            (a.verb == dr::Verb::MakeDir ? mk : a.verb == dr::Verb::Copy ? cp : wr)++;
+        const std::string B = H + "/Archive/Profile/" + pr::bundle_name(f.host, now);
+        check("profile: plan -- ~/Archive, Profile, the bundle first; then its folders; a Copy per file, a Write per text",
+              p.actions.size() > 3 && p.actions[0].to == H + "/Archive" && p.actions[1].to == H + "/Archive/Profile" &&
+              p.actions[2].to == B && bundle == B && cp == 4 && wr == 7 && dropped.empty(),
+              std::to_string(mk) + " mk, " + std::to_string(cp) + " cp, " + std::to_string(wr) + " wr");
+        check("profile: the unchecked item is not in the plan",
+              std::none_of(p.actions.begin(), p.actions.end(), [](auto& a) { return a.to.ends_with("/.gitconfig"); }));
+        check("profile: the door refuses it unpreviewed", !door.run(p).ok && files_snapshot(home) == before);
+        p.previewed = true;
+        auto r = door.run(p);
+        const auto read_all = [](const fs::path& x) {
+            std::ifstream in(x, std::ios::binary);
+            std::ostringstream ss;
+            ss << in.rdbuf();
+            return ss.str();
+        };
+        check("profile: run -> the bundle holds each file's exact bytes, the dump, the notes, PROFILE.txt",
+              r.ok && read_all(B + "/home/.bashrc") == read_all(home / ".bashrc") &&
+              read_all(B + "/home/.ssh/config") == read_all(home / ".ssh/config") &&
+              read_all(B + "/home/.local/share/fonts/Fixture Sans.otf") == read_all(home / ".local/share/fonts/Fixture Sans.otf") &&
+              read_all(B + "/gnome/dconf.ini") == dconf_out && read_all(B + "/NOTES.md").find("Nautilus") != std::string::npos &&
+              read_all(B + "/PROFILE.txt").find("home/.ssh/config  <-  ~/.ssh/config") != std::string::npos &&
+              read_all(B + "/PROFILE.txt").find("dnf: not installed") != std::string::npos,
+              r.messages.empty() ? "" : r.messages.front());
+        const auto outside = [](const std::string& snap, const char* skip) {
+            std::istringstream in(snap);
+            std::string o;
+            for (std::string l; std::getline(in, l);)
+                if (l.find(skip) == std::string::npos) o += l + "\n";
+            return o;
+        };
+        check("profile: ...and every source is exactly as it was", outside(files_snapshot(home), "/Archive") == before);
+        check("profile: it is one step", door.batches().size() == 1);
+
+        pr::Found f2 = pr::find(H, fake);
+        check("profile: Look again lists the bundle", f2.bundles.size() == 1 && f2.bundles[0] == pr::bundle_name(f.host, now));
+        std::string b2;
+        std::vector<std::string> d2;
+        dr::Plan p2 = pr::plan(H, f2, "", now, b2, d2);
+        check("profile: same minute again -> -2, and no MakeDir for what is there",
+              b2 == B + "-2" && p2.actions[0].to == B + "-2" &&
+              std::none_of(p2.actions.begin(), p2.actions.end(), [](auto& a) { return a.to.ends_with("/NOTES.md"); }));
+
+        auto u = door.undo();
+        check("profile: undo -> exact (the bundle, emptied, went to the Trash)",
+              u.ok && outside(files_snapshot(home), "/.local/share/Trash/") == outside(before, "/.local/share/Trash/"),
+              u.messages.empty() ? "" : u.messages.front());
+
+        put_bytes(home, ".bashrc", "# changed after Look\n");
+        std::string b3;
+        std::vector<std::string> d3;
+        dr::Plan p3 = pr::plan(H, f, "", now, b3, d3);
+        check("profile: a file changed since Look is left out, and said",
+              d3.size() == 1 && d3[0].find(".bashrc") != std::string::npos &&
+              std::none_of(p3.actions.begin(), p3.actions.end(), [](auto& a) { return a.to.ends_with("/.bashrc"); }));
+
+        dconf_out.assign(dr::kWriteMax + 1, 'x');
+        pr::Found f4 = pr::find(H, fake);
+        bool no_dump = true;
+        for (const auto& it : f4.items) if (it.dest == "gnome/dconf.ini") no_dump = false;
+        check("profile: a dump too big to write is left out with a note", no_dump && !f4.notes.empty());
+        check("profile: refused -- not a home", !pr::find(H + "/nope", fake).refused.empty());
         fs::remove_all(home, ec);
     }
 

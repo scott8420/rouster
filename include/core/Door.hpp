@@ -70,7 +70,7 @@ bool creates(Verb v);            // Write, Clone, MakeDir, Copy: `to` is made (C
 // checked to be one step, and undone back to the exact tree.
 const std::vector<Verb>& verbs();
 inline constexpr int kVerbCount = 7;
-inline constexpr std::size_t kWriteMax = 64 * 1024;   // Write is for small notes (RESTORE.txt)
+inline constexpr std::size_t kWriteMax = 4 * 1024 * 1024;   // Write is for text Rouster made (RESTORE.txt, a dconf dump): 4 MiB (64 KB until s012)
 
 struct Action {
     Verb        verb = Verb::Trash;

@@ -319,7 +319,7 @@ door::Plan new_project(const std::string& home, const Template& t, const Values&
         if (isdir) { plan.actions.push_back(make_dir(to, "from the template")); continue; }
         const std::string src = t.path + "/" + rel;
         std::string body;
-        bool text = read_small(src, body, door::kWriteMax) && body.find('\0') == std::string::npos;
+        bool text = read_small(src, body, 64 * 1024) && body.find('\0') == std::string::npos;
         bool has = false;
         for (const auto& tk : tokens()) if (body.find(tk) != std::string::npos) has = true;
         door::Action a;

@@ -38,6 +38,10 @@ void Shell::bind_actions() {  // bindings: actions + recents group
     m_act_ar_cancel->set_enabled(false);
     m_act_ar_run->set_enabled(false);
     add_action("go-archive",    [this]() { go_to("archive"); });
+    m_act_pr_find   = add_action("profile-find",   sigc::mem_fun(*this, &Shell::on_profile_find));
+    m_act_pr_run    = add_action("profile-run",    sigc::mem_fun(*this, &Shell::on_profile_run));
+    m_act_pr_run->set_enabled(false);
+    add_action("go-profile",    [this]() { go_to("profile"); });
     add_action("preflight",     sigc::mem_fun(*this, &Shell::on_preflight));
     add_action("dump-registry", sigc::mem_fun(*this, &Shell::on_dump_registry));
     add_action("about",         sigc::mem_fun(*this, &Shell::on_about));
