@@ -21,6 +21,7 @@
     <file preprocess="xml-stripblanks" alias="rouster-hero-sweep.svg">icons/scalable/apps/rouster-hero-sweep.svg</file>
     <file preprocess="xml-stripblanks" alias="rouster-hero-preflight.svg">icons/scalable/apps/rouster-hero-preflight.svg</file>
     <file preprocess="xml-stripblanks" alias="rouster-hero-activity.svg">icons/scalable/apps/rouster-hero-activity.svg</file>
+    <file preprocess="xml-stripblanks" alias="rouster-hero-logo.svg">icons/scalable/apps/rouster-hero-logo.svg</file>
     <file preprocess="xml-stripblanks" alias="rouster-hero-done.svg">icons/scalable/apps/rouster-hero-done.svg</file>
   </gresource>
   <gresource prefix="/io/github/scott8420/Rouster">

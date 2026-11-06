@@ -34,7 +34,7 @@ AboutWindow::AboutWindow(Gtk::Window& parent) {
     // Hero logo: symbolic icon from the gresource bundle, recoloured to the
     // theme foreground by GTK. Proof the resource pipeline resolved.
     auto* logo = Gtk::make_managed<widgets::Image>(widgets::unregistered, "shell.about.logo");
-    logo->set_from_icon_name("rouster-logo-symbolic");
+    logo->set_from_icon_name("rouster-hero-logo");   // the colour pie (s006)
     logo->set_pixel_size(88);
     page->append(*logo);
 
@@ -58,7 +58,7 @@ AboutWindow::AboutWindow(Gtk::Window& parent) {
     note->set_markup(
         "This is the dialog-lifetime exemplar: a custom <tt>Gtk::Window</tt> "
         "(<tt>Gtk::AboutDialog</tt> is deprecated in GTK4), opened as a "
-        "hide-on-close singleton. The logo above is a symbolic icon resolved "
+        "hide-on-close singleton. The logo above is an icon resolved "
         "from the compiled-in gresource bundle.");
     page->append(*note);
 
