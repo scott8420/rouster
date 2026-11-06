@@ -194,6 +194,12 @@ bool Door::load() {
 std::string Door::refusal(const Action& a) const { return refusal(a, {}); }
 
 std::string Door::refusal(const Action& a, const std::vector<std::string>& made) const {
+    return refusal(a, made, {});
+}
+
+std::string Door::refusal(const Action& a, const std::vector<std::string>& made,
+                          const std::vector<std::string>& freed) const {
+    const auto was_freed = [&](const std::string& p) { return std::find(freed.begin(), freed.end(), p) != freed.end(); };
     const auto planned = [&](const std::string& p) { return std::find(made.begin(), made.end(), p) != made.end(); };
     const auto bad = [](const std::string& p) {
         return p.empty() || p[0] != '/' || fs::path(p).lexically_normal().string() != p ||
@@ -245,7 +251,7 @@ std::string Door::refusal(const Action& a, const std::vector<std::string>& made)
         if (inside(a.to, m_data) || inside(m_data, a.to)) return "Rouster's own records: " + a.to;
         if (auto w = walk(a.to, true); !w.empty()) return w;
         struct stat st{};
-        if (::lstat(a.to.c_str(), &st) == 0 || planned(a.to)) return "already exists: " + a.to;
+        if ((::lstat(a.to.c_str(), &st) == 0 && !was_freed(a.to)) || planned(a.to)) return "already exists: " + a.to;
         const std::string parent = fs::path(a.to).parent_path().string();
         if (!planned(parent) && (::stat(parent.c_str(), &st) != 0 || !S_ISDIR(st.st_mode))) return "folder missing: " + parent;
         if (a.verb == Verb::MakeDir || a.verb == Verb::Copy) return {};
@@ -461,10 +467,11 @@ Result Door::run(const Plan& plan) {
 
     // Policy first, for the WHOLE plan, before anything moves.
     {
-        std::vector<std::string> made;
+        std::vector<std::string> made, freed;
         for (const auto& a : plan.actions) {
-            if (auto why = refusal(a, made); !why.empty()) res.messages.push_back("refused: " + why);
+            if (auto why = refusal(a, made, freed); !why.empty()) res.messages.push_back("refused: " + why);
             if (a.verb == Verb::MakeDir) made.push_back(a.to);
+            if (a.verb == Verb::Trash) freed.push_back(a.from);   // a later create may take its place (s012b restore)
         }
     }
     if (!res.messages.empty()) return res;

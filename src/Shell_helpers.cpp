@@ -12,6 +12,7 @@
 #include <gtkmm/stringlist.h>
 #include <gtkmm/listboxrow.h>
 #include <gtkmm/expander.h>
+#include <gdkmm/clipboard.h>
 #include <gtkmm/image.h>
 #include <gtkmm/flowboxchild.h>
 #include <glibmm/main.h>
@@ -1469,6 +1470,147 @@ void Shell::profile_gate() {  // helper: the act button's label + whether it may
     m_pr_gate.set_text(n ? "One new folder in ~/Archive/Profile; nothing else changes. Undo sends it to the Trash."
                          : "Nothing checked.");
     if (m_act_pr_run) m_act_pr_run->set_enabled(n > 0 && !busy);
+}
+
+void Shell::paint_profile_start() {  // helper: the earlier backups, each with Restore...
+    while (auto* c = m_pr_backups.get_first_child()) m_pr_backups.remove(*c);
+    const auto bs = core::profile::bundles(m_home);
+    if (bs.empty()) return;
+    auto card = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 4);
+    card->add_css_class("card");
+    card->append(*text(bs.size() == 1 ? "Your backup" : "Your backups", "card-title"));
+    for (const auto& n : bs) {
+        auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 12);
+        row->add_css_class("sweep-row");
+        auto name = text("~/" + std::string(core::profile::kRoot) + "/" + n, "detail-path");
+        name->set_hexpand(true);
+        name->set_ellipsize(Pango::EllipsizeMode::MIDDLE);
+        row->append(*name);
+        auto b = Gtk::make_managed<Gtk::Button>("Restore…");
+        b->add_css_class("ghost");
+        b->signal_clicked().connect([this, n] { on_profile_look_back(n); });
+        row->append(*b);
+        card->append(*row);
+    }
+    m_pr_backups.append(*card);
+}
+
+void Shell::paint_profile_restore() {  // helper: the restore preview -- files by state, diffs, commands
+    namespace pr = core::profile;
+    while (auto* c = m_pr_rs_list.get_first_child()) m_pr_rs_list.remove(*c);
+    auto& files = m_pr_rs.files;
+    std::size_t same = 0, prot = 0, blocked = 0;
+    for (const auto& b : files) {
+        if (b.state == pr::State::Same) ++same;
+        if (b.state == pr::State::Protected) ++prot;
+        if (b.state == pr::State::Blocked) ++blocked;
+    }
+    auto card = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 4);
+    card->add_css_class("card");
+    card->append(*text("Files", "card-title"));
+    auto why = text("Missing ones are checked. One that differs is not: read the difference first. Restoring it "
+                    "sends the one there now to the Trash and puts the backup's in its place -- Undo swaps them back.", "dim");
+    why->set_wrap(true);
+    why->set_margin_bottom(4);
+    card->append(*why);
+    std::size_t shown = 0;
+    for (std::size_t i = 0; i < files.size(); ++i) {
+        const auto& b = files[i];
+        if (b.state != pr::State::Missing && b.state != pr::State::Differs) continue;
+        if (shown++ == kProfileShown) {
+            card->append(*text("... more not shown (and not checked)", "dim"));
+            for (std::size_t k = i; k < files.size(); ++k) files[k].checked = false;
+            break;
+        }
+        auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 12);
+        row->add_css_class("sweep-row");
+        auto cb = Gtk::make_managed<Gtk::CheckButton>();
+        cb->set_active(b.checked);
+        cb->signal_toggled().connect([this, cb, i] {
+            if (i < m_pr_rs.files.size()) m_pr_rs.files[i].checked = cb->get_active();
+            profile_restore_gate();
+        });
+        auto chip = text(b.state == pr::State::Missing ? "missing" : "differs", "status-chip", 0.5f);
+        chip->add_css_class(b.state == pr::State::Missing ? "pf-green" : "pf-amber");
+        chip->set_width_chars(9);
+        auto path = text("~/" + b.rel, "detail-path");
+        path->set_hexpand(true);
+        path->set_ellipsize(Pango::EllipsizeMode::MIDDLE);
+        auto sz = text(scan::human_bytes(b.bytes), "detail-size", 1.0f);
+        sz->set_width_chars(9);
+        row->append(*cb);
+        row->append(*chip);
+        row->append(*path);
+        row->append(*sz);
+        card->append(*row);
+        if (b.state == pr::State::Differs) {
+            auto ex = Gtk::make_managed<Gtk::Expander>("The difference");
+            ex->set_margin_start(40);
+            auto d = text(b.diff, "pr-diff");
+            d->set_selectable(true);
+            d->set_wrap(false);
+            ex->set_child(*d);
+            card->append(*ex);
+        }
+    }
+    if (!shown) card->append(*text("Nothing to put back -- every file is as the backup has it.", "dim"));
+    std::string foot;
+    if (same) foot += with_commas(same) + (same == 1 ? " file is" : " files are") + " the same as now. ";
+    if (prot) foot += with_commas(prot) + " in a protected folder (never written -- see below). ";
+    if (blocked) foot += with_commas(blocked) + " blocked (a folder or link is where the file would go). ";
+    if (!foot.empty()) card->append(*text(foot, "dim"));
+    m_pr_rs_list.append(*card);
+
+    if (!m_pr_rs.commands.empty() || !m_pr_rs.notes.empty()) {
+        auto cc = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 6);
+        cc->add_css_class("card");
+        cc->append(*text("To run yourself", "card-title"));
+        auto w = text("Rouster doesn't install packages or change settings it can't undo. Each line is ready to paste "
+                      "in a terminal.", "dim");
+        w->set_wrap(true);
+        cc->append(*w);
+        for (const auto& c : m_pr_rs.commands) {
+            auto what = text(c.what, nullptr);
+            what->set_margin_top(6);
+            what->set_wrap(true);
+            cc->append(*what);
+            auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 10);
+            auto line = text(c.line, "pr-diff");
+            line->set_selectable(true);
+            line->set_wrap(true);
+            line->set_wrap_mode(Pango::WrapMode::CHAR);
+            line->set_hexpand(true);
+            row->append(*line);
+            auto copy_btn = Gtk::make_managed<Gtk::Button>("Copy");
+            copy_btn->add_css_class("ghost");
+            copy_btn->set_valign(Gtk::Align::START);
+            copy_btn->signal_clicked().connect([this, l = c.line] { get_clipboard()->set_text(l); });
+            row->append(*copy_btn);
+            cc->append(*row);
+        }
+        for (const auto& n : m_pr_rs.notes) cc->append(*text(n, "dim"));
+        m_pr_rs_list.append(*cc);
+    }
+    profile_restore_gate();
+}
+
+void Shell::profile_restore_gate() {  // helper: the restore button's label + whether it may act
+    std::size_t n = 0, swaps = 0;
+    for (const auto& b : m_pr_rs.files)
+        if (b.checked && (b.state == core::profile::State::Missing || b.state == core::profile::State::Differs)) {
+            ++n;
+            if (b.state == core::profile::State::Differs) ++swaps;
+        }
+    m_pr_rs_go.set_label(n ? "Restore " + with_commas(n) + (n == 1 ? " file" : " files") : "Restore");
+    const bool busy = m_pr_worker.joinable() || door_busy();
+    if (m_pf_red)
+        m_pr_rs_gate.set_text("Preflight has a red check. Restore waits until it clears -- see Preflight.");
+    else if (!n)
+        m_pr_rs_gate.set_text("Nothing checked.");
+    else
+        m_pr_rs_gate.set_text(swaps ? with_commas(swaps) + " replaced (the one there goes to the Trash); one step, Undo swaps back."
+                                    : "Nothing there is replaced; one step, Undo takes it back.");
+    m_pr_rs_go.set_sensitive(n > 0 && !busy && !m_pf_red);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -694,7 +694,13 @@ void Shell::build_profile_page() {  // zone: Profile backup
     m_pr_find.set_margin_top(18);
     m_pr_find.set_action_name("win.profile-find");
     start->append(m_pr_find);
-    m_pr_states.add(*start, "start");
+    m_pr_backups.set_margin_top(18);
+    m_pr_backups.set_size_request(520, -1);
+    start->append(m_pr_backups);
+    auto start_scroll = Gtk::make_managed<Gtk::ScrolledWindow>();
+    start_scroll->set_policy(Gtk::PolicyType::NEVER, Gtk::PolicyType::AUTOMATIC);
+    start_scroll->set_child(*start);
+    m_pr_states.add(*start_scroll, "start");
 
     // running
     auto run = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 12);
@@ -799,9 +805,57 @@ void Shell::build_profile_page() {  // zone: Profile backup
     auto more = Gtk::make_managed<Gtk::Button>("Look again");
     more->add_css_class("ghost");
     more->set_action_name("win.profile-find");
-    for (auto* b : {open, undo, act, more}) btns->append(*b);
+    auto list = Gtk::make_managed<Gtk::Button>("Your backups");
+    list->add_css_class("ghost");
+    list->signal_clicked().connect([this] { paint_profile_start(); m_pr_states.set_visible_child("start"); });
+    for (auto* b : {open, undo, act, more, list}) btns->append(*b);
     done->append(*btns);
     m_pr_states.add(*done, "done");
+
+    // restore (s012b): the look back at one backup -- THE PREVIEW of a restore.
+    auto rs_page = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 0);
+    auto rs_scroll = Gtk::make_managed<Gtk::ScrolledWindow>();
+    rs_scroll->set_policy(Gtk::PolicyType::NEVER, Gtk::PolicyType::AUTOMATIC);
+    rs_scroll->set_vexpand(true);
+    auto rs = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 14);
+    rs->set_margin_start(32);
+    rs->set_margin_end(32);
+    rs->set_margin_top(12);
+    rs->set_margin_bottom(16);
+    auto rs_head = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 20);
+    rs_head->append(*hero("rouster-hero-profile", 88));
+    auto rs_words = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 2);
+    rs_words->set_valign(Gtk::Align::CENTER);
+    rs_words->set_hexpand(true);
+    m_pr_rs_title.add_css_class("hero-big");
+    m_pr_rs_title.set_xalign(0.0f);
+    m_pr_rs_sub.add_css_class("hero-caption");
+    m_pr_rs_sub.set_xalign(0.0f);
+    m_pr_rs_sub.set_wrap(true);
+    rs_words->append(m_pr_rs_title);
+    rs_words->append(m_pr_rs_sub);
+    rs_head->append(*rs_words);
+    auto rs_back = Gtk::make_managed<Gtk::Button>("Back");
+    rs_back->add_css_class("ghost");
+    rs_back->set_valign(Gtk::Align::CENTER);
+    rs_back->signal_clicked().connect([this] { paint_profile_start(); m_pr_states.set_visible_child("start"); });
+    rs_head->append(*rs_back);
+    rs->append(*rs_head);
+    rs->append(m_pr_rs_list);
+    rs_scroll->set_child(*rs);
+    rs_page->append(*rs_scroll);
+    auto rs_bar = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 16);
+    rs_bar->add_css_class("act-bar");
+    m_pr_rs_gate.add_css_class("dim");
+    m_pr_rs_gate.set_xalign(0.0f);
+    m_pr_rs_gate.set_hexpand(true);
+    m_pr_rs_gate.set_wrap(true);
+    rs_bar->append(m_pr_rs_gate);
+    m_pr_rs_go.add_css_class("act");
+    m_pr_rs_go.signal_clicked().connect([this] { on_profile_restore(); });
+    rs_bar->append(m_pr_rs_go);
+    rs_page->append(*rs_bar);
+    m_pr_states.add(*rs_page, "restore");
 
     m_pr_page.append(m_pr_states);
     m_stack.add(m_pr_page, "profile", "Profile backup");

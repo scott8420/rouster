@@ -133,7 +133,10 @@ private:
     void on_profile_find();                      // category: handler: gather the set-up (worker: dconf, dnf, flatpak)
     void on_profile_found();                     // category: handler: the worker finished (Dispatcher, UI thread)
     void on_profile_run();                       // category: handler: checked rows -> a plan (one new folder) -> the door
-    void on_profile_open();                      // category: handler: open the bundle in Files                       // category: handler: checked rows -> a plan (archive or put back) -> the door
+    void on_profile_open();                      // category: handler: open the bundle in Files
+    void on_profile_look_back(const std::string& name);   // category: handler: a backup's Restore... -> worker: diff against home
+    void on_profile_looked();                    // category: handler: the restore look finished (Dispatcher, UI thread)
+    void on_profile_restore();                   // category: handler: checked rows -> Trash + Copy plan -> the door                       // category: handler: checked rows -> a plan (archive or put back) -> the door
     void on_pj_home();                           // category: handler: back to templates + projects (re-read)
     void on_pj_new(std::size_t tmpl);            // category: handler: a template's New project... -> the form
     void on_pj_form();                           // category: handler: id / title typed -> the plan again
@@ -199,7 +202,10 @@ private:
     void archive_gate();
     void stop_profile();                         // category: helper: cancel + join (close, dtor)
     void paint_profile();                        // category: helper: cards per group, rows with checks, what wasn't gathered
-    void profile_gate();                         // category: helper: the act button's label + whether it may act                         // category: helper: the act button's label + whether it may act
+    void profile_gate();                         // category: helper: the act button's label + whether it may act
+    void paint_profile_start();                  // category: helper: the earlier backups, each with Restore...
+    void paint_profile_restore();                // category: helper: the restore preview -- files by state, diffs, commands
+    void profile_restore_gate();                 // category: helper: the restore button's label + whether it may act                         // category: helper: the act button's label + whether it may act
     void paint_projects();                       // category: helper: the home state -- templates, projects
     void paint_pj_plan(Gtk::Box& box, const core::door::Plan& plan);   // category: helper: a plan, step by step (the preview)
     void paint_pj_project();                     // category: helper: the open project -- the queue, what's in it
@@ -408,6 +414,16 @@ private:
     std::atomic<bool>                 m_pr_cancel{false};
     core::profile::Found              m_pr_found;
     Glib::RefPtr<Gio::SimpleAction>   m_act_pr_find, m_act_pr_run;
+    // Restore (s012b): the "restore" state.
+    widgets::Box     m_pr_backups;                // start page: earlier backups (painted)
+    widgets::Label   m_pr_rs_title;
+    widgets::Label   m_pr_rs_sub;
+    widgets::Box     m_pr_rs_list;
+    widgets::Label   m_pr_rs_gate;
+    widgets::Button  m_pr_rs_go;
+    core::profile::Restore m_pr_rs;               // checks live here (UI thread only)
+    core::profile::Restore m_pr_rs_found;         // written by the worker
+    Glib::Dispatcher m_profile_looked;
 
     // Projects (s010): home | new | preview | project | done.
     widgets::Box     m_pj_page;

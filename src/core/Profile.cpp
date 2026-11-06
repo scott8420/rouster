@@ -10,6 +10,7 @@
 #include <fstream>
 #include <map>
 #include <set>
+#include <cstring>
 #include <sstream>
 
 #include <dirent.h>
@@ -333,14 +334,7 @@ Found find(const std::string& home, const Runner& run) {
                      [](const Item& a, const Item& b) { return static_cast<int>(a.group) < static_cast<int>(b.group); });
     for (const auto& it : f.items) f.bytes += it.bytes;
 
-    // Earlier bundles, newest first.
-    std::vector<std::pair<std::int64_t, std::string>> bs;
-    for (const auto& n : list_dir(home + "/" + kRoot)) {
-        struct stat st{};
-        if (::lstat((home + "/" + kRoot + "/" + n + "/PROFILE.txt").c_str(), &st) == 0) bs.emplace_back(ns(st), n);
-    }
-    std::sort(bs.rbegin(), bs.rend());
-    for (auto& [t, n] : bs) f.bundles.push_back(n);
+    f.bundles = bundles(home);
     return f;
 }
 
@@ -466,6 +460,289 @@ door::Plan plan(const std::string& home, const Found& found, const std::string& 
     t.bytes = t.content.size();
     t.reason = "what is in this backup, and how to put it back";
     p.actions.push_back(std::move(t));
+    return p;
+}
+
+// ── Restore (s012b) ─────────────────────────────────────────────────────────
+
+const char* state_name(State st) {
+    switch (st) {
+    case State::Same:      return "same";
+    case State::Missing:   return "missing";
+    case State::Differs:   return "differs";
+    case State::Protected: return "protected";
+    case State::Blocked:   return "blocked";
+    }
+    return "?";
+}
+
+std::vector<std::string> bundles(const std::string& home) {
+    std::vector<std::pair<std::int64_t, std::string>> bs;
+    for (const auto& n : list_dir(home + "/" + kRoot)) {
+        struct stat st{};
+        if (::lstat((home + "/" + kRoot + "/" + n + "/PROFILE.txt").c_str(), &st) == 0 && S_ISREG(st.st_mode))
+            bs.emplace_back(ns(st), n);
+    }
+    std::sort(bs.rbegin(), bs.rend());
+    std::vector<std::string> out;
+    for (auto& [t, n] : bs) out.push_back(n);
+    return out;
+}
+
+namespace {
+
+constexpr std::uint64_t kDiffMax = 256 * 1024;
+
+bool same_bytes(const std::string& a, const std::string& b) {
+    std::ifstream x(a, std::ios::binary), y(b, std::ios::binary);
+    if (!x || !y) return false;
+    char bx[65536], by[65536];
+    while (true) {
+        x.read(bx, sizeof bx);
+        y.read(by, sizeof by);
+        const auto nx = x.gcount(), ny = y.gcount();
+        if (nx != ny || std::memcmp(bx, by, static_cast<std::size_t>(nx)) != 0) return false;
+        if (nx == 0) return true;
+    }
+}
+
+bool texty(const std::string& abs, std::uint64_t size) {
+    if (size > kDiffMax) return false;
+    std::string c;
+    return slurp(abs, c, kDiffMax) && c.find('\0') == std::string::npos;
+}
+
+std::string quote(const std::string& s) {
+    std::string q = "'";
+    for (char c : s) q += c == '\'' ? std::string("'\\''") : std::string(1, c);
+    return q + "'";
+}
+
+std::string read_text(const std::string& abs) {
+    std::string c;
+    slurp(abs, c, 4 * 1024 * 1024);
+    return c;
+}
+
+std::set<std::string> names_of(const std::string& text, std::size_t column) {
+    std::set<std::string> out;
+    for (const auto& l : lines_of(text)) {
+        if (l[0] == '#') continue;
+        std::size_t start = 0;
+        for (std::size_t c = 0; c < column; ++c) {
+            const auto t = l.find('\t', start);
+            if (t == std::string::npos) { start = std::string::npos; break; }
+            start = t + 1;
+        }
+        if (start == std::string::npos) continue;
+        out.insert(trim(l.substr(start, l.find('\t', start) - start)));
+    }
+    return out;
+}
+
+}  // namespace
+
+Restore look_back(const std::string& home, const std::string& bundle, const Runner& run) {
+    Restore r;
+    r.bundle = bundle;
+    const std::string root = home + "/" + kRoot + "/";
+    struct stat st{};
+    if (bundle.rfind(root, 0) != 0 || bundle.find("/..") != std::string::npos ||
+        bundle.find('/', root.size()) != std::string::npos ||
+        ::lstat((bundle + "/PROFILE.txt").c_str(), &st) != 0 || !S_ISREG(st.st_mode)) {
+        r.refused = "not a profile backup: " + bundle;
+        return r;
+    }
+    r.name = bundle.substr(root.size());
+    for (const auto& l : lines_of(read_text(bundle + "/PROFILE.txt"))) {
+        if (l.rfind("host: ", 0) == 0) r.host = l.substr(6);
+        if (l.rfind("made: ", 0) == 0) r.made = l.substr(6);
+    }
+
+    // Files.
+    bool fonts = false;
+    const std::function<void(const std::string&, int)> walk = [&](const std::string& rel, int depth) {
+        for (const auto& n : list_dir(bundle + "/home" + (rel.empty() ? "" : "/" + rel))) {
+            const std::string rr = rel.empty() ? n : rel + "/" + n;
+            const std::string from = bundle + "/home/" + rr;
+            struct stat bs{};
+            if (::lstat(from.c_str(), &bs) != 0) continue;
+            if (S_ISDIR(bs.st_mode)) { if (depth > 0) walk(rr, depth - 1); continue; }
+            if (!S_ISREG(bs.st_mode)) continue;
+            Back b;
+            b.rel = rr;
+            b.from = from;
+            b.bytes = static_cast<std::uint64_t>(bs.st_size);
+            b.from_mtime_ns = ns(bs);
+            const std::string now = home + "/" + rr;
+            struct stat cs{};
+            bool blocked_parent = false;
+            for (auto q = rr.find('/'); q != std::string::npos; q = rr.find('/', q + 1)) {
+                struct stat ps{};
+                if (::lstat((home + "/" + rr.substr(0, q)).c_str(), &ps) == 0 && !S_ISDIR(ps.st_mode)) blocked_parent = true;
+            }
+            if (is_protected(rr))   // never written; listed (with the line to do it yourself) only when it differs
+                b.state = (::lstat(now.c_str(), &cs) == 0 && S_ISREG(cs.st_mode) && same_bytes(now, from)) ? State::Same : State::Protected;
+            else if (blocked_parent) b.state = State::Blocked;
+            else if (::lstat(now.c_str(), &cs) != 0) { b.state = State::Missing; b.checked = true; }
+            else if (!S_ISREG(cs.st_mode)) b.state = State::Blocked;
+            else if (cs.st_size == bs.st_size && same_bytes(now, from)) b.state = State::Same;
+            else {
+                b.state = State::Differs;
+                b.ino = cs.st_ino;
+                b.mtime_ns = ns(cs);
+                if (texty(now, static_cast<std::uint64_t>(cs.st_size)) && texty(from, b.bytes)) {
+                    const auto d = run({"diff", "-u", "--label", "now: ~/" + rr, "--label", "backup", now, from});
+                    b.diff = d.code == 1 ? d.out : d.code == 127 ? "(diff is not installed)" : "(diff failed)";
+                } else {
+                    b.diff = "(binary or large -- not shown)";
+                }
+            }
+            if ((b.state == State::Missing || b.state == State::Differs) && rr.rfind(".local/share/fonts/", 0) == 0) fonts = true;
+            r.files.push_back(std::move(b));
+        }
+    };
+    walk("", 12);
+    for (const auto& b : r.files)
+        if (b.state == State::Protected)
+            r.commands.push_back({"~/" + b.rel + " -- Rouster never writes in a protected folder",
+                                  "cp -i " + quote(b.from) + " ~/" + quote(b.rel)});
+
+    // GNOME settings: until s012d, the line to run.
+    if (::lstat((bundle + "/gnome/dconf.ini").c_str(), &st) == 0) {
+        const auto d = run({"dconf", "dump", "/"});
+        if (d.code == 0 && d.out == read_text(bundle + "/gnome/dconf.ini"))
+            r.notes.push_back("GNOME settings: the same as now");
+        else
+            r.commands.push_back({"GNOME settings (Rouster's own, with Undo, comes in s012d)",
+                                  "dconf load / < " + quote(bundle + "/gnome/dconf.ini")});
+    }
+    if (::lstat((bundle + "/gnome/extensions.txt").c_str(), &st) == 0) {
+        std::string missing;
+        std::size_t n = 0;
+        for (const auto& uuid : names_of(read_text(bundle + "/gnome/extensions.txt"), 0))
+            if (::lstat((home + "/.local/share/gnome-shell/extensions/" + uuid).c_str(), &st) != 0) {
+                missing += (missing.empty() ? "" : " ") + uuid;
+                ++n;
+            }
+        if (n)
+            r.commands.push_back({"Extensions: " + std::to_string(n) + " not installed -- from extensions.gnome.org, or:",
+                                  "for e in " + missing + "; do gdbus call --session --dest org.gnome.Shell.Extensions "
+                                  "--object-path /org/gnome/Shell/Extensions --method "
+                                  "org.gnome.Shell.Extensions.InstallRemoteExtension \"$e\"; done"});
+    }
+
+    // User services: enable what was enabled.
+    if (::lstat((bundle + "/units/enabled.txt").c_str(), &st) == 0) {
+        std::set<std::string> enable, mask;
+        for (const auto& l : lines_of(read_text(bundle + "/units/enabled.txt"))) {
+            if (l[0] == '#') continue;
+            const auto arrow = l.find(" -> ");
+            if (arrow == std::string::npos) continue;
+            const std::string where = l.substr(0, arrow), to = l.substr(arrow + 4);
+            const std::string unit = where.substr(where.rfind('/') + 1);
+            if (to == "/dev/null") mask.insert(unit);
+            else if (where.find(".wants/") != std::string::npos || where.find(".requires/") != std::string::npos) enable.insert(unit);
+        }
+        std::string line = "systemctl --user daemon-reload";
+        if (!enable.empty()) { line += " && systemctl --user enable"; for (const auto& u : enable) line += " " + u; }
+        if (!mask.empty()) { line += " && systemctl --user mask"; for (const auto& u : mask) line += " " + u; }
+        if (!enable.empty() || !mask.empty())
+            r.commands.push_back({"User services: enable what was enabled (after the files are back)", line});
+    }
+    if (fonts) r.commands.push_back({"Fonts: after restoring them", "fc-cache -f"});
+
+    // Packages: only what isn't installed now.
+    if (::lstat((bundle + "/packages/dnf.txt").c_str(), &st) == 0) {
+        const auto want = names_of(read_text(bundle + "/packages/dnf.txt"), 0);
+        const auto now = run({"dnf", "-C", "repoquery", "--userinstalled", "--queryformat", "%{name}\\n"});
+        std::set<std::string> have;
+        if (now.code == 0) for (const auto& n : lines_of(now.out)) have.insert(n);
+        else r.notes.push_back("dnf: couldn't list what is installed now -- the line names every package in the backup");
+        std::string line;
+        std::size_t n = 0;
+        for (const auto& w : want) if (!have.count(w)) { line += " " + w; ++n; }
+        if (n) r.commands.push_back({"dnf: " + std::to_string(n) + (n == 1 ? " package" : " packages") + " not installed", "sudo dnf install" + line});
+        else r.notes.push_back("dnf: every package is installed");
+    }
+    if (::lstat((bundle + "/packages/flatpak.txt").c_str(), &st) == 0) {
+        const auto now = run({"flatpak", "list", "--app", "--columns=application"});
+        std::set<std::string> have;
+        if (now.code == 0) for (const auto& n : lines_of(now.out)) have.insert(n);
+        std::size_t n = 0;
+        std::string line;
+        for (const auto& l : lines_of(read_text(bundle + "/packages/flatpak.txt"))) {
+            if (l[0] == '#') continue;
+            std::istringstream in(l);
+            std::string app, origin, inst;
+            std::getline(in, app, '\t');
+            std::getline(in, origin, '\t');
+            std::getline(in, inst, '\t');
+            app = trim(app);
+            if (app.empty() || have.count(app)) continue;
+            line += (line.empty() ? "" : " && ") + std::string("flatpak install -y ") +
+                    (trim(inst) == "user" ? "--user " : "") + quote(trim(origin)) + " " + quote(app);
+            ++n;
+        }
+        if (n) r.commands.push_back({"Flatpak: " + std::to_string(n) + (n == 1 ? " app" : " apps") + " not installed", line});
+        else r.notes.push_back("flatpak: every app is installed");
+    }
+    return r;
+}
+
+door::Plan restore_plan(const std::string& home, const Restore& r, std::vector<std::string>& dropped) {
+    door::Plan p;
+    p.label = "Restore profile: " + r.name;
+    std::vector<const Back*> keep;
+    for (const auto& b : r.files) {
+        if (!b.checked || (b.state != State::Missing && b.state != State::Differs)) continue;
+        struct stat fs_{}, cs{};
+        if (::lstat(b.from.c_str(), &fs_) != 0 || !S_ISREG(fs_.st_mode) || ns(fs_) != b.from_mtime_ns) {
+            dropped.push_back("~/" + b.rel + " -- the backup's copy changed since the look");
+            continue;
+        }
+        const bool there = ::lstat((home + "/" + b.rel).c_str(), &cs) == 0;
+        if (b.state == State::Missing ? there
+                                      : (!there || !S_ISREG(cs.st_mode) || cs.st_ino != b.ino || ns(cs) != b.mtime_ns)) {
+            dropped.push_back("~/" + b.rel + " -- changed since the look");
+            continue;
+        }
+        keep.push_back(&b);
+    }
+    std::set<std::string> dirs;
+    for (const auto* b : keep)
+        for (auto q = b->rel.find('/'); q != std::string::npos; q = b->rel.find('/', q + 1)) {
+            const std::string d = b->rel.substr(0, q);
+            struct stat st{};
+            if (::lstat((home + "/" + d).c_str(), &st) != 0) dirs.insert(d);
+        }
+    std::vector<std::string> ordered(dirs.begin(), dirs.end());
+    std::stable_sort(ordered.begin(), ordered.end(), [](const std::string& a, const std::string& b) {
+        return std::count(a.begin(), a.end(), '/') < std::count(b.begin(), b.end(), '/');
+    });
+    for (const auto& d : ordered) {
+        door::Action a;
+        a.verb = door::Verb::MakeDir;
+        a.to = home + "/" + d;
+        a.reason = "a folder the backup had";
+        p.actions.push_back(std::move(a));
+    }
+    for (const auto* b : keep) {
+        if (b->state == State::Differs) {
+            door::Action t;
+            t.verb = door::Verb::Trash;
+            t.from = home + "/" + b->rel;
+            t.reason = "the one there now -- replaced by the backup's (Undo brings it back)";
+            p.actions.push_back(std::move(t));
+        }
+        door::Action c;
+        c.verb = door::Verb::Copy;
+        c.from = b->from;
+        c.to = home + "/" + b->rel;
+        c.bytes = b->bytes;
+        c.reason = std::string("from the backup (") + state_name(b->state) + " now)";
+        p.actions.push_back(std::move(c));
+    }
     return p;
 }
 

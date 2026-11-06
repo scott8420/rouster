@@ -106,6 +106,12 @@ Shell::Shell()
       m_pr_gate("shell.profile.gate"),
       m_pr_done_big("shell.profile.done_big"),
       m_pr_done_caption("shell.profile.done_caption"),
+      m_pr_backups("shell.profile.backups", Gtk::Orientation::VERTICAL, 6),
+      m_pr_rs_title("shell.profile.rs_title"),
+      m_pr_rs_sub("shell.profile.rs_sub"),
+      m_pr_rs_list("shell.profile.rs_list", Gtk::Orientation::VERTICAL, 10),
+      m_pr_rs_gate("shell.profile.rs_gate"),
+      m_pr_rs_go("shell.profile.rs_go"),
       m_pj_page("shell.projects.page", Gtk::Orientation::VERTICAL),
       m_pj_states("shell.projects.states"),
       m_pj_home("shell.projects.home", Gtk::Orientation::VERTICAL, 14),
@@ -188,6 +194,8 @@ void Shell::build_ui() {
     m_dups_acted.connect(sigc::mem_fun(*this, &Shell::on_dups_acted));
     m_archive_finished.connect(sigc::mem_fun(*this, &Shell::on_archive_found));
     m_profile_finished.connect(sigc::mem_fun(*this, &Shell::on_profile_found));
+    m_profile_looked.connect(sigc::mem_fun(*this, &Shell::on_profile_looked));
+    paint_profile_start();
     m_known = core::load_known(data_dir() + "/known.json");
 
     if (auto lg = log::get(log::Area::Shell)) lg->info("ready -- home is {}", m_home);

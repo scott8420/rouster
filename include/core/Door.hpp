@@ -142,6 +142,10 @@ public:
     std::string refusal(const Action& a) const;
     // ...given the folders earlier MakeDirs in the same plan will make.
     std::string refusal(const Action& a, const std::vector<std::string>& made) const;
+    // ...and the paths earlier Trash actions in the plan free: a create may
+    // take the place of a file the same plan trashes first (s012b, restore).
+    std::string refusal(const Action& a, const std::vector<std::string>& made,
+                        const std::vector<std::string>& freed) const;
 
     Result run(const Plan& plan);
     Result undo();                          // the last batch not yet undone

@@ -2427,6 +2427,96 @@ int main(int argc, char** argv) {
         for (const auto& it : f4.items) if (it.dest == "gnome/dconf.ini") no_dump = false;
         check("profile: a dump too big to write is left out with a note", no_dump && !f4.notes.empty());
         check("profile: refused -- not a home", !pr::find(H + "/nope", fake).refused.empty());
+
+        // -- Restore (s012b): look back at a bundle, diff, Trash + Copy, undo.
+        dconf_out = "[org/gnome/desktop/interface]\ncolor-scheme='prefer-dark'\n";
+        pr::Found f5 = pr::find(H, fake);
+        std::string B5;
+        std::vector<std::string> d5;
+        dr::Plan p5 = pr::plan(H, f5, "", now + 600, B5, d5);
+        p5.previewed = true;
+        check("restore: a fresh backup to restore from", door.run(p5).ok && pr::bundles(H).size() == 1, B5);
+        put_bytes(home, ".bashrc", "# fixture bashrc\nalias ll='ls -la'\n");
+        fs::remove_all(home / ".config/autostart", ec);
+        put_bytes(home, ".ssh/config", "Host gh\n  HostName example.org\n");
+        const pr::Runner fake2 = [&](const std::vector<std::string>& a) {
+            if (a[0] == "diff") return core::vcs::child(a, 10);
+            core::vcs::Run r;
+            if (a[0] == "dconf") { r.code = 0; r.out = dconf_out; }
+            else if (a[0] == "flatpak") { r.code = 0; r.out = "org.other.App\n"; }
+            else r.code = 127;
+            return r;
+        };
+        {
+            const std::string ssh_now = read_all(home / ".ssh/config");
+            put_bytes(home, ".ssh/config", read_all(B5 + "/home/.ssh/config"));
+            pr::Restore same = pr::look_back(H, B5, fake2);
+            bool ok = false;
+            for (const auto& b : same.files) if (b.rel == ".ssh/config") ok = b.state == pr::State::Same;
+            std::string c2;
+            for (const auto& c : same.commands) c2 += c.line;
+            check("restore: a protected file that is the same is just Same -- no line to run", ok && c2.find(".ssh") == std::string::npos);
+            put_bytes(home, ".ssh/config", ssh_now);
+        }
+        const std::string pre = files_snapshot(home);
+        pr::Restore rb = pr::look_back(H, B5, fake2);
+        check("restore: look changes nothing", files_snapshot(home) == pre && rb.refused.empty() && rb.host == f5.host);
+        const auto row = [&](const std::string& rel) -> pr::Back* {
+            for (auto& b : rb.files) if (b.rel == rel) return &b;
+            return nullptr;
+        };
+        check("restore: states -- bashrc differs (unchecked), autostart missing (checked), font same, ssh config protected",
+              row(".bashrc") && row(".bashrc")->state == pr::State::Differs && !row(".bashrc")->checked &&
+              row(".config/autostart/notes.desktop") && row(".config/autostart/notes.desktop")->state == pr::State::Missing &&
+              row(".config/autostart/notes.desktop")->checked &&
+              row(".local/share/fonts/Fixture Sans.otf") && row(".local/share/fonts/Fixture Sans.otf")->state == pr::State::Same &&
+              row(".ssh/config") && row(".ssh/config")->state == pr::State::Protected);
+        check("restore: the difference shown as diff -u",
+              row(".bashrc") && row(".bashrc")->diff.find("-alias ll='ls -la'") != std::string::npos &&
+              row(".bashrc")->diff.find("+# changed after Look") != std::string::npos, row(".bashrc") ? row(".bashrc")->diff : "");
+        std::string cmds;
+        for (const auto& c : rb.commands) cmds += c.line + "\n";
+        check("restore: commands -- ssh config by hand, the missing flatpak, enable the service; dconf the same -> no line",
+              cmds.find("cp -i ") != std::string::npos && cmds.find(".ssh/config") != std::string::npos &&
+              cmds.find("flatpak install -y --user 'flathub' 'org.gnome.Fixture'") != std::string::npos &&
+              cmds.find("systemctl --user enable sync.service") != std::string::npos &&
+              cmds.find("dconf load") == std::string::npos, cmds);
+        check("restore: refused -- not a bundle", !pr::look_back(H, H + "/Documents", fake2).refused.empty() &&
+              !pr::look_back(H, B5 + "/../" + pr::bundle_name(f5.host, now + 600), fake2).refused.empty());
+
+        row(".bashrc")->checked = true;
+        row(".ssh/config")->checked = true;   // forced: still never planned
+        std::vector<std::string> d6;
+        dr::Plan p6 = pr::restore_plan(H, rb, d6);
+        std::string steps;
+        for (const auto& a : p6.actions) steps += std::string(dr::verb_name(a.verb)) + " " + (a.to.empty() ? a.from : a.to) + ", ";
+        check("restore: plan -- make ~/.config/autostart, Trash the bashrc there, Copy the backup's, Copy the missing one",
+              p6.actions.size() == 4 && p6.actions[0].verb == dr::Verb::MakeDir && p6.actions[0].to == H + "/.config/autostart" &&
+              p6.actions[1].verb == dr::Verb::Trash && p6.actions[1].from == H + "/.bashrc" &&
+              p6.actions[2].verb == dr::Verb::Copy && p6.actions[2].to == H + "/.bashrc" &&
+              p6.actions[3].to == H + "/.config/autostart/notes.desktop" && d6.empty(), steps);
+        check("restore: the door refuses it unpreviewed", !door.run(p6).ok && files_snapshot(home) == pre);
+        p6.previewed = true;
+        auto r6 = door.run(p6);
+        check("restore: run -> the backup's bashrc and autostart entry are back; ssh config untouched",
+              r6.ok && read_all(home / ".bashrc") == read_all(B5 + "/home/.bashrc") &&
+              fs::exists(home / ".config/autostart/notes.desktop") &&
+              read_all(home / ".ssh/config") == "Host gh\n  HostName example.org\n", r6.messages.empty() ? "" : r6.messages.front());
+        auto u6 = door.undo();
+        check("restore: undo -> exact (the replaced bashrc back from the Trash)",
+              u6.ok && outside(files_snapshot(home), "/.local/share/Trash/") == outside(pre, "/.local/share/Trash/") &&
+              read_all(home / ".bashrc") == "# fixture bashrc\nalias ll='ls -la'\n", u6.messages.empty() ? "" : u6.messages.front());
+        put_bytes(home, ".bashrc", "# changed again\n");
+        std::vector<std::string> d7;
+        dr::Plan p7 = pr::restore_plan(H, rb, d7);
+        check("restore: changed since the look -> left out, and said",
+              d7.size() == 1 && d7[0].find(".bashrc") != std::string::npos && p7.actions.size() == 2);
+        dr::Action dup;   // the door: a create may take a trashed path's place only within the same plan
+        dup.verb = dr::Verb::Copy;
+        dup.from = B5 + "/home/.bashrc";
+        dup.to = H + "/.bashrc";
+        check("door: a create onto an existing file is still refused without the Trash before it",
+              !door.refusal(dup, {}).empty() && door.refusal(dup, {}, {H + "/.bashrc"}).empty());
         fs::remove_all(home, ec);
     }
 

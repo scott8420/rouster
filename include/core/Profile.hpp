@@ -93,6 +93,61 @@ Found find(const std::string& home, const Runner& run);
 door::Plan plan(const std::string& home, const Found& found, const std::string& notes,
                 std::int64_t now, std::string& bundle, std::vector<std::string>& dropped);
 
+// ── Restore (s012b) ─────────────────────────────────────────────────────────
+// READ-ONLY look at a bundle against what is in home now. Every file under the
+// bundle's home/ is one row:
+//   Same      -- identical bytes: nothing to do;
+//   Missing   -- not there: offered, pre-checked (Copy in);
+//   Differs   -- there, different: offered UNCHECKED (§1.6), with `diff -u`
+//                for text; restoring it sends the one there to the Trash and
+//                Copies the backup's in -- one step, Undo puts it back;
+//   Protected -- under a never-touch folder (~/.ssh): never written; the
+//                command to do it yourself is listed instead;
+//   Blocked   -- a folder or a link where the file would go: not offered.
+// What Rouster doesn't do itself comes back as commands for you to run:
+// missing dnf / flatpak packages, enabling user services, fc-cache, the
+// extensions to fetch, and (until s012d) `dconf load`.
+enum class State { Same, Missing, Differs, Protected, Blocked };
+const char* state_name(State s);
+
+struct Back {
+    std::string   rel;               // relative to home
+    std::string   from;              // the bundle's file (absolute)
+    State         state = State::Same;
+    std::uint64_t bytes = 0;         // the bundle's file
+    std::string   diff;              // Differs: `diff -u now backup` (text), or why there is none
+    bool          checked = false;
+    std::uint64_t ino = 0;           // what is there now (Differs), re-checked at plan time
+    std::int64_t  mtime_ns = 0;
+    std::int64_t  from_mtime_ns = 0; // the bundle's file, re-checked too
+};
+
+struct Command {
+    std::string what;                // "dnf: 3 packages not installed"
+    std::string line;                // the shell line, ready to paste
+};
+
+struct Restore {
+    std::string              bundle; // absolute
+    std::string              name;   // its folder name
+    std::string              host, made;   // from PROFILE.txt
+    std::vector<Back>        files;
+    std::vector<Command>     commands;
+    std::vector<std::string> notes;
+    std::string              refused;
+};
+
+// Earlier bundles under ~/Archive/Profile (those holding PROFILE.txt), newest first.
+std::vector<std::string> bundles(const std::string& home);
+
+Restore look_back(const std::string& home, const std::string& bundle, const Runner& run);
+
+// The checked Missing / Differs rows: MakeDir for missing folders (parents
+// first), then per file [Trash what is there] + Copy from the bundle. Each row
+// is looked at again first; anything changed since the look is left out and
+// named. previewed stays false.
+door::Plan restore_plan(const std::string& home, const Restore& r, std::vector<std::string>& dropped);
+
 // The PROFILE.txt text for these items (public so the selftest can read it).
 std::string profile_txt(const Found& found, const std::vector<const Item*>& items, std::int64_t now,
                         const std::string& notes);

@@ -37,6 +37,7 @@ void Shell::on_nav(const std::string& page) {  // handler: a sidebar row was cho
     if (page == "projects" && m_pj_states.get_visible_child_name() == "home") paint_projects();
     if (page == "rules" && m_rl_states.get_visible_child_name() == "list") paint_rules();   // folders may have appeared   // templates may have been edited in Files
     if (page == "activity") paint_activity();
+    if (page == "profile" && m_pr_states.get_visible_child_name() == "start") paint_profile_start();
 }
 
 void Shell::on_scan() {  // handler: Smart Scan the home folder
@@ -89,6 +90,7 @@ void Shell::on_undo() {  // handler: undo the last batch, through the door
     if (m_pr_states.get_visible_child_name() == "done") {
         m_pr_sub.set_text("Undone -- the backup went to the Trash (its files and folders, one by one). Look again to make another.");
         m_pr_last.set_text("");
+        paint_profile_start();
         m_pr_states.set_visible_child("start");
     }
     if (m_du_states.get_visible_child_name() == "done") {
@@ -439,6 +441,7 @@ void Shell::on_profile_run() {  // handler: checked rows -> a plan (one new fold
         for (const auto& m : r.messages) lg->warn("  {}", m);
     }
     m_pr_bundle = bundle;
+    paint_profile_start();
     const std::string tilde = "~/" + bundle.substr(m_home.size() + 1);
     const std::string left = dropped.empty() ? "" : " " + std::to_string(dropped.size()) + " left out (changed since Look) -- see the log.";
     if (r.ok) {
@@ -465,6 +468,94 @@ void Shell::on_profile_open() {  // handler: open the bundle in Files
     } catch (const Glib::Error& e) {
         if (auto lg = log::get(log::Area::Profile)) lg->warn("could not open {}: {}", m_pr_bundle, e.what());
     }
+}
+
+void Shell::on_profile_look_back(const std::string& name) {  // handler: a backup's Restore... -> worker: diff against home
+    if (m_pr_worker.joinable() || door_busy()) return;
+    m_pr_cancel = false;
+    m_pr_spinner.start();
+    m_pr_states.set_visible_child("running");
+    const std::string bundle = m_home + "/" + core::profile::kRoot + "/" + name;
+    if (auto lg = log::get(log::Area::Profile)) lg->info("look back at '{}'", bundle);
+    m_pr_worker = std::thread([this, home = m_home, bundle] {
+        auto r = core::profile::look_back(home, bundle, core::profile::real_runner(&m_pr_cancel));
+        if (auto lg = log::get(log::Area::Profile)) {
+            std::size_t n[5] = {};
+            for (const auto& b : r.files) ++n[static_cast<int>(b.state)];
+            lg->info("look back: {} same, {} missing, {} differ, {} protected, {} blocked; {} commands{}", n[0], n[1], n[2],
+                     n[3], n[4], r.commands.size(), r.refused.empty() ? "" : " REFUSED: " + r.refused);
+        }
+        {
+            std::lock_guard lk(m_pr_mx);
+            m_pr_rs_found = std::move(r);
+        }
+        m_profile_looked.emit();
+    });
+}
+
+void Shell::on_profile_looked() {  // handler: the restore look finished (Dispatcher -> UI thread)
+    if (m_pr_worker.joinable()) m_pr_worker.join();
+    m_pr_spinner.stop();
+    {
+        std::lock_guard lk(m_pr_mx);
+        m_pr_rs = m_pr_rs_found;
+    }
+    if (!m_pr_rs.refused.empty()) {
+        m_pr_sub.set_text("Can't restore: " + m_pr_rs.refused);
+        paint_profile_start();
+        m_pr_states.set_visible_child("start");
+        return;
+    }
+    paint_preflight();
+    m_pr_rs_title.set_text("Restore " + m_pr_rs.name);
+    m_pr_rs_sub.set_text("made " + m_pr_rs.made + " on " + m_pr_rs.host + " -- compared with what is in your home now");
+    paint_profile_restore();
+    m_pr_states.set_visible_child("restore");
+}
+
+void Shell::on_profile_restore() {  // handler: checked rows -> Trash + Copy plan -> the door
+    if (!m_door || door_busy() || m_pr_worker.joinable()) return;
+    if (m_pr_states.get_visible_child_name() != "restore") return;   // preview first
+    paint_preflight();
+    if (m_pf_red) { profile_restore_gate(); return; }
+    std::vector<std::string> dropped;
+    core::door::Plan plan = core::profile::restore_plan(m_home, m_pr_rs, dropped);
+    std::size_t files = 0, swaps = 0;
+    for (const auto& a : plan.actions) {
+        if (a.verb == core::door::Verb::Copy) ++files;
+        if (a.verb == core::door::Verb::Trash) ++swaps;
+    }
+    if (auto lg = log::get(log::Area::Profile)) {
+        lg->info("restore '{}': {} actions, {} files, {} replaced", plan.label, plan.actions.size(), files, swaps);
+        for (const auto& d : dropped) lg->info("  left out: {}", d);
+    }
+    if (!files) {
+        m_pr_rs_gate.set_text(dropped.empty() ? std::string("Nothing to do.") : dropped.front() + " -- go Back and look again.");
+        return;
+    }
+    plan.previewed = true;   // the restore list on screen was the preview
+    const auto r = m_door->run(plan);
+    if (auto lg = log::get(log::Area::Profile)) {
+        lg->info("restore: {} done, {} failed", r.done, r.failed);
+        for (const auto& m : r.messages) lg->warn("  {}", m);
+    }
+    m_pr_bundle = m_pr_rs.bundle;
+    const std::string left = dropped.empty() ? "" : " " + std::to_string(dropped.size()) + " left out (changed since the look) -- see the log.";
+    if (r.ok) {
+        m_pr_done_big.set_text("Restored " + std::to_string(files) + (files == 1 ? " file" : " files"));
+        m_pr_done_caption.set_text((swaps ? std::to_string(swaps) + " replaced -- the ones that were there are in the Trash. " : std::string()) +
+                                   (m_pr_rs.commands.empty() ? std::string() : "The lines to run yourself stay on the restore page (Restore... again). ") +
+                                   "Undo takes it all back." + left);
+    } else if (r.done == 0) {
+        m_pr_done_big.set_text("Nothing restored");
+        m_pr_done_caption.set_text(r.messages.empty() ? std::string("The door refused the plan.") : r.messages.front());
+    } else {
+        m_pr_done_big.set_text(std::to_string(r.done) + " of " + std::to_string(plan.actions.size()));
+        m_pr_done_caption.set_text("steps done; " + std::to_string(r.failed) + " could not: " +
+                                   (r.messages.empty() ? std::string("see Activity") : r.messages.front()) + ". Undo puts back what changed.");
+    }
+    m_pr_states.set_visible_child("done");
+    paint_activity();
 }
 
 // ── Archive (s009) ───────────────────────────────────────────────────────────
