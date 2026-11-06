@@ -26,7 +26,7 @@ void Shell::on_nav(const std::string& page) {  // handler: a sidebar row was cho
     m_page = page;
     add_css_class("page-" + page);   // the window's gradient follows the module (rouster.css)
     m_stack.set_visible_child(page);
-    if (page == "preflight" || page == "sweep" || page == "dev" || page == "dups") paint_preflight();   // fresh gate on arrival
+    if (page == "preflight" || page == "sweep" || page == "dev" || page == "dups" || page == "archive") paint_preflight();   // fresh gate on arrival
     if (page == "activity") paint_activity();
 }
 
@@ -72,6 +72,10 @@ void Shell::on_undo() {  // handler: undo the last batch, through the door
     if (m_sw_states.get_visible_child_name() == "done") {
         m_sw_sub.set_text("Undone -- everything is back where it was. Look again to see it.");
         m_sw_states.set_visible_child("start");
+    }
+    if (m_ar_states.get_visible_child_name() == "done") {
+        m_ar_sub.set_text("Undone -- everything is back where it was. Look again to see it.");
+        m_ar_states.set_visible_child("start");
     }
     if (m_du_states.get_visible_child_name() == "done") {
         m_du_sub.set_text("Undone. A Trash step is back where it was; a shared step is closed -- the files were "
@@ -334,6 +338,127 @@ void Shell::on_dups_acted() {  // handler: the door finished (Dispatcher -> UI t
     }
     m_du_states.set_visible_child("done");
     dups_gate();
+    paint_activity();
+}
+
+// ── Archive (s009) ───────────────────────────────────────────────────────────
+void Shell::on_archive_find() {  // handler: look for old files (worker)
+    if (m_ar_worker.joinable() || door_busy()) return;
+    m_ar_progress = std::make_shared<core::scan::Progress>();
+    m_ar_run_big.set_text("0 files");
+    m_ar_run_caption.set_text("Looking for files untouched in " +
+                              std::string(m_ar_months % 12 ? std::to_string(m_ar_months) + " months"
+                                                           : m_ar_months == 12 ? "a year" : std::to_string(m_ar_months / 12) + " years"));
+    if (m_act_ar_find)   m_act_ar_find->set_enabled(false);
+    if (m_act_ar_cancel) m_act_ar_cancel->set_enabled(true);
+    archive_gate();
+    m_ar_spinner.start();
+    m_ar_states.set_visible_child("running");
+    if (auto lg = log::get(log::Area::Archive)) lg->info("find (home '{}', {} months)", m_home, m_ar_months);
+
+    m_ar_worker = std::thread([this, prog = m_ar_progress, home = m_home, months = m_ar_months] {
+        const auto t0 = std::chrono::steady_clock::now();
+        core::archive::Found f = core::archive::find(home, static_cast<std::int64_t>(std::time(nullptr)), months, *prog);
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - t0).count();
+        if (auto lg = log::get(log::Area::Archive))
+            lg->info("found {} items ({}) in {} files, {} unreadable, {} ms{}{}", f.items.size(),
+                     core::scan::human_bytes(f.old_bytes), f.files, f.errors, ms, f.cancelled ? " (cancelled)" : "",
+                     f.refused.empty() ? "" : " REFUSED: " + f.refused);
+        {
+            std::lock_guard lk(m_ar_mx);
+            m_ar_found = std::move(f);
+        }
+        m_archive_finished.emit();
+    });
+    m_ar_tick = Glib::signal_timeout().connect(sigc::mem_fun(*this, &Shell::tick_archive), 120);
+}
+
+void Shell::on_archive_cancel() {  // handler: stop looking
+    if (m_ar_progress) m_ar_progress->cancel = true;
+    if (auto lg = log::get(log::Area::Archive)) lg->info("cancel requested");
+}
+
+void Shell::on_archive_found() {  // handler: the worker finished (Dispatcher -> UI thread)
+    if (m_ar_worker.joinable()) m_ar_worker.join();
+    m_ar_tick.disconnect();
+    m_ar_spinner.stop();
+    if (m_act_ar_find)   m_act_ar_find->set_enabled(true);
+    if (m_act_ar_cancel) m_act_ar_cancel->set_enabled(false);
+    {
+        std::lock_guard lk(m_ar_mx);
+        m_ar_shown = m_ar_found;
+    }
+    if (!m_ar_shown.refused.empty()) {
+        m_ar_sub.set_text("Not looked: " + m_ar_shown.refused);
+        m_ar_states.set_visible_child("start");
+        return;
+    }
+    m_ar_stored = m_door ? core::archive::stored(*m_door, m_home) : std::vector<core::archive::Stored>{};
+    m_ar_view_stored = false;
+    paint_archive();
+    m_ar_states.set_visible_child("results");
+}
+
+void Shell::on_archive_view(bool stored) {  // handler: Old files / In the archive
+    if (stored == m_ar_view_stored) return;
+    m_ar_view_stored = stored;
+    if (stored && m_door) m_ar_stored = core::archive::stored(*m_door, m_home);   // fresh, from the manifest
+    paint_archive();
+}
+
+void Shell::on_archive_months(int months) {  // handler: the "untouched for" choice -> look again
+    if (months == m_ar_months) return;
+    m_ar_months = months;
+    if (auto lg = log::get(log::Area::Archive)) lg->info("untouched for {} months", months);
+    on_archive_find();
+}
+
+void Shell::on_archive_run() {  // handler: checked rows -> a plan -> the door
+    if (!m_door || door_busy() || m_ar_worker.joinable()) return;
+    if (m_ar_states.get_visible_child_name() != "results") return;   // preview first: only from the list
+    paint_preflight();
+    if (m_pf_red) { archive_gate(); return; }
+    std::vector<std::string> dropped;
+    core::door::Plan plan = m_ar_view_stored ? core::archive::put_back(m_home, m_ar_stored, dropped)
+                                             : core::archive::plan(m_home, m_ar_shown.items, dropped);
+    std::size_t moves = 0;
+    std::uint64_t bytes = 0;
+    for (const auto& a : plan.actions)
+        if (a.verb == core::door::Verb::Move) { ++moves; bytes += a.bytes; }
+    if (auto lg = log::get(log::Area::Archive)) {
+        lg->info("run '{}': {} actions", plan.label, plan.actions.size());
+        for (const auto& d : dropped) lg->info("  left out: {}", d);
+    }
+    if (!moves) {
+        m_ar_gate.set_text(dropped.empty() ? std::string("Nothing to do.") : dropped.front() + " -- Look again.");
+        return;
+    }
+    plan.previewed = true;   // the list on screen was the preview
+    const auto r = m_door->run(plan);
+    if (auto lg = log::get(log::Area::Archive)) {
+        lg->info("run: {} done, {} failed", r.done, r.failed);
+        for (const auto& m : r.messages) lg->warn("  {}", m);
+    }
+    const std::string n = std::to_string(moves) + (moves == 1 ? " item" : " items");
+    const std::string left = dropped.empty() ? "" : " " + std::to_string(dropped.size()) + " left out -- see the log.";
+    if (r.ok) {
+        m_ar_done_big.set_text(core::scan::human_bytes(bytes));
+        m_ar_done_caption.set_text(m_ar_view_stored
+            ? "went back where it came from -- " + n + "." + left
+            : "is in ~/Archive now -- " + n + ", each under the year it was last changed, with its folders kept. "
+              "Undo takes the step back; Put back works any time later." + left);
+    } else if (r.done == 0) {
+        m_ar_done_big.set_text("Nothing moved");
+        m_ar_done_caption.set_text(r.messages.empty() ? std::string("The door refused the plan.") : r.messages.front());
+    } else {
+        m_ar_done_big.set_text(std::to_string(r.done) + " of " + std::to_string(plan.actions.size()));
+        m_ar_done_caption.set_text("steps done; " + std::to_string(r.failed) + " could not: " +
+                                   (r.messages.empty() ? std::string("see Activity") : r.messages.front()) +
+                                   ". Undo puts back what moved.");
+    }
+    m_ar_states.set_visible_child("done");
+    archive_gate();
     paint_activity();
 }
 

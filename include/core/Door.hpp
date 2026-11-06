@@ -40,6 +40,12 @@
 // Their undo is not a rename back (there was nothing before): the created
 // thing goes to the Trash, after the same identity check.
 //
+// MakeDir (s009, Archive) makes one empty folder the same way (staging name,
+// one rename). A plan may make a folder and then move into it: the policy
+// check reads the plan in order, so a later Move may name a folder an earlier
+// MakeDir makes. Its undo sends the folder to the Trash -- only while it is
+// still empty (undo runs newest first, so the moves have gone back by then).
+//
 // One verb MOVES NOTHING (s008, Duplicates): Dedupe shares the blocks of `to`
 // with `from` (FIDEDUPERANGE -- the kernel compares the bytes itself, under
 // lock, and shares nothing if they differ; a stale hash can't do harm). Both
@@ -51,14 +57,14 @@
 // ─────────────────────────────────────────────────────────────────────────────
 namespace rouster::core::door {
 
-enum class Verb { Trash, Move, Write, Clone, Dedupe };
-const char* verb_name(Verb v);   // "trash", "move", "write", "clone", "dedupe"
-bool creates(Verb v);            // Write, Clone: `to` is made; `from` is unused
+enum class Verb { Trash, Move, Write, Clone, Dedupe, MakeDir };
+const char* verb_name(Verb v);   // "trash", "move", "write", "clone", "dedupe", "mkdir"
+bool creates(Verb v);            // Write, Clone, MakeDir: `to` is made; `from` is unused
 // THE VERB TABLE the selftest gate walks: a verb added to the enum and not
 // here fails the gate's count; every verb here is run through the door,
 // checked to be one step, and undone back to the exact tree.
 const std::vector<Verb>& verbs();
-inline constexpr int kVerbCount = 5;
+inline constexpr int kVerbCount = 6;
 inline constexpr std::size_t kWriteMax = 64 * 1024;   // Write is for small notes (RESTORE.txt)
 
 struct Action {
@@ -128,6 +134,8 @@ public:
 
     // "" = allowed; otherwise why not. run() asks this of every action first.
     std::string refusal(const Action& a) const;
+    // ...given the folders earlier MakeDirs in the same plan will make.
+    std::string refusal(const Action& a, const std::vector<std::string>& made) const;
 
     Result run(const Plan& plan);
     Result undo();                          // the last batch not yet undone

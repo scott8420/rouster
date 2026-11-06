@@ -6,6 +6,8 @@
 #include <gtkmm/label.h>
 #include <gtkmm/checkbutton.h>
 #include <gtkmm/togglebutton.h>
+#include <gtkmm/dropdown.h>
+#include <gtkmm/stringlist.h>
 #include <gtkmm/listboxrow.h>
 #include <gtkmm/expander.h>
 #include <gtkmm/image.h>
@@ -336,10 +338,11 @@ void Shell::paint_preflight() {  // helper: gather + evaluate + repaint the card
     }
     m_pf_summary.set_text(std::to_string(green) + " of " + std::to_string(checks.size()) + " checks green" +
                           (red ? ", " + std::to_string(red) + " red" : std::string{}) +
-                          ". A red check stops Sweep, Duplicates and Dev projects until it clears.");
+                          ". A red check stops Sweep, Duplicates, Dev projects and Archive until it clears.");
     m_pf_red = red > 0;
     sweep_gate();
     dups_gate();
+    archive_gate();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -643,6 +646,216 @@ void Shell::dups_gate() {  // helper: the act button's label + whether it may ac
     else
         m_du_gate.set_text("Everything goes to the Trash as one step; Undo brings it all back.");
     if (m_act_du_run) m_act_du_run->set_enabled(copies > 0 && !m_pf_red && !busy);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Archive (s009). The worker runs core::archive::find (read-only); the stored
+// list comes from the manifest on the UI thread (the door is the UI's). Rows
+// past kArchiveShown aren't painted and are never checked.
+// ─────────────────────────────────────────────────────────────────────────────
+void Shell::stop_archive() {  // helper: cancel + join (close, dtor)
+    if (m_ar_progress) m_ar_progress->cancel = true;
+    if (m_ar_worker.joinable()) m_ar_worker.join();
+    m_ar_tick.disconnect();
+}
+
+bool Shell::tick_archive() {  // helper: the live counters while looking
+    if (!m_ar_progress) return false;
+    m_ar_run_big.set_text(with_commas(m_ar_progress->files.load()) + " files");
+    if (m_ar_progress->cancel.load()) m_ar_run_caption.set_text("Stopping…");
+    return true;
+}
+
+void Shell::paint_archive() {  // helper: view switch, cards per top folder / the stored list
+    namespace ar = core::archive;
+    while (auto* c = m_ar_list.get_first_child()) m_ar_list.remove(*c);
+
+    // The view switch + "untouched for".
+    auto top = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+    auto b_old = Gtk::make_managed<Gtk::ToggleButton>("Old files");
+    auto b_in = Gtk::make_managed<Gtk::ToggleButton>("In the archive · " + with_commas(m_ar_stored.size()));
+    for (auto* b : {b_old, b_in}) { b->add_css_class("ghost"); b->add_css_class("mode"); }
+    b_in->set_group(*b_old);
+    b_old->set_active(!m_ar_view_stored);
+    b_in->set_active(m_ar_view_stored);
+    b_old->signal_toggled().connect([this, b_old] { if (b_old->get_active()) on_archive_view(false); });
+    b_in->signal_toggled().connect([this, b_in] { if (b_in->get_active()) on_archive_view(true); });
+    top->append(*b_old);
+    top->append(*b_in);
+    auto spacer = Gtk::make_managed<Gtk::Box>();
+    spacer->set_hexpand(true);
+    top->append(*spacer);
+    if (!m_ar_view_stored) {
+        static const std::vector<std::pair<int, const char*>> choices = {
+            {6, "6 months"}, {12, "1 year"}, {24, "2 years"}, {36, "3 years"}, {60, "5 years"}};
+        top->append(*text("untouched for", "dim", 1.0f));
+        std::vector<Glib::ustring> names;
+        guint sel = 1;
+        for (guint i = 0; i < choices.size(); ++i) {
+            names.push_back(choices[i].second);
+            if (choices[i].first == m_ar_months) sel = i;
+        }
+        auto dd = Gtk::make_managed<Gtk::DropDown>(Gtk::StringList::create(names));
+        dd->set_selected(sel);
+        dd->set_valign(Gtk::Align::CENTER);
+        dd->property_selected().signal_changed().connect([this, dd] {
+            const guint i = dd->get_selected();
+            if (i < choices.size()) Glib::signal_idle().connect_once([this, m = choices[i].first] { on_archive_months(m); });
+        });
+        top->append(*dd);
+    }
+    m_ar_list.append(*top);
+
+    const auto month = [](std::int64_t t) {
+        std::time_t tt = static_cast<std::time_t>(t);
+        std::tm tm{};
+        ::localtime_r(&tt, &tm);
+        char b[16];
+        std::strftime(b, sizeof b, "%Y-%m", &tm);
+        return std::string(b);
+    };
+    m_ar_painted = 0;
+    if (!m_ar_view_stored) {
+        auto& items = m_ar_shown.items;
+        std::size_t i = 0;
+        const auto key = [](const std::string& rel) {
+            const auto p = rel.find('/');
+            return p == std::string::npos ? std::string() : rel.substr(0, p);
+        };
+        while (i < items.size() && m_ar_painted < kArchiveShown) {
+            const std::string tf = key(items[i].rel);
+            const bool loose = tf.empty();
+            std::size_t j = i;
+            std::uint64_t gb = 0;
+            while (j < items.size() && key(items[j].rel) == tf) gb += items[j++].bytes;
+            auto card = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 4);
+            card->add_css_class("card");
+            auto head = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+            auto dot = Gtk::make_managed<Gtk::Box>();
+            dot->add_css_class("dot");
+            dot->add_css_class("ar-dot");
+            dot->set_valign(Gtk::Align::CENTER);
+            head->append(*dot);
+            auto title = text(loose ? std::string("Loose in your home folder") : "~/" + tf, "card-title");
+            title->set_hexpand(true);
+            head->append(*title);
+            head->append(*text(scan::human_bytes(gb) + " · " + with_commas(j - i) + (j - i == 1 ? " item" : " items"),
+                               "card-sub", 1.0f));
+            auto all = Gtk::make_managed<Gtk::Button>("Check all");
+            all->add_css_class("ghost");
+            all->add_css_class("small");
+            const std::size_t lo = i, hi = std::min(j, i + (kArchiveShown - m_ar_painted));
+            all->signal_clicked().connect([this, lo, hi] {
+                for (std::size_t k = lo; k < hi && k < m_ar_shown.items.size(); ++k) m_ar_shown.items[k].checked = true;
+                paint_archive();
+            });
+            head->append(*all);
+            card->append(*head);
+            for (std::size_t k = i; k < j && m_ar_painted < kArchiveShown; ++k, ++m_ar_painted) {
+                const auto& it = items[k];
+                auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 12);
+                row->add_css_class("sweep-row");
+                auto cb = Gtk::make_managed<Gtk::CheckButton>();
+                cb->set_active(it.checked);
+                cb->signal_toggled().connect([this, cb, k] {
+                    if (k < m_ar_shown.items.size()) m_ar_shown.items[k].checked = cb->get_active();
+                    archive_gate();
+                });
+                row->append(*cb);
+                auto sz = text(scan::human_bytes(it.bytes), "detail-size", 1.0f);
+                sz->set_width_chars(9);
+                row->append(*sz);
+                auto path = text("~/" + it.rel + (it.folder ? "/" : ""), "detail-path");
+                path->set_hexpand(true);
+                path->set_ellipsize(Pango::EllipsizeMode::MIDDLE);
+                path->set_tooltip_text(m_home + "/" + it.rel + "\n-> " + m_home + "/" + ar::destination(it.rel, it.year) +
+                                       (it.folder ? "\n" + with_commas(it.files) + " files, all untouched since " + month(it.newest) : ""));
+                row->append(*path);
+                if (it.folder) row->append(*text(with_commas(it.files) + " files", "dim", 1.0f));
+                row->append(*text("last changed " + month(it.newest), "dim", 1.0f));
+                card->append(*row);
+            }
+            m_ar_list.append(*card);
+            i = j;
+        }
+        // nothing past the painted rows may stay checked
+        for (std::size_t k = m_ar_painted; k < items.size(); ++k) items[k].checked = false;
+        if (items.empty())
+            m_ar_list.append(*text("Nothing untouched that long -- your folders are all in use.", "hero-caption", 0.5f));
+        std::string foot = "Looked at " + with_commas(m_ar_shown.files) + " files. Left out: hidden folders, caches and "
+                           "build output, git repositories, and " ;
+        for (std::size_t d = 0; d < ar::dev_roots().size(); ++d)
+            foot += (d ? ", ~/" : "~/") + ar::dev_roots()[d];
+        foot += " (Dev projects looks after those). Moving into ~/Archive frees no space -- it clears the way. ";
+        if (items.size() > m_ar_painted)
+            foot += with_commas(items.size() - m_ar_painted) + " more items aren't shown, and stay unchecked. ";
+        if (m_ar_shown.cancelled) foot += "Stopped early -- the list is partial. ";
+        if (m_ar_shown.errors) foot += with_commas(m_ar_shown.errors) + " things could not be read. ";
+        auto f = text(foot, "dim");
+        f->set_wrap(true);
+        m_ar_list.append(*f);
+    } else {
+        auto card = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 4);
+        card->add_css_class("card");
+        for (std::size_t k = 0; k < m_ar_stored.size() && m_ar_painted < kArchiveShown; ++k, ++m_ar_painted) {
+            const auto& s = m_ar_stored[k];
+            auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 12);
+            row->add_css_class("sweep-row");
+            auto cb = Gtk::make_managed<Gtk::CheckButton>();
+            cb->set_active(s.checked && !s.blocked);
+            cb->set_sensitive(!s.blocked);
+            cb->signal_toggled().connect([this, cb, k] {
+                if (k < m_ar_stored.size()) m_ar_stored[k].checked = cb->get_active();
+                archive_gate();
+            });
+            row->append(*cb);
+            auto sz = text(scan::human_bytes(s.bytes), "detail-size", 1.0f);
+            sz->set_width_chars(9);
+            row->append(*sz);
+            auto path = text("~/" + s.back + (s.folder ? "/" : ""), "detail-path");
+            path->set_hexpand(true);
+            path->set_ellipsize(Pango::EllipsizeMode::MIDDLE);
+            path->set_tooltip_text("now at " + m_home + "/" + s.rel);
+            row->append(*path);
+            row->append(*text(s.blocked ? "something is there now" : "archived " + month(s.when), "dim", 1.0f));
+            card->append(*row);
+        }
+        for (std::size_t k = m_ar_painted; k < m_ar_stored.size(); ++k) m_ar_stored[k].checked = false;
+        if (m_ar_stored.empty())
+            card->append(*text("Nothing in the archive yet -- or only what Rouster didn't put there.", "dim"));
+        m_ar_list.append(*card);
+        auto f = text("Read from Rouster's records: everything it moved into ~/Archive that is still there. "
+                      "Each goes back to the path it came from; a folder that's gone is made again.", "dim");
+        f->set_wrap(true);
+        m_ar_list.append(*f);
+    }
+    archive_gate();
+}
+
+void Shell::archive_gate() {  // helper: the act button's label + whether it may act
+    std::uint64_t bytes = 0, all = 0;
+    std::size_t n = 0;
+    if (!m_ar_view_stored) {
+        for (const auto& it : m_ar_shown.items) { all += it.bytes; if (it.checked) { bytes += it.bytes; ++n; } }
+    } else {
+        for (const auto& s : m_ar_stored) { all += s.bytes; if (s.checked && !s.blocked) { bytes += s.bytes; ++n; } }
+    }
+    const std::string items = with_commas(n) + (n == 1 ? " item" : " items");
+    m_ar_big.set_text(scan::human_bytes(bytes));
+    m_ar_caption.set_text(std::string(m_ar_view_stored ? "to put back" : "to archive") + ", of " + scan::human_bytes(all) +
+                          (m_ar_view_stored ? " in the archive · " : " untouched · ") + items + " checked");
+    m_ar_go.set_label(m_ar_view_stored ? (n ? "Put back " + items : "Put back")
+                                       : (n ? "Move " + items + " to ~/Archive" : "Move to ~/Archive"));
+    const bool busy = m_ar_worker.joinable() || door_busy();
+    if (m_pf_red)
+        m_ar_gate.set_text("Preflight has a red check. Archive waits until it clears -- see Preflight.");
+    else if (!n)
+        m_ar_gate.set_text("Nothing checked.");
+    else if (m_ar_view_stored)
+        m_ar_gate.set_text("Each goes back where it came from, as one step; Undo takes it back again.");
+    else
+        m_ar_gate.set_text("One step. Undo takes it back; Put back works any time later.");
+    if (m_act_ar_run) m_act_ar_run->set_enabled(n > 0 && !m_pf_red && !busy);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

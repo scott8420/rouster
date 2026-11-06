@@ -90,6 +90,8 @@ void Shell::build_sidebar() {  // zone: brand + sections + module rows
     item("sweep", "rouster-sweep-symbolic", "Sweep");
     item("dups", "rouster-dups-symbolic", "Duplicates");
     item("dev", "rouster-dev-symbolic", "Dev projects");
+    section("ORGANIZE");
+    item("archive", "rouster-archive-symbolic", "Archive");
     section("SAFETY");
     item("preflight", "rouster-preflight-symbolic", "Preflight");
     item("activity", "rouster-activity-symbolic", "Activity");
@@ -107,6 +109,7 @@ void Shell::build_pages() {  // zone: the module pages
     build_scan_page();
     build_sweep_page();
     build_dups_page();
+    build_archive_page();
     build_dev_page();
     build_preflight_page();
     build_activity_page();
@@ -503,6 +506,144 @@ void Shell::build_dups_page() {  // zone: Duplicates
 
     m_du_page.append(m_du_states);
     m_stack.add(m_du_page, "dups", "Duplicates");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Archive (s009) -- the Sweep shape. Four states:
+//   start   : hero, one line, the orb ("Look").
+//   running : spinner, files looked at; Stop.
+//   results : two views -- Old files (cards per top folder, a check per row,
+//             where each would go) and In the archive (from the manifest,
+//             a check per row to put back). THE PREVIEW either way.
+//   done    : what moved, Undo, Activity.
+// ─────────────────────────────────────────────────────────────────────────────
+void Shell::build_archive_page() {  // zone: Archive
+    m_ar_states.set_transition_type(Gtk::StackTransitionType::CROSSFADE);
+    m_ar_states.set_transition_duration(220);
+    m_ar_states.set_vexpand(true);
+
+    // start
+    auto start = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 14);
+    start->set_valign(Gtk::Align::CENTER);
+    start->set_halign(Gtk::Align::CENTER);
+    start->set_margin(40);
+    start->append(*hero("rouster-hero-archive", 128));
+    start->append(*label("Archive", "hero-title"));
+    m_ar_sub.add_css_class("hero-sub");
+    m_ar_sub.set_wrap(true);
+    m_ar_sub.set_justify(Gtk::Justification::CENTER);
+    m_ar_sub.set_max_width_chars(52);
+    m_ar_sub.set_text("Files you haven't touched in a year, moved out of the way into ~/Archive/<year>/, "
+                      "with their folders kept. Nothing is chosen for you; anything archived can go back "
+                      "where it came from, any time.");
+    start->append(m_ar_sub);
+    m_ar_find.set_label("Look");
+    m_ar_find.add_css_class("orb");
+    m_ar_find.set_halign(Gtk::Align::CENTER);
+    m_ar_find.set_margin_top(18);
+    m_ar_find.set_action_name("win.archive-find");
+    start->append(m_ar_find);
+    m_ar_states.add(*start, "start");
+
+    // running
+    auto run = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 12);
+    run->set_valign(Gtk::Align::CENTER);
+    run->set_halign(Gtk::Align::CENTER);
+    m_ar_spinner.add_css_class("big");
+    m_ar_spinner.set_halign(Gtk::Align::CENTER);
+    run->append(m_ar_spinner);
+    m_ar_run_big.add_css_class("hero-big");
+    run->append(m_ar_run_big);
+    m_ar_run_caption.add_css_class("hero-caption");
+    run->append(m_ar_run_caption);
+    m_ar_cancel.set_label("Stop");
+    m_ar_cancel.add_css_class("ghost");
+    m_ar_cancel.set_halign(Gtk::Align::CENTER);
+    m_ar_cancel.set_margin_top(12);
+    m_ar_cancel.set_action_name("win.archive-cancel");
+    run->append(m_ar_cancel);
+    m_ar_states.add(*run, "running");
+
+    // results
+    auto res_page = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 0);
+    auto scroll = Gtk::make_managed<Gtk::ScrolledWindow>();
+    scroll->set_policy(Gtk::PolicyType::NEVER, Gtk::PolicyType::AUTOMATIC);
+    scroll->set_vexpand(true);
+    auto res = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 14);
+    res->set_margin_start(32);
+    res->set_margin_end(32);
+    res->set_margin_top(12);
+    res->set_margin_bottom(16);
+    auto head = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 20);
+    head->append(*hero("rouster-hero-archive", 88));
+    auto words = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 2);
+    words->set_valign(Gtk::Align::CENTER);
+    words->set_hexpand(true);
+    m_ar_big.add_css_class("hero-big");
+    m_ar_big.set_xalign(0.0f);
+    m_ar_caption.add_css_class("hero-caption");
+    m_ar_caption.set_xalign(0.0f);
+    m_ar_caption.set_wrap(true);
+    words->append(m_ar_big);
+    words->append(m_ar_caption);
+    head->append(*words);
+    auto again = Gtk::make_managed<Gtk::Button>("Look again");
+    again->add_css_class("ghost");
+    again->set_valign(Gtk::Align::CENTER);
+    again->set_action_name("win.archive-find");
+    head->append(*again);
+    res->append(*head);
+    res->append(m_ar_list);
+    scroll->set_child(*res);
+    res_page->append(*scroll);
+
+    // The act bar stays put under the list.
+    auto bar = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 16);
+    bar->add_css_class("act-bar");
+    m_ar_gate.add_css_class("dim");
+    m_ar_gate.set_xalign(0.0f);
+    m_ar_gate.set_hexpand(true);
+    m_ar_gate.set_wrap(true);
+    bar->append(m_ar_gate);
+    m_ar_go.add_css_class("act");
+    m_ar_go.set_action_name("win.archive-run");
+    bar->append(m_ar_go);
+    res_page->append(*bar);
+    m_ar_states.add(*res_page, "results");
+
+    // done
+    auto done = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 12);
+    done->set_valign(Gtk::Align::CENTER);
+    done->set_halign(Gtk::Align::CENTER);
+    done->set_margin(40);
+    done->append(*hero("rouster-hero-done", 112));
+    m_ar_done_big.add_css_class("hero-big");
+    done->append(m_ar_done_big);
+    m_ar_done_caption.add_css_class("hero-sub");
+    m_ar_done_caption.set_wrap(true);
+    m_ar_done_caption.set_justify(Gtk::Justification::CENTER);
+    m_ar_done_caption.set_max_width_chars(58);
+    done->append(m_ar_done_caption);
+    auto btns = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 12);
+    btns->set_halign(Gtk::Align::CENTER);
+    btns->set_margin_top(12);
+    auto undo = Gtk::make_managed<Gtk::Button>("Undo");
+    undo->add_css_class("ghost");
+    undo->set_action_name("win.undo");
+    auto act = Gtk::make_managed<Gtk::Button>("Activity");
+    act->add_css_class("ghost");
+    act->signal_clicked().connect([this] { go_to("activity"); });
+    auto more = Gtk::make_managed<Gtk::Button>("Look again");
+    more->add_css_class("ghost");
+    more->set_action_name("win.archive-find");
+    btns->append(*undo);
+    btns->append(*act);
+    btns->append(*more);
+    done->append(*btns);
+    m_ar_states.add(*done, "done");
+
+    m_ar_page.append(m_ar_states);
+    m_stack.add(m_ar_page, "archive", "Archive");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

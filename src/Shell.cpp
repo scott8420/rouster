@@ -78,6 +78,21 @@ Shell::Shell()
       m_du_gate("shell.dups.gate"),
       m_du_done_big("shell.dups.done_big"),
       m_du_done_caption("shell.dups.done_caption"),
+      m_ar_page("shell.archive.page", Gtk::Orientation::VERTICAL),
+      m_ar_states("shell.archive.states"),
+      m_ar_sub("shell.archive.sub"),
+      m_ar_find("shell.archive.find"),
+      m_ar_spinner("shell.archive.spinner"),
+      m_ar_run_big("shell.archive.run_big"),
+      m_ar_run_caption("shell.archive.run_caption"),
+      m_ar_cancel("shell.archive.cancel"),
+      m_ar_big("shell.archive.big"),
+      m_ar_caption("shell.archive.caption"),
+      m_ar_list("shell.archive.list", Gtk::Orientation::VERTICAL, 10),
+      m_ar_go("shell.archive.go"),
+      m_ar_gate("shell.archive.gate"),
+      m_ar_done_big("shell.archive.done_big"),
+      m_ar_done_caption("shell.archive.done_caption"),
       m_pf_page("shell.preflight.page", Gtk::Orientation::VERTICAL, 10),
       m_pf_summary("shell.preflight.summary"),
       m_pf_rows("shell.preflight.rows", Gtk::Orientation::VERTICAL, 10),
@@ -92,7 +107,7 @@ Shell::Shell()
 
 // The worker must be gone before the members it touches (m_report, the
 // dispatcher). close-request does this too; the dtor is the backstop.
-Shell::~Shell() { stop_scan(); stop_sweep(); stop_dev(); stop_dups(); }
+Shell::~Shell() { stop_scan(); stop_sweep(); stop_dev(); stop_dups(); stop_archive(); }
 
 void Shell::build_ui() {
     m_home = home_dir();
@@ -108,13 +123,14 @@ void Shell::build_ui() {
     paint_preflight();
     paint_activity();
 
-    signal_close_request().connect([this] { stop_scan(); stop_sweep(); stop_dev(); stop_dups(); return false; }, false);
+    signal_close_request().connect([this] { stop_scan(); stop_sweep(); stop_dev(); stop_dups(); stop_archive(); return false; }, false);
     m_scan_finished.connect(sigc::mem_fun(*this, &Shell::on_scan_done));
     m_sweep_finished.connect(sigc::mem_fun(*this, &Shell::on_sweep_found));
     m_dev_finished.connect(sigc::mem_fun(*this, &Shell::on_dev_found));
     m_dev_acted.connect(sigc::mem_fun(*this, &Shell::on_dev_acted));
     m_dups_finished.connect(sigc::mem_fun(*this, &Shell::on_dups_found));
     m_dups_acted.connect(sigc::mem_fun(*this, &Shell::on_dups_acted));
+    m_archive_finished.connect(sigc::mem_fun(*this, &Shell::on_archive_found));
     m_known = core::load_known(data_dir() + "/known.json");
 
     if (auto lg = log::get(log::Area::Shell)) lg->info("ready -- home is {}", m_home);

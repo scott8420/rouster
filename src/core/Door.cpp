@@ -36,13 +36,14 @@ const char* verb_name(Verb v) {
         case Verb::Write: return "write";
         case Verb::Clone: return "clone";
         case Verb::Dedupe: return "dedupe";
+        case Verb::MakeDir: return "mkdir";
     }
     return "?";
 }
-bool creates(Verb v) { return v == Verb::Write || v == Verb::Clone; }
+bool creates(Verb v) { return v == Verb::Write || v == Verb::Clone || v == Verb::MakeDir; }
 
 const std::vector<Verb>& verbs() {
-    static const std::vector<Verb> v = {Verb::Trash, Verb::Move, Verb::Write, Verb::Clone, Verb::Dedupe};
+    static const std::vector<Verb> v = {Verb::Trash, Verb::Move, Verb::Write, Verb::Clone, Verb::Dedupe, Verb::MakeDir};
     return v;
 }
 
@@ -188,7 +189,10 @@ bool Door::load() {
     return true;
 }
 
-std::string Door::refusal(const Action& a) const {
+std::string Door::refusal(const Action& a) const { return refusal(a, {}); }
+
+std::string Door::refusal(const Action& a, const std::vector<std::string>& made) const {
+    const auto planned = [&](const std::string& p) { return std::find(made.begin(), made.end(), p) != made.end(); };
     const auto bad = [](const std::string& p) {
         return p.empty() || p[0] != '/' || fs::path(p).lexically_normal().string() != p ||
                (p.size() > 1 && p.back() == '/');
@@ -214,6 +218,7 @@ std::string Door::refusal(const Action& a) const {
             const std::string abs = m_home + "/" + cur;
             if (::lstat(abs.c_str(), &st) != 0) {
                 if (last && last_may_be_missing) break;
+                if (planned(abs)) { if (last) break; pos = s + 1; continue; }   // an earlier MakeDir makes it
                 return "does not exist: " + abs;
             }
             if (!last && S_ISLNK(st.st_mode)) return "goes through a symlink: ~/" + cur;
@@ -230,9 +235,10 @@ std::string Door::refusal(const Action& a) const {
         if (inside(a.to, m_data) || inside(m_data, a.to)) return "Rouster's own records: " + a.to;
         if (auto w = walk(a.to, true); !w.empty()) return w;
         struct stat st{};
-        if (::lstat(a.to.c_str(), &st) == 0) return "already exists: " + a.to;
+        if (::lstat(a.to.c_str(), &st) == 0 || planned(a.to)) return "already exists: " + a.to;
         const std::string parent = fs::path(a.to).parent_path().string();
-        if (::stat(parent.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) return "folder missing: " + parent;
+        if (!planned(parent) && (::stat(parent.c_str(), &st) != 0 || !S_ISDIR(st.st_mode))) return "folder missing: " + parent;
+        if (a.verb == Verb::MakeDir) return {};
         if (a.verb == Verb::Write) {
             if (a.content.size() > kWriteMax) return "too big to write: " + a.to;
             return {};
@@ -275,9 +281,10 @@ std::string Door::refusal(const Action& a) const {
     if (inside(a.to, m_data)) return "Rouster's own records: " + a.to;
     if (auto w = walk(a.to, true); !w.empty()) return "destination " + w;
     struct stat st{};
-    if (::lstat(a.to.c_str(), &st) == 0) return "destination exists: " + a.to;
+    if (::lstat(a.to.c_str(), &st) == 0 || planned(a.to)) return "destination exists: " + a.to;
     const std::string parent = fs::path(a.to).parent_path().string();
-    if (::stat(parent.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) return "destination folder missing: " + parent;
+    if (!planned(parent) && (::stat(parent.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)))
+        return "destination folder missing: " + parent;
     return {};
 }
 
@@ -375,7 +382,9 @@ bool Door::do_create(Record& r, const Action& a) {
     r.from = (to.parent_path() / (".rouster-" + to.filename().string() + "." + std::to_string(r.id))).string();
     struct stat st{};
     if (::lstat(r.from.c_str(), &st) == 0) { r.error = "staging name taken: " + r.from; return false; }
-    if (r.verb == Verb::Write) {
+    if (r.verb == Verb::MakeDir) {
+        if (::mkdir(r.from.c_str(), 0755) != 0) { r.error = std::strerror(errno); return false; }
+    } else if (r.verb == Verb::Write) {
         const int fd = ::open(r.from.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
         if (fd < 0) { r.error = std::strerror(errno); return false; }
         const bool wrote = ::write(fd, a.content.data(), a.content.size()) == static_cast<ssize_t>(a.content.size()) &&
@@ -412,8 +421,13 @@ Result Door::run(const Plan& plan) {
     if (plan.actions.empty()) { res.ok = true; return res; }
 
     // Policy first, for the WHOLE plan, before anything moves.
-    for (const auto& a : plan.actions)
-        if (auto why = refusal(a); !why.empty()) res.messages.push_back("refused: " + why);
+    {
+        std::vector<std::string> made;
+        for (const auto& a : plan.actions) {
+            if (auto why = refusal(a, made); !why.empty()) res.messages.push_back("refused: " + why);
+            if (a.verb == Verb::MakeDir) made.push_back(a.to);
+        }
+    }
     if (!res.messages.empty()) return res;
 
     Batch b{m_next_batch++, plan.label, now_s(), {}, false};
@@ -487,6 +501,10 @@ bool Door::undo_one(Record& r, std::string& why) {
         if (!(now.dev == r.ident.dev && now.ino == r.ident.ino && now.dir == r.ident.dir)) {
             why = "something else is at " + r.to + " now";
             return false;
+        }
+        if (r.verb == Verb::MakeDir) {   // only an empty folder goes; anything put in it since stays put
+            std::error_code ec;
+            if (!fs::is_empty(r.to, ec) || ec) { why = "something is in " + r.to + " now -- left in place"; return false; }
         }
         std::string dest;
         if (!trash_now(r.to, dest, why)) return false;

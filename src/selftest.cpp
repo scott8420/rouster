@@ -25,6 +25,7 @@
 #include "core/Dev.hpp"
 #include "core/Known.hpp"
 #include "core/Dups.hpp"
+#include "core/Archive.hpp"
 
 #include <algorithm>
 #include <array>
@@ -330,12 +331,31 @@ bool make_dups_fixture(const fs::path& home) {
     return ok;
 }
 
+// Old files for an Archive drive (s009): a 2019 tax folder (one item), a
+// 2018 trip in Pictures, a 2021 letter, an old installer in Downloads.
+bool make_archive_fixture(const fs::path& home) {
+    const std::vector<std::pair<std::string, std::int64_t>> f = {
+        {"Documents/Taxes 2019/return.pdf", 1556000000}, {"Documents/Taxes 2019/receipts/r1.pdf", 1556000000},
+        {"Documents/Taxes 2019/receipts/r2.pdf", 1556100000}, {"Pictures/Trip 2018/day1.jpg", 1530000000},
+        {"Pictures/Trip 2018/day2.jpg", 1530100000}, {"Documents/old-letter.odt", 1620000000},
+        {"Downloads/setup-2.4.iso", 1650000000}, {"Documents/active.odt", 0}};
+    bool ok = true;
+    for (const auto& [rel, t] : f) {
+        ok &= put(home, rel, 30000);
+        if (!t) continue;
+        struct timespec ts[2] = {{t, 0}, {t, 0}};
+        ::utimensat(AT_FDCWD, (home / rel).c_str(), ts, AT_SYMLINK_NOFOLLOW);
+    }
+    return ok;
+}
+
 int main(int argc, char** argv) {
     // `--make-fixture DIR`: build the fixture home for an Xvfb drive, then stop.
     if (argc == 3 && std::string(argv[1]) == "--make-fixture") {
         const bool ok = make_fixture(argv[2]) &&
                         make_dev_fixture(argv[2], std::string(argv[2]) + "_remotes") &&   // s007
-                        make_dups_fixture(argv[2]);                                         // s008
+                        make_dups_fixture(argv[2]) &&                                       // s008
+                        make_archive_fixture(argv[2]);                                      // s009
         std::cout << (ok ? "fixture: " : "fixture FAILED (exists and not empty?): ") << argv[2] << "\n";
         return ok ? 0 : 1;
     }
@@ -857,6 +877,7 @@ int main(int argc, char** argv) {
                 case Verb::Write: a.verb = v; a.to = H + "/Documents/RESTORE.txt"; a.content = "url: x\n"; break;
                 case Verb::Clone: a.verb = v; a.to = H + "/Documents/clone"; a.url = (gate_remote / "r.git").string();
                                   a.branch = "main"; break;
+                case Verb::MakeDir: a.verb = v; a.to = H + "/Documents/made"; break;
                 case Verb::Dedupe: a.verb = v; a.from = H + "/Documents/twin-a.bin"; a.to = H + "/Documents/twin-b.bin"; break;
             }
             if (v == Verb::Dedupe) {
@@ -1707,6 +1728,169 @@ int main(int argc, char** argv) {
             du::Progress po;
             check("dups: refuses outside home and protected roots",
                   !du::find(H, "/etc", po).refused.empty() && !du::find(H, H + "/Develop/w/fixes", po).refused.empty());
+        }
+        fs::remove_all(home, ec);
+    }
+
+    // -- Archive: find (read-only) -> plan (MakeDir + Move) -> door -> put back (s009)
+    {
+        std::cout << "\n-- archive --\n";
+        namespace ar = core::archive;
+        namespace dr = core::door;
+        const fs::path home = fs::temp_directory_path() / "rouster_selftest_archive";
+        std::error_code ec;
+        fs::remove_all(home, ec);
+        fs::create_directories(home / ".local/share/Trash/files", ec);
+        fs::create_directories(home / ".local/share/Trash/info", ec);
+        fs::create_directories(home / ".local/share/rouster", ec);
+        const std::string H = home.string();
+        const std::int64_t now = 2000000000, old = 1830000000;   // 2033 / end of 2027
+        const std::vector<std::string> olds = {"Documents/old.pdf", "Documents/trip/a.jpg", "Documents/trip/b.jpg",
+            "Documents/trip/sub/c.txt", "Documents/mixed/o.txt", "Documents/hid/x.txt", "Documents/hid/.h",
+            "Pictures/p.png", "notes.txt", "Develop/proj/old.c", "Music/repo/song.wav", ".cache/oldc",
+            "Archive/2020/x.txt", "Documents/fixes/f.txt"};
+        for (const auto& r : olds) put(home, r, 5000);
+        put(home, "Documents/new.pdf", 5000);
+        put(home, "Documents/mixed/n.txt", 5000);
+        fs::create_directories(home / "Music/repo/.git", ec);
+        for (const char* r : {"Documents/new.pdf", "Documents/mixed/n.txt"}) {   // new by the pinned clock
+            struct timespec ts[2] = {{now - 86400, 0}, {now - 86400, 0}};
+            ::utimensat(AT_FDCWD, (home / r).c_str(), ts, AT_SYMLINK_NOFOLLOW);
+        }
+        for (const auto& r : olds) {
+            struct timespec ts[2] = {{old, 0}, {old, 0}};
+            ::utimensat(AT_FDCWD, (home / r).c_str(), ts, AT_SYMLINK_NOFOLLOW);
+        }
+        std::tm tm{};
+        std::time_t ot = old;
+        ::localtime_r(&ot, &tm);
+        const int Y = tm.tm_year + 1900;
+        const std::string YS = std::to_string(Y);
+
+        check("archive: destination", ar::destination("Documents/x.pdf", 2019) == "Archive/2019/Documents/x.pdf");
+        const std::string before = files_snapshot(home);
+        core::scan::Progress prog;
+        ar::Found f = ar::find(H, now, 12, prog);
+        check("archive: find changes nothing", files_snapshot(home) == before && f.refused.empty() && prog.done);
+        std::string got;
+        for (const auto& it : f.items) got += it.rel + (it.folder ? "/ " : " ");
+        const std::set<std::string> want = {"Documents/hid/x.txt", "Documents/mixed/o.txt", "Documents/old.pdf",
+                                            "Documents/trip", "Pictures/p.png", "notes.txt"};
+        std::set<std::string> have;
+        for (const auto& it : f.items) have.insert(it.rel);
+        check("archive: exactly the old things -- a whole old folder as one, a mixed folder's old file, top files",
+              have == want, got);
+        const auto item = [&](const std::string& rel) -> ar::Item* {
+            for (auto& it : f.items) if (it.rel == rel) return &it;
+            return nullptr;
+        };
+        check("archive: the old folder is one item of 3 files, its year the newest file's",
+              item("Documents/trip") && item("Documents/trip")->folder && item("Documents/trip")->files == 3 &&
+              item("Documents/trip")->year == Y);
+        check("archive: never seen -- new files, dev roots, repos, hidden, ~/Archive, fixes/",
+              !item("Documents/new.pdf") && !item("Develop/proj/old.c") && !item("Music/repo/song.wav") &&
+              !item(".cache/oldc") && !item("Archive/2020/x.txt") && !item("Documents/fixes/f.txt") && !item("Documents/hid"));
+        check("archive: nothing pre-checked",
+              std::none_of(f.items.begin(), f.items.end(), [](auto& it) { return it.checked; }));
+
+        dr::Door door(H, H + "/.local/share/rouster");
+        door.load();
+        item("Documents/trip")->checked = true;
+        item("Documents/old.pdf")->checked = true;
+        std::vector<std::string> dropped;
+        dr::Plan p = ar::plan(H, f.items, dropped);
+        std::size_t mk = 0, mv = 0;
+        for (const auto& a : p.actions) (a.verb == dr::Verb::MakeDir ? mk : mv)++;
+        check("archive: plan -- 2 folders made (~/Archive is there: <year>, <year>/Documents, parents first), then 2 moves",
+              mk == 2 && mv == 2 && p.actions[0].to == H + "/Archive/" + YS && p.actions[1].to == H + "/Archive/" + YS + "/Documents" &&
+              dropped.empty(), std::to_string(mk) + "+" + std::to_string(mv));
+        check("archive: the door refuses it unpreviewed", !door.run(p).ok && files_snapshot(home) == before);
+        p.previewed = true;
+        auto r = door.run(p);
+        check("archive: run -> in ~/Archive/<year>/<path>, gone from where they were",
+              r.ok && fs::exists(home / ("Archive/" + YS + "/Documents/trip/sub/c.txt")) &&
+              fs::exists(home / ("Archive/" + YS + "/Documents/old.pdf")) && !fs::exists(home / "Documents/trip") &&
+              !fs::exists(home / "Documents/old.pdf"), r.messages.empty() ? "" : r.messages.front());
+        const auto outside_trash = [](const std::string& snap) {
+            std::istringstream in(snap);
+            std::string o;
+            for (std::string l; std::getline(in, l);)
+                if (l.find("/.local/share/Trash/") == std::string::npos) o += l + "\n";
+            return o;
+        };
+        auto u = door.undo();
+        check("archive: undo -> exact (the made folders, empty again, went to the Trash)",
+              u.ok && outside_trash(files_snapshot(home)) == outside_trash(before), u.messages.empty() ? "" : u.messages.front());
+
+        // Again, then put back from the manifest -- not through Undo.
+        r = door.run(p);
+        std::vector<ar::Stored> st = ar::stored(door, H);
+        check("archive: the manifest lists what is in the archive, and where it came from",
+              r.ok && st.size() == 2 && st[0].back == "Documents/old.pdf" && st[1].back == "Documents/trip" && st[1].folder);
+        put(home, "Documents/old.pdf", 10);   // something new where one came from
+        st = ar::stored(door, H);
+        check("archive: a place that's taken now is blocked", st[0].blocked && !st[1].blocked);
+        for (auto& s : st) s.checked = true;
+        dropped.clear();
+        dr::Plan pb = ar::put_back(H, st, dropped);
+        check("archive: put back leaves the blocked one, says why",
+              pb.actions.size() == 1 && pb.actions[0].to == H + "/Documents/trip" && dropped.size() == 1);
+        pb.previewed = true;
+        r = door.run(pb);
+        check("archive: put back -> home again; the archive keeps the rest",
+              r.ok && fs::exists(home / "Documents/trip/sub/c.txt") && ar::stored(door, H).size() == 1);
+        fs::remove(home / "Documents/old.pdf", ec);
+        {   // a put back whose folder is gone makes it again
+            fs::remove_all(home / "Documents/mixed", ec);
+            fs::remove_all(home / "Documents/hid", ec);
+            fs::remove_all(home / "Documents/new.pdf", ec);
+            fs::rename(home / "Documents/trip", home / "Pictures/trip", ec);   // Documents now empty...
+            fs::remove(home / "Documents/fixes/f.txt", ec);
+            fs::remove(home / "Documents/fixes", ec);
+            fs::remove(home / "Documents", ec);                                // ...and gone
+            auto s2 = ar::stored(door, H);
+            for (auto& s : s2) s.checked = true;
+            dropped.clear();
+            dr::Plan p2 = ar::put_back(H, s2, dropped);
+            p2.previewed = true;
+            const auto r2 = door.run(p2);
+            check("archive: put back into a folder that's gone -> MakeDir, then the move",
+                  p2.actions.size() == 2 && p2.actions[0].verb == dr::Verb::MakeDir && r2.ok &&
+                  fs::exists(home / "Documents/old.pdf"), r2.messages.empty() ? "" : r2.messages.front());
+        }
+        {   // the made folder isn't trashed by an undo while something is in it
+            core::scan::Progress p3;
+            ar::Found f3 = ar::find(H, now, 12, p3);
+            for (auto& it : f3.items) it.checked = it.rel == "notes.txt";
+            dropped.clear();
+            dr::Plan p4 = ar::plan(H, f3.items, dropped);
+            p4.previewed = true;
+            door.run(p4);   // makes Archive/<Y>/... no: Archive/<Y> exists; notes.txt goes straight in
+            dr::Action mk1; mk1.verb = dr::Verb::MakeDir; mk1.to = H + "/Music/box";
+            door.run(dr::Plan{"box", {mk1}, true});
+            put(home, "Music/box/mine.txt", 10);
+            const auto ub = door.undo();
+            check("archive: undo of a made folder that has something in it -> left in place, said so",
+                  !ub.ok && fs::exists(home / "Music/box/mine.txt") && !ub.messages.empty() &&
+                  ub.messages[0].find("left in place") != std::string::npos, ub.messages.empty() ? "" : ub.messages[0]);
+        }
+        {   // the door's plan-order policy
+            dr::Action m1; m1.verb = dr::Verb::MakeDir; m1.to = H + "/Archive/x";
+            dr::Action m2; m2.verb = dr::Verb::MakeDir; m2.to = H + "/Archive/x/y";
+            dr::Action mvv; mvv.verb = dr::Verb::Move; mvv.from = H + "/notes2.txt"; mvv.to = H + "/Archive/x/y/notes2.txt";
+            put(home, "notes2.txt", 10);
+            check("door: a Move into a folder an earlier MakeDir makes -- allowed; without it -- refused",
+                  door.refusal(mvv, {m1.to, m2.to}).empty() && !door.refusal(mvv).empty());
+            dr::Action pr; pr.verb = dr::Verb::MakeDir; pr.to = H + "/.ssh/x";
+            const auto twice = door.run(dr::Plan{"twice", {m1, m1}, true});
+            check("door: mkdir refuses -- the same folder twice in a plan, protected, an existing one",
+                  !twice.ok && twice.done == 0 && !door.refusal(pr).empty() &&
+                  !door.refusal(dr::Action{dr::Verb::MakeDir, "", H + "/Music"}).empty());
+        }
+        {
+            core::scan::Progress pc;
+            pc.cancel = true;
+            check("archive: cancel -> stops, says so", ar::find(H, now, 12, pc).cancelled);
         }
         fs::remove_all(home, ec);
     }

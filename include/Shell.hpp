@@ -5,6 +5,7 @@
 #include "core/Sweep.hpp"    // s006: the first module that acts
 #include "core/Dev.hpp"      // s007: dev projects
 #include "core/Dups.hpp"     // s008: duplicates
+#include "core/Archive.hpp"  // s009: archive
 
 #include <gtkmm/applicationwindow.h>
 #include <giomm/menu.h>
@@ -47,6 +48,8 @@
 //   "Where does the light clean act?"    -> Shell_handlers.cpp (on_dev_run -> m_door->run)
 //   "Where is the Duplicates page?"      -> Shell_zones.cpp   (build_dups_page); groups: Shell_helpers.cpp (paint_dups)
 //   "Where does Duplicates act?"         -> Shell_handlers.cpp (on_dups_run -> worker -> m_door->run)
+//   "Where is the Archive page?"         -> Shell_zones.cpp   (build_archive_page); rows: Shell_helpers.cpp (paint_archive)
+//   "Where does Archive act?"            -> Shell_handlers.cpp (on_archive_run -> m_door->run)
 //   "Where does a write go?"             -> core/Door.* -- nowhere else (the selftest's source gate)
 // ─────────────────────────────────────────────────────────────────────────────
 namespace rouster {
@@ -70,6 +73,7 @@ private:
     void build_sweep_page();                     // category: zone: Sweep (s006)
     void build_dev_page();                       // category: zone: Dev projects (s007)
     void build_dups_page();                      // category: zone: Duplicates (s008)
+    void build_archive_page();                   // category: zone: Archive (s009)
     void build_preflight_page();                 // category: zone: Preflight (s003)
     void build_activity_page();                  // category: zone: Activity (s004)
     Glib::RefPtr<Gio::Menu> build_menu();        // category: zone: hamburger model
@@ -103,6 +107,12 @@ private:
     void on_dups_keep(std::size_t group, std::size_t member);   // category: handler: make another member the keeper
     void on_dups_run();                          // category: handler: the checked copies -> a plan -> worker -> the door
     void on_dups_acted();                        // category: handler: the door finished (Dispatcher, UI thread)
+    void on_archive_find();                      // category: handler: look for old files (worker)
+    void on_archive_cancel();                    // category: handler: stop looking
+    void on_archive_found();                     // category: handler: the worker finished (Dispatcher, UI thread)
+    void on_archive_view(bool stored);           // category: handler: Old files / In the archive
+    void on_archive_months(int months);          // category: handler: the "untouched for" choice -> look again
+    void on_archive_run();                       // category: handler: checked rows -> a plan (archive or put back) -> the door
     void on_preflight();                         // category: handler: run the checklist again
     void on_pick_folder();                       // category: handler: folder chooser -> scan it
     void on_recent_open(const std::string& p);   // category: handler: scan a recent folder again
@@ -137,6 +147,10 @@ private:
     void dups_preset();                          // category: helper: checks for the mode; nothing unshown stays checked
     void paint_dups();                           // category: helper: mode switch, one card per group, rows with checks
     void dups_gate();                            // category: helper: the act button's label + whether it may act
+    void stop_archive();                         // category: helper: cancel + join (close, dtor)
+    bool tick_archive();                         // category: helper: the live counters while looking
+    void paint_archive();                        // category: helper: view switch, cards per top folder / the stored list
+    void archive_gate();                         // category: helper: the act button's label + whether it may act
     bool door_busy() const;                      // category: helper: a retire / restore owns the door right now
     void go_to(const std::string& page);         // category: helper: select a module's sidebar row
     void note_recent(const std::string& path);   // category: helper: push onto the list + persist
@@ -281,6 +295,36 @@ private:
     std::uint64_t      m_du_act_bytes = 0;
     std::size_t        m_du_act_total = 0;
     std::vector<std::string> m_du_dropped;   // left out of the plan, and why
+
+    // Archive (s009): start | running | results | done.
+    widgets::Box     m_ar_page;
+    widgets::Stack   m_ar_states;
+    widgets::Label   m_ar_sub;
+    widgets::Button  m_ar_find;
+    widgets::Spinner m_ar_spinner;
+    widgets::Label   m_ar_run_big;
+    widgets::Label   m_ar_run_caption;
+    widgets::Button  m_ar_cancel;
+    widgets::Label   m_ar_big;
+    widgets::Label   m_ar_caption;
+    widgets::Box     m_ar_list;
+    widgets::Button  m_ar_go;
+    widgets::Label   m_ar_gate;
+    widgets::Label   m_ar_done_big;
+    widgets::Label   m_ar_done_caption;
+    core::archive::Found m_ar_shown;                 // checks live here (UI thread only)
+    std::vector<core::archive::Stored> m_ar_stored;  // from the manifest (UI thread only)
+    bool             m_ar_view_stored = false;
+    int              m_ar_months = core::archive::kDefaultMonths;
+    static constexpr std::size_t kArchiveShown = 300;   // rows painted; unpainted rows are never checked
+    std::size_t      m_ar_painted = 0;
+    Glib::Dispatcher                      m_archive_finished;
+    std::shared_ptr<core::scan::Progress> m_ar_progress;
+    std::thread                           m_ar_worker;
+    std::mutex                            m_ar_mx;
+    core::archive::Found                  m_ar_found;
+    sigc::connection                      m_ar_tick;
+    Glib::RefPtr<Gio::SimpleAction>       m_act_ar_find, m_act_ar_cancel, m_act_ar_run;
 
     // Preflight (s003).
     bool            m_pf_red = true;  // a red check stops every act button; true until the first run

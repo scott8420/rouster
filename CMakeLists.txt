@@ -28,6 +28,8 @@ add_library(rouster_core STATIC
     # Dev projects (s007): find, verify (git, read-only), lint, plan; the door acts.
     src/core/Dev.cpp
     # git as a child process (Dev reads with it; the door's Clone verb writes with it).
+    # Archive (s009): old files -> ~/Archive/<year>/<path>; put back from the manifest; read-only.
+    src/core/Archive.cpp
     # Duplicates (s008): size -> head/tail -> full hash, folders, keep rules; read-only.
     src/core/Dups.cpp
     src/core/Git.cpp
