@@ -1,6 +1,7 @@
 #include "core/Helper.hpp"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <sstream>
@@ -9,6 +10,7 @@
 #include <linux/magic.h>
 #include <sys/stat.h>
 #include <sys/statfs.h>
+#include <unistd.h>
 
 namespace fs = std::filesystem;
 
@@ -17,11 +19,29 @@ namespace rouster::core::helper {
 const char* op_name(Op o) {
     switch (o) {
         case Op::Snapshot: return "snapshot";
+        case Op::PkgClean: return "pkgclean";
+        case Op::Journal:  return "journal";
+        case Op::Trim:     return "trim";
     }
     return "?";
 }
 
+const char* op_title(Op o) {
+    switch (o) {
+        case Op::Snapshot: return "Snapshot";
+        case Op::PkgClean: return "Package cache";
+        case Op::Journal:  return "System journal";
+        case Op::Trim:     return "SSD trim";
+    }
+    return "?";
+}
+
+bool undoable(Op) { return false; }
+bool irreversible(Op o) { return o == Op::PkgClean || o == Op::Journal; }
+
 std::optional<Request> parse(const std::string& s) {
+    if (s == op_name(Op::PkgClean)) return Request{Op::PkgClean, 0};   // the two words that take no number
+    if (s == op_name(Op::Trim))     return Request{Op::Trim, 0};
     const auto c = s.find(':');
     if (c == std::string::npos || s.find(':', c + 1) != std::string::npos) return std::nullopt;
     const std::string word = s.substr(0, c), num = s.substr(c + 1);
@@ -32,15 +52,25 @@ std::optional<Request> parse(const std::string& s) {
         if (n < kKeepMin || n > kKeepMax) return std::nullopt;
         return Request{Op::Snapshot, n};
     }
+    if (word == op_name(Op::Journal)) {
+        if (n < kJournalMin || n > kJournalMax) return std::nullopt;
+        return Request{Op::Journal, n};
+    }
     return std::nullopt;
 }
 
-std::string text(const Request& r) { return std::string(op_name(r.op)) + ":" + std::to_string(r.arg); }
+std::string text(const Request& r) {
+    if (r.op == Op::PkgClean || r.op == Op::Trim) return op_name(r.op);
+    return std::string(op_name(r.op)) + ":" + std::to_string(r.arg);
+}
 
 std::string describe(const Request& r) {
     switch (r.op) {
         case Op::Snapshot:
             return "Read-only snapshot of home's subvolume (keeps Rouster's newest " + std::to_string(r.arg) + ")";
+        case Op::PkgClean: return "Package cache cleared (dnf clean all / apt-get clean)";
+        case Op::Journal:  return "System journal vacuumed (keeps the last " + std::to_string(r.arg) + " days)";
+        case Op::Trim:     return "SSD trim (fstrim --all)";
     }
     return "?";
 }
@@ -83,6 +113,52 @@ std::vector<std::string> to_expire(std::vector<std::string> names, int keep) {
     if (keep < kKeepMin) keep = kKeepMin;
     if (names.size() <= static_cast<std::size_t>(keep)) return {};
     return {names.begin() + keep, names.end()};
+}
+
+Usage du(const std::string& dir) {
+    Usage u;
+    struct stat root{};
+    if (::lstat(dir.c_str(), &root) != 0 || !S_ISDIR(root.st_mode)) return u;
+    u.exists = true;
+    std::error_code ec;
+    fs::recursive_directory_iterator it(dir, fs::directory_options::skip_permission_denied, ec), end;
+    if (ec) { u.complete = false; return u; }
+    for (; it != end; it.increment(ec)) {
+        if (ec) { u.complete = false; ec.clear(); continue; }
+        struct stat st{};
+        if (::lstat(it->path().c_str(), &st) != 0) { u.complete = false; continue; }
+        if (st.st_dev != root.st_dev) { it.disable_recursion_pending(); continue; }
+        if (S_ISDIR(st.st_mode)) {
+            if (::access(it->path().c_str(), R_OK | X_OK) != 0) u.complete = false;
+            continue;
+        }
+        u.bytes += static_cast<std::uint64_t>(st.st_blocks) * 512;
+    }
+    return u;
+}
+
+const std::vector<std::string>& pkg_cache_dirs() {
+    static const std::vector<std::string> v = {"/var/cache/libdnf5", "/var/cache/dnf", "/var/cache/apt/archives"};
+    return v;
+}
+
+std::string first_program(const std::vector<std::string>& paths) {
+    for (const auto& p : paths) {
+        struct stat st{};
+        if (::stat(p.c_str(), &st) == 0 && S_ISREG(st.st_mode) && ::access(p.c_str(), X_OK) == 0) return p;
+    }
+    return {};
+}
+
+std::string human(std::uint64_t b) {
+    const char* u[] = {"B", "KB", "MB", "GB", "TB"};
+    double v = static_cast<double>(b);
+    int i = 0;
+    while (v >= 1000.0 && i < 4) { v /= 1000.0; ++i; }
+    char buf[32];
+    if (i == 0) std::snprintf(buf, sizeof buf, "%llu B", static_cast<unsigned long long>(b));
+    else std::snprintf(buf, sizeof buf, v < 10 ? "%.1f %s" : "%.0f %s", v, u[i]);
+    return buf;
 }
 
 Place place_for(const std::string& home) {

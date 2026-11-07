@@ -570,6 +570,7 @@ Result Door::run(const Plan& plan) {
     Batch& batch = m_batches.back();
     res.batch = batch.id;
 
+    bool root_refused = false;   // s013b: once polkit says no, the plan's other root steps don't ask again
     for (const auto& a : plan.actions) {
         Record r;
         r.id = m_next_id++;
@@ -580,7 +581,7 @@ Result Door::run(const Plan& plan) {
         if (r.verb == Verb::Copy) r.src = a.from;
         r.when = now_s();
         if (r.verb == Verb::Settings) { if (!prep_settings(r, a)) { /* r.error set */ } }
-        else if (r.verb == Verb::Root) { r.to = a.content; }
+        else if (r.verb == Verb::Root) { r.to = a.content; if (root_refused) r.error = "skipped -- not authorised"; }
         else if (creates(r.verb)) { if (!do_create(r, a)) { /* r.error set */ } }
         else if (r.verb == Verb::Dedupe) { if (!identity_of(r.to, r.ident)) r.error = "vanished before it could be shared"; }
         else if (!identity_of(r.from, r.ident)) { r.error = "vanished before it could be moved"; }
@@ -614,6 +615,7 @@ Result Door::run(const Plan& plan) {
                                                 : std::string(std::strerror(errno));
                 if (!live.info.empty()) ::unlink(live.info.c_str());
                 if (creates(live.verb)) { std::string d, e; trash_now(live.from, d, e); }   // the staging copy
+                if (live.verb == Verb::Root && live.error.rfind("not authorised", 0) == 0) root_refused = true;
                 live.state = State::Failed;
                 append(json{{"t", "failed"}, {"id", live.id}, {"error", live.error}}.dump());
                 ++res.failed;

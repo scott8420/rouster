@@ -25,7 +25,7 @@ std::vector<Topic> build() {
                 "- Act. The big button at the bottom does exactly what the list shows -- nothing more.",
                 "- Undo. Every act is one step in Activity, and Undo puts it back."}},
             {"The sidebar", {
-                "- Clean up: Smart Scan, Sweep, Duplicates, Dev projects.",
+                "- Clean up: Smart Scan, Sweep, System, Duplicates, Dev projects.",
                 "- Organize: Projects, Rules, Archive.",
                 "- Safety: Preflight, Profile backup, Activity."}},
             {"Getting help", {
@@ -57,7 +57,8 @@ std::vector<Topic> build() {
                 "If a Preflight check is red, the act buttons are off and say why. See Preflight."}},
             {"Runs as you", {
                 "Rouster runs with your own permissions. The one thing that needs root -- a snapshot -- goes "
-                "through a small helper that asks for your password. See The root helper."}},
+                "through a small helper that asks for your password. So do System's package cache, journal and trim -- "
+                "the only things Rouster touches outside your home. See The root helper."}},
         }});
 
     // ── Clean up ────────────────────────────────────────────────────────────
@@ -94,6 +95,25 @@ std::vector<Topic> build() {
             {"Afterwards", {
                 "Nothing is freed until you empty the Trash in Files. Undo (on the done screen or in Activity) puts "
                 "everything back where it was."}},
+        }});
+
+    t.push_back({"system", "System", "Clean up",
+        "Housekeeping outside your home: the package cache, the system journal, an SSD trim -- done as root.",
+        {
+            {"How to use it", {
+                "Press Look. Rouster measures each one as you (nothing changes), then shows a row each with its size "
+                "and what it means. Check what you want and press Run ... as root. Your password is asked once."}},
+            {"The three", {
+                "- Package cache -- packages and repository data dnf (or apt) downloaded. Checked when there's anything "
+                "in it. Can't be undone, but it refills on the next update.",
+                "- System journal -- the log of past boots and errors. Only what is older than 28 days goes. Unchecked; "
+                "can't be undone.",
+                "- SSD trim -- tells the drive which blocks are free. Changes no file. Unchecked when your system "
+                "already trims weekly (fstrim.timer, Fedora's default)."}},
+            {"Good to know", {
+                "Each row is a step in Activity; Undo only closes it -- nothing that ran as root is taken back. "
+                "If you cancel the password, nothing runs. Needs the root helper -- see The root helper. "
+                "Preflight's red checks stop it, like every other clean."}},
         }});
 
     t.push_back({"dups", "Duplicates", "Clean up",
@@ -211,14 +231,15 @@ std::vector<Topic> build() {
                 "/usr/share/polkit-1/actions. To remove both:",
                 "$ ./uninstall.sh --helper"}},
             {"What it can do", {
-                "Only what's on its list -- today, take a snapshot. No paths or commands are ever passed to it; "
-                "whose home it is comes from who asked, not from Rouster."}},
+                "Only what's on its list: take a snapshot; clear the package cache (dnf clean all, or apt-get clean); "
+                "vacuum the journal (keep N days); trim (fstrim --all). No paths or commands are ever passed to it; "
+                "whose home it is comes from who asked, not from Rouster. It never runs a shell."}},
             {"The password", {
                 "GNOME asks for your password the first time; for a few minutes after, it doesn't ask again. "
                 "Cancel the dialog and nothing runs."}},
             {"In Activity", {
-                "A snapshot is a step in Activity. Undo closes the step; the snapshot stays (Rouster's own expire "
-                "after the newest 5). To remove one by hand:",
+                "Each root step is in Activity. Undo closes the step; nothing that ran as root is taken back -- a "
+                "snapshot stays (Rouster's own expire after the newest 5). To remove one by hand:",
                 "$ sudo btrfs subvolume delete /home/.rouster-snapshots/<name>"}},
         }});
 

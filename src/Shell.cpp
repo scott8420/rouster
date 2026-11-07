@@ -166,7 +166,7 @@ Shell::Shell()
 
 // The worker must be gone before the members it touches (m_report, the
 // dispatcher). close-request does this too; the dtor is the backstop.
-Shell::~Shell() { m_rl_timer.disconnect(); stop_scan(); stop_sweep(); stop_dev(); stop_dups(); stop_archive(); stop_profile(); stop_preflight(); }
+Shell::~Shell() { m_rl_timer.disconnect(); stop_scan(); stop_sweep(); stop_dev(); stop_dups(); stop_archive(); stop_profile(); stop_preflight(); stop_system(); }
 
 void Shell::build_ui() {
     m_home = home_dir();
@@ -190,7 +190,7 @@ void Shell::build_ui() {
     rl_save(false);   // arms the watch timer if it is on; writes nothing
     paint_rules();
 
-    signal_close_request().connect([this] { stop_scan(); stop_sweep(); stop_dev(); stop_dups(); stop_archive(); stop_profile(); stop_preflight(); return false; }, false);
+    signal_close_request().connect([this] { stop_scan(); stop_sweep(); stop_dev(); stop_dups(); stop_archive(); stop_profile(); stop_preflight(); stop_system(); return false; }, false);
     m_scan_finished.connect(sigc::mem_fun(*this, &Shell::on_scan_done));
     m_sweep_finished.connect(sigc::mem_fun(*this, &Shell::on_sweep_found));
     m_dev_finished.connect(sigc::mem_fun(*this, &Shell::on_dev_found));
@@ -198,6 +198,7 @@ void Shell::build_ui() {
     m_dups_finished.connect(sigc::mem_fun(*this, &Shell::on_dups_found));
     m_dups_acted.connect(sigc::mem_fun(*this, &Shell::on_dups_acted));
     m_snapshot_taken.connect(sigc::mem_fun(*this, &Shell::on_snapshot_taken));
+    m_system_acted.connect(sigc::mem_fun(*this, &Shell::on_system_acted));
     m_archive_finished.connect(sigc::mem_fun(*this, &Shell::on_archive_found));
     m_profile_finished.connect(sigc::mem_fun(*this, &Shell::on_profile_found));
     m_profile_looked.connect(sigc::mem_fun(*this, &Shell::on_profile_looked));

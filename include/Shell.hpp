@@ -9,6 +9,9 @@
 #include "core/Profile.hpp"  // s012: profile backup
 #include "core/Organize.hpp" // s010: templates, naming, file into project
 #include "core/Rules.hpp"    // s011: rules on watched folders
+#include "core/System.hpp"   // s013b: package cache, journal, trim (root)
+#include <gtkmm/stack.h>
+#include <gtkmm/spinner.h>
 
 #include <gtkmm/applicationwindow.h>
 #include <giomm/menu.h>
@@ -88,6 +91,7 @@ private:
     void build_pages();                          // category: zone: the module pages
     void build_scan_page();                      // category: zone: Smart Scan (s002; look s005)
     void build_sweep_page();                     // category: zone: Sweep (s006)
+    void build_system_page();                    // category: zone: System (s013b) -- root housekeeping
     void build_dev_page();                       // category: zone: Dev projects (s007)
     void build_dups_page();                      // category: zone: Duplicates (s008)
     void build_archive_page();                   // category: zone: Archive (s009)
@@ -127,6 +131,12 @@ private:
     void on_dups_keep(std::size_t group, std::size_t member);   // category: handler: make another member the keeper
     void on_dups_run();                          // category: handler: the checked copies -> a plan -> worker -> the door
     void on_dups_acted();                        // category: handler: the door finished (Dispatcher, UI thread)
+    void on_system_look();                       // category: handler: s013b -- measure the three (as you)
+    void on_system_run();                        // category: handler: the checked rows -> a plan -> worker -> the door -> pkexec
+    void on_system_acted();                      // category: handler: the helper answered (Dispatcher, UI thread)
+    void paint_system();                         // category: helper: the rows, the warnings
+    void system_gate();                          // category: helper: the act button's label + whether it may act
+    void stop_system();                          // category: helper: join a run in flight (close, dtor)
     void on_snapshot_take();                     // category: handler: s013 -- Preflight's Take snapshot -> worker -> the door -> pkexec
     void on_snapshot_taken();                    // category: handler: the helper answered (Dispatcher, UI thread)
     void stop_preflight();                       // category: helper: join a snapshot in flight (close, dtor)
@@ -516,6 +526,21 @@ private:
     widgets::Label  m_pf_summary;
     widgets::Box    m_pf_rows;
     widgets::Button m_pf_button;
+    // s013b: System -- root housekeeping (plain Gtk members, like m_pf_said).
+    Gtk::Box           m_sy_page{Gtk::Orientation::VERTICAL, 0};
+    Gtk::Stack         m_sy_states;
+    Gtk::Box           m_sy_list{Gtk::Orientation::VERTICAL, 10};
+    Gtk::Label         m_sy_sub, m_sy_caption, m_sy_gate, m_sy_run_caption, m_sy_done_big, m_sy_done_caption;
+    Gtk::Button        m_sy_go;
+    Gtk::Image*        m_sy_done_icon = nullptr;   // the check -- or the System disc when nothing ran
+    Gtk::Spinner       m_sy_spinner;
+    std::vector<core::sysclean::Item> m_sy_items;
+    bool               m_sy_acting = false;
+    std::thread        m_sy_worker;
+    std::mutex         m_sy_mx;
+    core::door::Result m_sy_result;
+    core::door::Plan   m_sy_plan;
+    Glib::Dispatcher   m_system_acted;
     // s013: Take snapshot -- the door's Root verb on a worker (pkexec waits on the password).
     Gtk::Label         m_pf_said;
     bool               m_pf_acting = false;   // UI thread: the snapshot worker owns m_door

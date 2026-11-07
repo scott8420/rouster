@@ -47,6 +47,8 @@ add_library(rouster_core STATIC
     src/core/Helper.cpp
     # Help (s013a2): the help text as data -- the selftest holds it to the pages.
     src/core/Help.cpp
+    # System (s013b): package cache, journal, trim -- measured as you, done by the helper.
+    src/core/System.cpp
     # The SHORTCUT-REGISTRY paradigm: one list, two consumers (App wires accels
     # from it, ShortcutsDialog renders from it) so a key and its advertised row
     # can't drift. GTK-free, so it lives in core and the selftest guards it

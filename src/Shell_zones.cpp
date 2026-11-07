@@ -93,6 +93,7 @@ void Shell::build_sidebar() {  // zone: brand + sections + module rows
     section("CLEANUP");
     item("scan", "rouster-scan-symbolic", "Smart Scan");
     item("sweep", "rouster-sweep-symbolic", "Sweep");
+    item("system", "rouster-system-symbolic", "System");
     item("dups", "rouster-dups-symbolic", "Duplicates");
     item("dev", "rouster-dev-symbolic", "Dev projects");
     section("ORGANIZE");
@@ -116,6 +117,7 @@ void Shell::build_sidebar() {  // zone: brand + sections + module rows
 void Shell::build_pages() {  // zone: the module pages
     build_scan_page();
     build_sweep_page();
+    build_system_page();
     build_dups_page();
     build_archive_page();
     build_projects_page();
@@ -242,6 +244,124 @@ void Shell::build_scan_page() {  // zone: Smart Scan
 
     m_scan_page.append(m_scan_states);
     m_stack.add(m_scan_page, "scan", "Smart Scan");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// System (s013b) -- outside home: the package cache, the journal, a trim, each
+// one request to the root helper. Four states like Sweep: start (Look),
+// results (the rows = the preview; two say "can't be undone"), running (the
+// password prompt, then root), done (what the helper said, line by line).
+// ─────────────────────────────────────────────────────────────────────────────
+void Shell::build_system_page() {  // zone: System
+    m_sy_states.set_transition_type(Gtk::StackTransitionType::CROSSFADE);
+    m_sy_states.set_transition_duration(220);
+    m_sy_states.set_vexpand(true);
+
+    auto start = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 14);
+    start->set_valign(Gtk::Align::CENTER);
+    start->set_halign(Gtk::Align::CENTER);
+    start->set_margin(40);
+    start->append(*hero("rouster-hero-system", 128));
+    start->append(*label("System", "hero-title"));
+    m_sy_sub.add_css_class("hero-sub");
+    m_sy_sub.set_wrap(true);
+    m_sy_sub.set_justify(Gtk::Justification::CENTER);
+    m_sy_sub.set_max_width_chars(52);
+    m_sy_sub.set_text("The package cache, the system journal and an SSD trim -- housekeeping outside your home, "
+                      "done as root after your password. Looking changes nothing.");
+    start->append(m_sy_sub);
+    auto look = Gtk::make_managed<Gtk::Button>("Look");
+    look->add_css_class("orb");
+    look->set_halign(Gtk::Align::CENTER);
+    look->set_margin_top(18);
+    look->signal_clicked().connect(sigc::mem_fun(*this, &Shell::on_system_look));
+    start->append(*look);
+    m_sy_states.add(*start, "start");
+
+    auto run = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 12);
+    run->set_valign(Gtk::Align::CENTER);
+    run->set_halign(Gtk::Align::CENTER);
+    m_sy_spinner.add_css_class("big");
+    m_sy_spinner.set_halign(Gtk::Align::CENTER);
+    run->append(m_sy_spinner);
+    m_sy_run_caption.add_css_class("hero-sub");
+    m_sy_run_caption.set_wrap(true);
+    m_sy_run_caption.set_justify(Gtk::Justification::CENTER);
+    m_sy_run_caption.set_max_width_chars(52);
+    run->append(m_sy_run_caption);
+    m_sy_states.add(*run, "running");
+
+    auto res_page = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 0);
+    auto scroll = Gtk::make_managed<Gtk::ScrolledWindow>();
+    scroll->set_policy(Gtk::PolicyType::NEVER, Gtk::PolicyType::AUTOMATIC);
+    scroll->set_vexpand(true);
+    auto res = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 14);
+    res->set_margin_start(32);
+    res->set_margin_end(32);
+    res->set_margin_top(12);
+    res->set_margin_bottom(16);
+    auto head = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 20);
+    head->append(*hero("rouster-hero-system", 88));
+    auto words = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 2);
+    words->set_valign(Gtk::Align::CENTER);
+    words->set_hexpand(true);
+    words->append(*label("System", "hero-title", 0.0f));
+    m_sy_caption.add_css_class("hero-caption");
+    m_sy_caption.set_xalign(0.0f);
+    m_sy_caption.set_wrap(true);
+    words->append(m_sy_caption);
+    head->append(*words);
+    auto again = Gtk::make_managed<Gtk::Button>("Look again");
+    again->add_css_class("ghost");
+    again->set_valign(Gtk::Align::CENTER);
+    again->signal_clicked().connect(sigc::mem_fun(*this, &Shell::on_system_look));
+    head->append(*again);
+    res->append(*head);
+    res->append(m_sy_list);
+    scroll->set_child(*res);
+    res_page->append(*scroll);
+    auto bar = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 16);
+    bar->add_css_class("act-bar");
+    m_sy_gate.add_css_class("dim");
+    m_sy_gate.set_xalign(0.0f);
+    m_sy_gate.set_hexpand(true);
+    m_sy_gate.set_wrap(true);
+    bar->append(m_sy_gate);
+    m_sy_go.add_css_class("act");
+    m_sy_go.signal_clicked().connect(sigc::mem_fun(*this, &Shell::on_system_run));
+    bar->append(m_sy_go);
+    res_page->append(*bar);
+    m_sy_states.add(*res_page, "results");
+
+    auto done = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 12);
+    done->set_valign(Gtk::Align::CENTER);
+    done->set_halign(Gtk::Align::CENTER);
+    done->set_margin(40);
+    m_sy_done_icon = hero("rouster-hero-done", 112);
+    done->append(*m_sy_done_icon);
+    m_sy_done_big.add_css_class("hero-big");
+    done->append(m_sy_done_big);
+    m_sy_done_caption.add_css_class("hero-sub");
+    m_sy_done_caption.set_wrap(true);
+    m_sy_done_caption.set_justify(Gtk::Justification::CENTER);
+    m_sy_done_caption.set_max_width_chars(64);
+    done->append(m_sy_done_caption);
+    auto btns = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 12);
+    btns->set_halign(Gtk::Align::CENTER);
+    btns->set_margin_top(12);
+    auto act = Gtk::make_managed<Gtk::Button>("Activity");
+    act->add_css_class("ghost");
+    act->signal_clicked().connect([this] { go_to("activity"); });
+    auto more = Gtk::make_managed<Gtk::Button>("Look again");
+    more->add_css_class("ghost");
+    more->signal_clicked().connect(sigc::mem_fun(*this, &Shell::on_system_look));
+    btns->append(*act);
+    btns->append(*more);
+    done->append(*btns);
+    m_sy_states.add(*done, "done");
+
+    m_sy_page.append(m_sy_states);
+    m_stack.add(m_sy_page, "system", "System");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1480,7 +1600,7 @@ void Shell::build_activity_page() {  // zone: Activity
     m_act_page.append(*hero("rouster-hero-activity", 96));
     m_act_page.append(*label("Activity", "hero-title"));
     auto intro = label("Everything Rouster has moved, shared or put in the Trash, newest first. "
-                       "Nothing is ever deleted, and any batch can be taken back.", "hero-sub");
+                       "Your files are never deleted, and any of their steps can be taken back. Root steps (System, snapshots) are listed too; Undo only closes them.", "hero-sub");
     intro->set_max_width_chars(60);
     m_act_page.append(*intro);
     m_act_undo.set_label("Undo");

@@ -255,3 +255,19 @@ window.rouster.help .sidebar-section { margin: 14px 12px 4px 12px; }
   font-family: monospace; color: #dffbea; background-color: rgba(0,0,0,0.32);
   border-radius: 6px; padding: 6px 10px; margin: 2px 0 2px 8px;
 }
+
+/* System (s013b): slate -- the machine's own housekeeping, done as root. */
+window.rouster.page-system {
+  background-image: radial-gradient(circle at 75% 15%, rgba(148,163,184,0.40), transparent 55%),
+                    linear-gradient(160deg, #1e293b 0%, #334155 55%, #0f172a 100%);
+}
+window.page-system button.orb {
+  background-image: linear-gradient(160deg, #cbd5e1 0%, #64748b 55%, #334155 100%);
+  box-shadow: 0 0 0 6px rgba(255,255,255,0.10), 0 10px 40px rgba(100,116,139,0.55);
+}
+window.page-system button.act {
+  background-image: linear-gradient(160deg, #fcd34d 0%, #d97706 100%);
+  box-shadow: 0 6px 22px rgba(217,119,6,0.35);
+}
+.sy-warn { color: #fcd34d; font-size: 0.88em; }
+.sy-note { color: rgba(244,241,251,0.60); font-size: 0.88em; }

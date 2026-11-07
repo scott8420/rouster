@@ -32,6 +32,7 @@
 #include "core/Profile.hpp"
 #include "core/Helper.hpp"
 #include "core/Help.hpp"
+#include "core/System.hpp"
 
 #include <algorithm>
 #include <array>
@@ -942,6 +943,22 @@ int main(int argc, char** argv) {
                                 "snapshot:0005", "dnf:1", "", ":5", "snapshot:1e2", "../snapshot:5"})
             if (hp::parse(bad)) { none = false; std::cout << "  (read: " << bad << ")\n"; }
         check("helper: anything else is not a request (17 tries)", none);
+        check("helper (s013b): pkgclean / trim / journal:28 / :7 / :365 read; journal:6, :366, pkgclean:1, trim:0, 'pkgclean ' don't",
+              hp::parse("pkgclean") == hp::Request{hp::Op::PkgClean, 0} && hp::parse("trim") == hp::Request{hp::Op::Trim, 0} &&
+              hp::parse("journal:28") == hp::Request{hp::Op::Journal, 28} && hp::parse("journal:7") && hp::parse("journal:365") &&
+              !hp::parse("journal:6") && !hp::parse("journal:366") && !hp::parse("pkgclean:1") && !hp::parse("trim:0") &&
+              !hp::parse("pkgclean ") && !hp::parse("journal") && !hp::parse("trim;reboot"));
+        check("helper (s013b): text round-trips every op", [&] {
+            for (const auto& r : {hp::Request{hp::Op::Snapshot, 5}, hp::Request{hp::Op::PkgClean, 0},
+                                  hp::Request{hp::Op::Journal, 30}, hp::Request{hp::Op::Trim, 0}})
+                if (hp::parse(hp::text(r)) != r) return false;
+            return true;
+        }());
+        check("helper (s013b): package cache + journal can't be undone; snapshot, trim lose nothing",
+              hp::irreversible(hp::Op::PkgClean) && hp::irreversible(hp::Op::Journal) &&
+              !hp::irreversible(hp::Op::Snapshot) && !hp::irreversible(hp::Op::Trim));
+        check("helper: human sizes", hp::human(0) == "0 B" && hp::human(3000000) == "3.0 MB" && hp::human(250000000000ull) == "250 GB",
+              hp::human(3000000));
         check("helper: text <-> parse", hp::text({hp::Op::Snapshot, 7}) == "snapshot:7" &&
               hp::parse(hp::text({hp::Op::Snapshot, 7})) == hp::Request{hp::Op::Snapshot, 7});
         const std::time_t t0 = 1794000000;   // a Nov 2026 second
@@ -981,6 +998,56 @@ int main(int argc, char** argv) {
         check("helper: place_for on a missing folder -> no", !hp::place_for((tmp / "nope").string()).ok);
         check("helper: list_snapshots on a missing folder -> empty", hp::list_snapshots((tmp / "nope").string()).empty());
         fs::remove_all(tmp, ec);
+    }
+    // -- System (s013b): measured as you; the plan is root requests only ------
+    {
+        std::cout << "\n-- system --\n";
+        namespace sy = core::sysclean;
+        namespace hp = core::helper;
+        const fs::path f = fs::temp_directory_path() / "rouster_selftest_system";
+        std::error_code ec;
+        fs::remove_all(f, ec);
+        fs::create_directories(f / "dnf/repo", ec);
+        fs::create_directories(f / "journal/abc", ec);
+        fs::create_directories(f / "bin", ec);
+        put_bytes(f, "dnf/repo/a.rpm", noise(300000, 1));
+        put_bytes(f, "journal/abc/system@1.journal", noise(120000, 2));
+        { std::ofstream(f / "bin/dnf") << "#!/bin/sh\n"; std::ofstream(f / "bin/journalctl") << "#!/bin/sh\n"; std::ofstream(f / "bin/fstrim") << "#!/bin/sh\n"; }
+        for (const char* p : {"bin/dnf", "bin/journalctl", "bin/fstrim"}) fs::permissions(f / p, fs::perms::owner_all, ec);
+        sy::Where w;
+        w.pkg_dirs = {(f / "dnf").string(), (f / "nope").string()};
+        w.journal = (f / "journal").string();
+        w.pkg_programs = {(f / "bin/dnf").string()};
+        w.journal_programs = {(f / "bin/journalctl").string()};
+        w.trim_programs = {(f / "bin/fstrim").string()};
+        w.trim_timer = (f / "no-timer").string();
+        const std::string before = files_snapshot(f);
+        auto items = sy::find(w);
+        check("system: three rows, in order", items.size() == 3 && items[0].req.op == hp::Op::PkgClean &&
+              items[1].req == hp::Request{hp::Op::Journal, hp::kJournalDefault} && items[2].req.op == hp::Op::Trim);
+        check("system: sizes are disk use (>= the bytes), missing dirs add nothing", items[0].bytes >= 300000 &&
+              items[0].bytes < 400000 && items[1].bytes >= 120000, hp::human(items[0].bytes) + " / " + hp::human(items[1].bytes));
+        check("system: presets -- cache checked, journal not (history), trim checked with no timer",
+              items[0].checked && !items[1].checked && items[2].checked);
+        check("system: dnf named in the why", items[0].why.find("dnf") != std::string::npos);
+        check("system: find changes nothing", files_snapshot(f) == before);
+        { std::ofstream(f / "no-timer") << ""; }
+        check("system: a weekly fstrim.timer -> trim unchecked, said", [&] {
+            auto x = sy::find(w); return !x[2].checked && x[2].note.find("weekly") != std::string::npos; }());
+        auto p = sy::plan(items);
+        check("system: plan = the checked rows as Root requests, unpreviewed",
+              p.actions.size() == 2 && !p.previewed && p.actions[0].verb == core::door::Verb::Root &&
+              p.actions[0].content == "pkgclean" && p.actions[1].content == "trim" &&
+              p.actions[0].from.empty() && p.actions[0].to.empty(), p.label);
+        items[1].checked = true;
+        check("system: journal checked -> journal:28 in the plan", sy::plan(items).actions.size() == 3 &&
+              sy::plan(items).actions[1].content == "journal:28");
+        w.pkg_programs = {(f / "bin/none").string()};
+        auto gone = sy::find(w);
+        gone[0].checked = true;   // even forced, a missing program is never planned
+        check("system: no dnf / apt-get -> unavailable, never planned",
+              !gone[0].available && sy::plan(gone).actions.empty());   // journal unchecked, trim off (the timer file exists now)
+        fs::remove_all(f, ec);
     }
     // -- Door: the one door, on a fixture home (s004) --------------------------
     {
@@ -1168,6 +1235,14 @@ int main(int argc, char** argv) {
             r = door.run(plan("snap", {rt("snapshot:5")}));
             check("door/root: polkit says no (127, Not authorized -- seen in the sandbox) -> 'not authorised'", !r.ok &&
                   !r.messages.empty() && r.messages.front().find("not authorised") != std::string::npos, r.messages.empty() ? "" : r.messages.front());
+            door.undo();
+            calls = 0;
+            door.set_root(fake(126, "", "Error executing command as another user: Request dismissed"), false);
+            r = door.run(plan("sys", {rt("pkgclean"), rt("journal:28"), rt("trim")}));
+            check("door/root (s013b): the prompt dismissed once -> pkexec asked once, the other two skipped, said",
+                  !r.ok && r.failed == 3 && calls == 1 && r.messages.size() == 3 &&
+                  r.messages[1].find("skipped -- not authorised") != std::string::npos,
+                  r.messages.size() > 1 ? r.messages[1] : "");
             door.undo();
             door.set_root(fake(1, core::helper::format_line({"snapshot", "failed", "home is not on btrfs"}) + "\n", ""), false);
             r = door.run(plan("snap", {rt("snapshot:5")}));
@@ -3163,7 +3238,7 @@ int main(int argc, char** argv) {
         bool pages = true;
         std::string missing;
         // Every sidebar page (Shell_zones' m_stack ids) has a topic -- F1 opens it.
-        for (const char* id : {"scan", "sweep", "dups", "dev", "projects", "rules", "archive", "preflight", "profile", "activity"})
+        for (const char* id : {"scan", "sweep", "system", "dups", "dev", "projects", "rules", "archive", "preflight", "profile", "activity"})
             if (!hl::find(id)) { pages = false; missing += std::string(id) + " "; }
         check("help: every sidebar page has a topic", pages, missing);
         std::set<std::string> ids;

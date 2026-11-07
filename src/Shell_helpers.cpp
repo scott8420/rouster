@@ -289,7 +289,7 @@ void Shell::paint_activity() {  // helper: the manifest's batches, newest first
             l->set_ellipsize(Pango::EllipsizeMode::MIDDLE);
             l->set_tooltip_text(r->verb == dr::Verb::Root ? "as root, through pkexec: " + r->to +
                                                                 (r->note.empty() ? "" : "\n" + r->note) +
-                                                                "\nUndo closes the step; the snapshot stays (Rouster's expire after the newest few)."
+                                                                "\nUndo closes the step; what ran as root isn't taken back."
                                 : r->verb == dr::Verb::Settings
                                     ? "what they were, saved first: " + r->from + "\nwhat was loaded: " + r->src
                                     : (dr::creates(r->verb) ? (r->src.empty() ? std::string("made") : r->src) : r->from) + "\n→ " + r->to);
@@ -375,6 +375,7 @@ void Shell::paint_preflight() {  // helper: gather + evaluate + repaint the card
     archive_gate();
     pj_gate();
     rl_gate();
+    system_gate();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -509,6 +510,82 @@ void Shell::sweep_gate() {  // helper: the act button's label + whether it may a
 // m_du_shown. Only the first kDupsShown groups are painted, and a group that
 // isn't painted is never checked -- nothing acts that wasn't shown.
 // ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// System (s013b). The rows are the preview; checks live in m_sy_items.
+// ─────────────────────────────────────────────────────────────────────────────
+void Shell::stop_system() {  // helper: a run in flight finishes (the door stays whole)
+    if (m_sy_worker.joinable()) m_sy_worker.join();
+}
+
+void Shell::paint_system() {  // helper: one card per item -- check, size, why, the warning
+    namespace hp = core::helper;
+    while (auto* c = m_sy_list.get_first_child()) m_sy_list.remove(*c);
+    for (std::size_t i = 0; i < m_sy_items.size(); ++i) {
+        const auto& it = m_sy_items[i];
+        auto card = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 14);
+        card->add_css_class("card");
+        auto cb = Gtk::make_managed<Gtk::CheckButton>();
+        cb->set_active(it.checked && it.available);
+        cb->set_sensitive(it.available);
+        cb->set_valign(Gtk::Align::CENTER);
+        cb->signal_toggled().connect([this, cb, i] {
+            if (i < m_sy_items.size()) m_sy_items[i].checked = cb->get_active();
+            system_gate();
+        });
+        card->append(*cb);
+        auto words = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 2);
+        words->set_hexpand(true);
+        words->append(*text(it.title, "card-title"));
+        auto why = text(it.why, "card-sub");
+        why->set_wrap(true);
+        words->append(*why);
+        auto note = text(it.note, hp::irreversible(it.req.op) && it.available ? "sy-warn" : "sy-note");
+        note->set_wrap(true);
+        words->append(*note);
+        card->append(*words);
+        if (it.sized) {
+            auto sz = text((it.complete ? "" : "at least ") + scan::human_bytes(it.bytes), "card-title", 1.0f);
+            sz->set_valign(Gtk::Align::CENTER);
+            if (!it.complete) sz->set_tooltip_text("Some of it isn't readable without root; the helper measures it all.");
+            card->append(*sz);
+        }
+        m_sy_list.append(*card);
+    }
+    std::uint64_t total = 0;
+    for (const auto& it : m_sy_items) if (it.sized) total += it.bytes;
+    m_sy_caption.set_text(scan::human_bytes(total) + " in the package cache and the journal. Each runs as root, "
+                          "after one password; nothing here touches your home.");
+    system_gate();
+}
+
+void Shell::system_gate() {  // helper: the act button's label + whether it may act
+    namespace hp = core::helper;
+    const bool fixture = std::getenv("ROUSTER_HOME") && *std::getenv("ROUSTER_HOME");
+    std::size_t n = 0;
+    std::string gone;   // the checked ones that can't be undone, by name
+    for (const auto& it : m_sy_items)
+        if (it.checked && it.available) {
+            ++n;
+            if (hp::irreversible(it.req.op)) {
+                std::string t = it.title;
+                t[0] = static_cast<char>(std::tolower(static_cast<unsigned char>(t[0])));
+                gone += (gone.empty() ? "the " : " and the ") + t;
+            }
+        }
+    m_sy_go.set_label(fixture ? "Try " + std::to_string(n) + " (dry run)"
+                              : "Run " + std::to_string(n) + " as root");
+    std::string why;
+    if (!core::door::helper_installed()) why = "Needs the root helper: ./install.sh --helper (sudo).";
+    else if (m_pf_red) why = "A Preflight check is red -- see Preflight.";
+    else if (door_busy()) why = "Waiting for another step to finish.";
+    else if (!n) why = "Nothing checked.";
+    m_sy_go.set_sensitive(why.empty());
+    m_sy_gate.set_text(!why.empty() ? why
+                       : fixture ? std::string("A fixture never runs root work: the helper says what it would do.")
+                       : !gone.empty() ? "Asks for your password. Clearing " + gone + " can't be undone."  
+                              : std::string("Asks for your password. A trim changes no file."));
+}
+
 void Shell::stop_preflight() {  // helper: a snapshot in flight finishes (the door stays whole)
     if (m_pf_worker.joinable()) m_pf_worker.join();
 }
@@ -1904,7 +1981,7 @@ void Shell::stop_dev() {  // helper: cancel + join (close, dtor)
 }
 
 bool Shell::door_busy() const {  // helper: a retire / restore / duplicates run owns the door right now
-    return m_dv_acting || m_du_acting || m_pf_acting;
+    return m_dv_acting || m_du_acting || m_pf_acting || m_sy_acting;
 }
 
 bool Shell::tick_dev() {  // helper: the live counters while looking

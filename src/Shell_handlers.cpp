@@ -35,6 +35,7 @@ void Shell::on_nav(const std::string& page) {  // handler: a sidebar row was cho
     m_page = page;
     add_css_class("page-" + page);   // the window's gradient follows the module (rouster.css)
     m_stack.set_visible_child(page);
+    if (page == "system" && m_sy_states.get_visible_child_name() == "results") { paint_preflight(); system_gate(); }
     if (page == "preflight" || page == "sweep" || page == "dev" || page == "dups" || page == "archive") paint_preflight();   // fresh gate on arrival
     if (page == "projects" && m_pj_states.get_visible_child_name() == "home") paint_projects();
     if (page == "rules" && m_rl_states.get_visible_child_name() == "list") paint_rules();   // folders may have appeared   // templates may have been edited in Files
@@ -75,8 +76,8 @@ void Shell::on_undo() {  // handler: undo the last batch, through the door
     }
     const auto r = m_door->undo();
     std::string said = (r.ok ? "Undid \u201c" : "Partly undid \u201c") + label + "\u201d -- " +
-                       (root_only ? "closed; a snapshot isn't taken back -- Rouster's own expire after the newest " +
-                                        std::to_string(core::helper::kKeepDefault)
+                       (root_only ? std::string("closed; what ran as root isn't taken back (a snapshot stays, "
+                                        "a cleaned cache refills, vacuumed logs are gone)")
                         : shared_only ? "closed; the files were and are identical, so nothing had to move"
                                     : std::to_string(r.done) + " put back");
     if (r.failed) said += ", " + std::to_string(r.failed) + " could not be: " + r.messages.front();
@@ -329,6 +330,86 @@ void Shell::on_dups_run() {  // handler: the checked copies -> a plan -> worker 
         }
         m_dups_acted.emit();
     });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// s013b: System. Look measures as you (a few folders under /var); Run sends
+// the checked rows through the door, each a Root step -- pkexec asks once
+// (auth_admin_keep), and a refusal skips the rest.
+// ─────────────────────────────────────────────────────────────────────────────
+void Shell::on_system_look() {  // handler: measure the three (read-only, as you)
+    if (m_sy_acting) return;
+    m_sy_items = core::sysclean::find();
+    if (auto lg = log::get(log::Area::System))
+        for (const auto& it : m_sy_items)
+            lg->info("find {}: {}{} {}{}", core::helper::text(it.req), it.complete ? "" : ">=", core::scan::human_bytes(it.bytes),
+                     it.available ? "" : "(not here) ", it.checked ? "checked" : "unchecked");
+    paint_preflight();
+    paint_system();
+    m_sy_states.set_visible_child("results");
+}
+
+void Shell::on_system_run() {  // handler: the checked rows -> a plan -> worker -> the door -> pkexec
+    if (!m_door || door_busy() || m_sy_worker.joinable()) return;
+    if (m_sy_states.get_visible_child_name() != "results") return;   // preview first: only from the list
+    paint_preflight();
+    if (m_pf_red) { system_gate(); return; }
+    core::door::Plan plan = core::sysclean::plan(m_sy_items);
+    if (plan.actions.empty()) { system_gate(); return; }
+    plan.previewed = true;   // the cards on screen were the preview
+    m_sy_plan = plan;
+    m_sy_acting = true;
+    if (m_act_undo_action) m_act_undo_action->set_enabled(false);
+    m_sy_run_caption.set_text("Asking for your password, then running " + std::to_string(plan.actions.size()) +
+                              (plan.actions.size() == 1 ? " step" : " steps") + " as root. A trim can take a minute.");
+    m_sy_spinner.start();
+    m_sy_states.set_visible_child("running");
+    if (auto lg = log::get(log::Area::System)) {
+        lg->info("run '{}': {} root steps", plan.label, plan.actions.size());
+        for (const auto& a : plan.actions) lg->info("  {}", a.content);
+    }
+    m_sy_worker = std::thread([this, plan] {
+        const auto r = m_door->run(plan);
+        {
+            std::lock_guard lk(m_sy_mx);
+            m_sy_result = r;
+        }
+        m_system_acted.emit();
+    });
+}
+
+void Shell::on_system_acted() {  // handler: the helper answered (Dispatcher -> UI thread)
+    if (m_sy_worker.joinable()) m_sy_worker.join();
+    m_sy_acting = false;
+    m_sy_spinner.stop();
+    core::door::Result r;
+    {
+        std::lock_guard lk(m_sy_mx);
+        r = m_sy_result;
+    }
+    std::string lines;
+    if (r.batch)
+        for (const auto& b : m_door->batches())
+            if (b.id == r.batch)
+                for (auto id : b.records)
+                    if (const auto* rec = m_door->record(id)) {
+                        const auto req = core::helper::parse(rec->to);
+                        const std::string what = req ? core::helper::op_title(req->op) : rec->to;
+                        lines += (lines.empty() ? "" : "\n") + std::string(rec->state == core::door::State::Done ? "✓ " : "✗ ") +
+                                 (rec->state == core::door::State::Done ? (rec->note.empty() ? what : rec->note)
+                                                                        : what + " -- " + rec->error);
+                    }
+    if (lines.empty() && !r.messages.empty()) lines = r.messages.front();
+    const bool fixture = std::getenv("ROUSTER_HOME") && *std::getenv("ROUSTER_HOME");
+    if (m_sy_done_icon) m_sy_done_icon->set_from_icon_name(r.done ? "rouster-hero-done" : "rouster-hero-system");
+    m_sy_done_big.set_text(r.ok ? (fixture ? "Dry run" : "Done") : r.done ? "Partly done" : "Nothing ran");
+    m_sy_done_caption.set_text(lines);
+    if (auto lg = log::get(log::Area::System)) {
+        lg->info("run: {} done, {} failed", r.done, r.failed);
+        for (const auto& m : r.messages) lg->warn("  {}", m);
+    }
+    m_sy_states.set_visible_child("done");
+    paint_activity();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
