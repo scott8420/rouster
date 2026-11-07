@@ -2,7 +2,7 @@
 #include <gtkmm/window.h>
 
 // ─────────────────────────────────────────────────────────────────────────────
-// AboutWindow -- the DIALOG-LIFETIME exemplar (a stone the README backlog named:
+// AboutWindow -- (s014a2: two tabs, About + Credits; text in core/About) -- the DIALOG-LIFETIME exemplar (a stone the README backlog named:
 // "hide-on-close vs transient dialog lifetime"). It carries two paradigms at
 // once so a single running window exercises both:
 //

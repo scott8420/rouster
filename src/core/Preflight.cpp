@@ -197,7 +197,8 @@ std::vector<Check> evaluate(const Inputs& in) {
             c.detail = "Last backup " + human_age(*in.pika_age_s) + " ago -- older than " +
                        std::to_string(in.pika_max_days) + " days.";
         } else {
-            c.detail = "Last backup " + human_age(*in.pika_age_s) + " ago.";
+            const std::string age = human_age(*in.pika_age_s);
+            c.detail = "Last backup " + (age == "just now" ? age : age + " ago") + ".";
         }
         out.push_back(c);
     }

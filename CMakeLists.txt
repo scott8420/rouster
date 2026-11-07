@@ -49,6 +49,8 @@ add_library(rouster_core STATIC
     src/core/Help.cpp
     # System (s013b): package cache, journal, trim -- measured as you, done by the helper.
     src/core/System.cpp
+    # About (s014a2): the About window's facts and credits, as data.
+    src/core/About.cpp
     # The SHORTCUT-REGISTRY paradigm: one list, two consumers (App wires accels
     # from it, ShortcutsDialog renders from it) so a key and its advertised row
     # can't drift. GTK-free, so it lives in core and the selftest guards it
@@ -129,3 +131,4 @@ target_include_directories(rouster PRIVATE include ${GTKMM_INCLUDE_DIRS})
 target_link_libraries(rouster     PRIVATE ${GTKMM_LIBRARIES} rouster_core spdlog::spdlog)
 target_link_directories(rouster   PRIVATE ${GTKMM_LIBRARY_DIRS})
 target_compile_options(rouster    PRIVATE ${GTKMM_CFLAGS_OTHER})
+target_compile_definitions(rouster PRIVATE ROUSTER_VERSION="${PROJECT_VERSION}")

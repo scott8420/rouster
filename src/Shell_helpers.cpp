@@ -331,9 +331,9 @@ void Shell::paint_preflight() {  // helper: gather + evaluate + repaint the card
         icon->set_pixel_size(28);
         const char* chip = "";
         switch (c.status) {
-            case pf::Status::Green: icon->set_from_icon_name("emblem-ok-symbolic");      icon->add_css_class("pf-green"); chip = "OK";    break;
-            case pf::Status::Amber: icon->set_from_icon_name("dialog-warning-symbolic"); icon->add_css_class("pf-amber"); chip = "NOTE";  break;
-            case pf::Status::Red:   icon->set_from_icon_name("dialog-error-symbolic");   icon->add_css_class("pf-red");   chip = "STOP";  break;
+            case pf::Status::Green: icon->set_from_icon_name("rouster-ok-symbolic");     icon->add_css_class("pf-green"); chip = "OK";    break;
+            case pf::Status::Amber: icon->set_from_icon_name("rouster-warn-symbolic");   icon->add_css_class("pf-amber"); chip = "NOTE";  break;
+            case pf::Status::Red:   icon->set_from_icon_name("rouster-stop-symbolic");   icon->add_css_class("pf-red");   chip = "STOP";  break;
         }
         auto words = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 2);
         words->set_hexpand(true);

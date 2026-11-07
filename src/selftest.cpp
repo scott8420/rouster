@@ -32,6 +32,7 @@
 #include "core/Profile.hpp"
 #include "core/Helper.hpp"
 #include "core/Help.hpp"
+#include "core/About.hpp"
 #include "core/System.hpp"
 
 #include <algorithm>
@@ -895,6 +896,13 @@ int main(int argc, char** argv) {
               status_of(ext, "filesystem") == Status::Amber && status_of(ext, "pika") == Status::Red);
         pf::Inputs none = good;
         none.pika_age_s.reset();
+        {
+            pf::Inputs now = good;
+            now.pika_age_s = 30;
+            std::string d;
+            for (const auto& c : pf::evaluate(now)) if (c.id == "pika") d = c.detail;
+            check("checklist: a backup a moment ago reads 'just now', not 'just now ago' (s014)", d == "Last backup just now.", d);
+        }
         check("checklist: no Pika history on btrfs is amber", status_of(pf::evaluate(none), "pika") == Status::Amber);
 
         pf::Inputs tight = good;
@@ -3272,6 +3280,55 @@ int main(int argc, char** argv) {
         for (const auto& sec : pf->sections) for (const auto& p : sec.paras)
             if (p.find("newest " + std::to_string(core::helper::kKeepDefault)) != std::string::npos) keep = true;
         check("help: Preflight's keep-N matches the code", keep);
+    }
+    // -- About (s014a2): the credits are held to the tree ------------------------
+    {
+        std::cout << "\n-- about --\n";
+        namespace ab = core::about;
+        std::set<std::string> vendored;
+        bool full = true;
+        for (const auto& g : ab::credits()) {
+            if (g.heading.empty() || g.items.empty()) full = false;
+            for (const auto& c : g.items) {
+                if (c.name.empty() || c.what.empty()) full = false;
+                if (!c.vendored.empty()) vendored.insert(c.vendored);
+            }
+        }
+        std::vector<std::string> missing;
+        for (const auto& e : fs::directory_iterator(fs::path(ROUSTER_SOURCE_DIR) / "third_party"))
+            if (e.is_regular_file() && !vendored.count(e.path().filename().string())) missing.push_back(e.path().filename().string());
+        check("about: every file in third_party/ is credited under Built with", missing.empty(),
+              missing.empty() ? std::to_string(vendored.size()) + " vendored" : missing.front());
+        check("about: no empty group or credit; the tagline and description say something",
+              full && std::string(ab::tagline()).size() > 20 && std::string(ab::description()).size() > 40);
+    }
+    // -- Icons (s014): every icon the UI names is Rouster's own, in the gresource --
+    // A theme icon can be missing (Scott's Fedora had no emblem-ok-symbolic: broken
+    // placeholders on Preflight). Allowed from the theme: open-menu-symbolic only.
+    {
+        std::cout << "\n-- icons --\n";
+        const fs::path root = ROUSTER_SOURCE_DIR;
+        std::string xml;
+        { std::ifstream in(root / "resources/rouster.gresource.xml"); std::ostringstream ss; ss << in.rdbuf(); xml = ss.str(); }
+        std::vector<std::string> bad;
+        std::size_t named = 0;
+        for (const auto& e : fs::recursive_directory_iterator(root / "src")) {
+            if (!e.is_regular_file() || e.path().extension() != ".cpp") continue;
+            std::ifstream in(e.path());
+            std::string line;
+            for (int n = 1; std::getline(in, line); ++n)
+                for (std::size_t p = line.find("-symbolic\""); p != std::string::npos; p = line.find("-symbolic\"", p + 1)) {
+                    const auto q = line.rfind('"', p);
+                    if (q == std::string::npos) continue;
+                    const std::string name = line.substr(q + 1, p + 9 - q - 1);
+                    ++named;
+                    if (name == "open-menu-symbolic") continue;
+                    if (name.rfind("rouster-", 0) != 0 || xml.find("alias=\"" + name + ".svg\"") == std::string::npos)
+                        bad.push_back(fs::relative(e.path(), root).string() + ":" + std::to_string(n) + " " + name);
+                }
+        }
+        check("icons: every symbolic icon named is Rouster's own and in the gresource", bad.empty() && named > 10,
+              bad.empty() ? std::to_string(named) + " names" : bad.front());
     }
     // -- Shortcuts: the registry paradigm, exercised ---------------------------
     // A seed's claim isn't a fact until a consumer exercises it. The registry's

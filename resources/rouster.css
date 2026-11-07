@@ -271,3 +271,12 @@ window.page-system button.act {
 }
 .sy-warn { color: #fcd34d; font-size: 0.88em; }
 .sy-note { color: rgba(244,241,251,0.60); font-size: 0.88em; }
+
+/* About (s014a2): two tabs, the Help window's violet. */
+window.rouster.about {
+  background-image: radial-gradient(circle at 80% 10%, rgba(232,121,249,0.28), transparent 55%),
+                    linear-gradient(160deg, #1f1a3d 0%, #2a2252 55%, #15112c 100%);
+}
+.about-version { color: rgba(244,241,251,0.75); font-weight: 600; }
+.about-small { color: rgba(244,241,251,0.55); font-size: 0.88em; }
+window.rouster.about linkbutton > button, window.rouster.about button.link { color: #c4b5fd; }
