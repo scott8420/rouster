@@ -1,6 +1,7 @@
 #include "Shell.hpp"
 #include "core/Recents.hpp"
 #include "core/Preflight.hpp"
+#include "core/Helper.hpp"
 #include "core/Settings.hpp"
 #include "Log.hpp"
 
@@ -278,12 +279,18 @@ void Shell::paint_activity() {  // helper: the manifest's batches, newest first
                 default:                ++failed; mark = "✗"; break;
             }
             // A created thing's `from` is the door's staging name: show what was made (and, for a copy, from what).
-            const std::string what = r->verb == dr::Verb::Settings ? std::string("GNOME settings (dconf load /)")
+            const auto req = r->verb == dr::Verb::Root ? core::helper::parse(r->to) : std::nullopt;
+            const std::string what = r->verb == dr::Verb::Root ? (req ? core::helper::describe(*req) : r->to) +
+                                                                     (r->note.empty() ? "" : " -- " + r->note)
+                                   : r->verb == dr::Verb::Settings ? std::string("GNOME settings (dconf load /)")
                                    : r->verb == dr::Verb::Copy ? r->src + " → " + r->to : dr::creates(r->verb) ? r->to : r->from;
             auto l = text(std::string(mark) + "  " + dr::verb_name(r->verb) + "  " + what +
                           (r->error.empty() ? "" : "  -- " + r->error), "detail-path");
             l->set_ellipsize(Pango::EllipsizeMode::MIDDLE);
-            l->set_tooltip_text(r->verb == dr::Verb::Settings
+            l->set_tooltip_text(r->verb == dr::Verb::Root ? "as root, through pkexec: " + r->to +
+                                                                (r->note.empty() ? "" : "\n" + r->note) +
+                                                                "\nUndo closes the step; the snapshot stays (Rouster's expire after the newest few)."
+                                : r->verb == dr::Verb::Settings
                                     ? "what they were, saved first: " + r->from + "\nwhat was loaded: " + r->src
                                     : (dr::creates(r->verb) ? (r->src.empty() ? std::string("made") : r->src) : r->from) + "\n→ " + r->to);
             body->append(*l);
@@ -339,6 +346,21 @@ void Shell::paint_preflight() {  // helper: gather + evaluate + repaint the card
         ch->set_valign(Gtk::Align::CENTER);
         card->append(*icon);
         card->append(*words);
+        // s013: the snapshot row can act -- through the door's Root verb, so it's in Activity.
+        // A fixture asks for a dry run, so it may try whenever the helper is there.
+        const bool fixture = std::getenv("ROUSTER_HOME") && *std::getenv("ROUSTER_HOME");
+        if (c.id == "snapshot" && in.helper && (in.snap_possible || fixture)) {
+            auto b = Gtk::make_managed<Gtk::Button>(m_pf_acting ? "Waiting…" : fixture ? "Try (dry run)" : "Take snapshot");
+            b->add_css_class("ghost");
+            b->set_valign(Gtk::Align::CENTER);
+            b->set_sensitive(!door_busy());
+            b->set_tooltip_text(fixture ? std::string("A fixture never snapshots: the helper says what it would do, and does nothing.")
+                                        : "A read-only btrfs snapshot of " + in.snap_dir.substr(0, in.snap_dir.rfind('/')) +
+                                              ", in " + in.snap_dir + ". Rouster keeps its newest " +
+                                              std::to_string(core::helper::kKeepDefault) + ". Asks for your password.");
+            b->signal_clicked().connect(sigc::mem_fun(*this, &Shell::on_snapshot_take));
+            card->append(*b);
+        }
         card->append(*ch);
         m_pf_rows.append(*card);
         if (auto lg = log::get(log::Area::Preflight))
@@ -487,6 +509,10 @@ void Shell::sweep_gate() {  // helper: the act button's label + whether it may a
 // m_du_shown. Only the first kDupsShown groups are painted, and a group that
 // isn't painted is never checked -- nothing acts that wasn't shown.
 // ─────────────────────────────────────────────────────────────────────────────
+void Shell::stop_preflight() {  // helper: a snapshot in flight finishes (the door stays whole)
+    if (m_pf_worker.joinable()) m_pf_worker.join();
+}
+
 void Shell::stop_dups() {  // helper: cancel + join (close, dtor)
     if (m_du_progress) m_du_progress->cancel = true;
     if (m_du_worker.joinable()) m_du_worker.join();
@@ -1878,7 +1904,7 @@ void Shell::stop_dev() {  // helper: cancel + join (close, dtor)
 }
 
 bool Shell::door_busy() const {  // helper: a retire / restore / duplicates run owns the door right now
-    return m_dv_acting || m_du_acting;
+    return m_dv_acting || m_du_acting || m_pf_acting;
 }
 
 bool Shell::tick_dev() {  // helper: the live counters while looking

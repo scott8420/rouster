@@ -1,4 +1,5 @@
 #include "Shell.hpp"
+#include "core/Helper.hpp"
 #include "AboutWindow.hpp"
 #include "ShortcutsDialog.hpp"
 #include "Log.hpp"
@@ -60,16 +61,22 @@ void Shell::on_undo() {  // handler: undo the last batch, through the door
     if (!m_door || door_busy() || !m_door->can_undo()) return;
     const std::string label = m_door->undo_label();
     bool shared_only = false;   // a Duplicates share: nothing moved, so nothing is "put back"
+    bool root_only = false;     // s013: a root step (a snapshot) is closed, not taken back
     for (auto it = m_door->batches().rbegin(); it != m_door->batches().rend(); ++it) {
         if (it->undone) continue;
-        shared_only = !it->records.empty();
-        for (auto id : it->records)
-            if (const auto* rec = m_door->record(id); rec && rec->verb != core::door::Verb::Dedupe) shared_only = false;
+        shared_only = root_only = !it->records.empty();
+        for (auto id : it->records) {
+            const auto* rec = m_door->record(id);
+            if (rec && rec->verb != core::door::Verb::Dedupe) shared_only = false;
+            if (rec && rec->verb != core::door::Verb::Root) root_only = false;
+        }
         break;
     }
     const auto r = m_door->undo();
     std::string said = (r.ok ? "Undid \u201c" : "Partly undid \u201c") + label + "\u201d -- " +
-                       (shared_only ? "closed; the files were and are identical, so nothing had to move"
+                       (root_only ? "closed; a snapshot isn't taken back -- Rouster's own expire after the newest " +
+                                        std::to_string(core::helper::kKeepDefault)
+                        : shared_only ? "closed; the files were and are identical, so nothing had to move"
                                     : std::to_string(r.done) + " put back");
     if (r.failed) said += ", " + std::to_string(r.failed) + " could not be: " + r.messages.front();
     m_act_said.set_text(said);
@@ -321,6 +328,65 @@ void Shell::on_dups_run() {  // handler: the checked copies -> a plan -> worker 
         }
         m_dups_acted.emit();
     });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// s013: Take snapshot (Preflight). One Root action through the door; the
+// door runs `pkexec rouster-helper run snapshot:5` -- which waits on the
+// password prompt, so it runs on a worker and every other door use waits.
+// ─────────────────────────────────────────────────────────────────────────────
+void Shell::on_snapshot_take() {  // handler: Preflight's Take snapshot -> worker -> the door
+    if (!m_door || door_busy() || m_pf_worker.joinable()) return;
+    core::door::Plan plan;
+    plan.label = "Snapshot of home";
+    core::door::Action a;
+    a.verb = core::door::Verb::Root;
+    a.content = core::helper::text({core::helper::Op::Snapshot, core::helper::kKeepDefault});
+    a.reason = core::helper::describe({core::helper::Op::Snapshot, core::helper::kKeepDefault});
+    plan.actions.push_back(a);
+    plan.previewed = true;   // the snapshot card (and its tooltip) was the preview
+    m_pf_acting = true;
+    if (m_act_undo_action) m_act_undo_action->set_enabled(false);
+    m_pf_said.set_text("Asking for your password -- the snapshot runs as root.");
+    m_pf_said.set_visible(true);
+    paint_preflight();       // the button reads Waiting… and is off
+    if (auto lg = log::get(log::Area::Preflight)) lg->info("snapshot: asking root for {}", a.content);
+    m_pf_worker = std::thread([this, plan] {
+        const auto r = m_door->run(plan);
+        {
+            std::lock_guard lk(m_pf_mx);
+            m_pf_result = r;
+        }
+        m_snapshot_taken.emit();
+    });
+}
+
+void Shell::on_snapshot_taken() {  // handler: the helper answered (Dispatcher -> UI thread)
+    if (m_pf_worker.joinable()) m_pf_worker.join();
+    m_pf_acting = false;
+    core::door::Result r;
+    {
+        std::lock_guard lk(m_pf_mx);
+        r = m_pf_result;
+    }
+    std::string note;
+    if (r.batch)
+        for (const auto& b : m_door->batches())
+            if (b.id == r.batch)
+                for (auto id : b.records)
+                    if (const auto* rec = m_door->record(id)) note = rec->note;
+    const bool fixture = std::getenv("ROUSTER_HOME") && *std::getenv("ROUSTER_HOME");
+    if (r.ok) m_pf_said.set_text((fixture ? "Dry run (a fixture never snapshots): " : "Done: ") + note + ".");
+    else {
+        std::string why = r.messages.empty() ? std::string("the helper failed") : r.messages.front();
+        if (why.rfind("failed: root ", 0) == 0 && why.find(" -- ") != std::string::npos) why = why.substr(why.find(" -- ") + 4);
+        m_pf_said.set_text("No snapshot: " + why + ".");
+    }
+    if (auto lg = log::get(log::Area::Preflight)) {
+        lg->info("snapshot: {} -- {}", r.ok ? "ok" : "failed", r.ok ? note : (r.messages.empty() ? "" : r.messages.front()));
+    }
+    paint_preflight();
+    paint_activity();
 }
 
 void Shell::on_dups_acted() {  // handler: the door finished (Dispatcher -> UI thread)

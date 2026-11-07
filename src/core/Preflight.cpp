@@ -1,5 +1,7 @@
 #include "core/Preflight.hpp"
 #include "core/Scan.hpp"   // human_bytes
+#include "core/Helper.hpp" // s013: where Rouster's snapshots are
+#include "core/Door.hpp"   // helper_installed
 
 #include <ctime>
 #include <fstream>
@@ -106,6 +108,21 @@ Inputs gather(const std::string& home) {
         in.free_bytes  = static_cast<std::uint64_t>(vs.f_bavail) * vs.f_frsize;
         in.total_bytes = static_cast<std::uint64_t>(vs.f_blocks) * vs.f_frsize;
     }
+
+    // s013: Rouster's snapshots (names carry the time they were taken).
+    const auto place = helper::place_for(home);
+    in.snap_possible = place.ok;
+    in.snap_why = place.why;
+    in.helper = door::helper_installed();
+    if (place.ok) {
+        in.snap_dir = place.dir;
+        const auto names = helper::list_snapshots(place.dir);
+        in.snap_count = static_cast<int>(names.size());
+        if (!names.empty()) {
+            in.snap_newest = names.front();
+            if (const auto t = helper::snapshot_time(names.front())) in.snap_age_s = static_cast<std::int64_t>(now - *t);
+        }
+    }
     return in;
 }
 
@@ -144,12 +161,27 @@ std::vector<Check> evaluate(const Inputs& in) {
         out.push_back(c);
     }
 
-    // 2. Snapshot. Check-only at s003 (Q3): taking one needs the root helper.
+    // 2. Snapshot (s013): green when one of Rouster's is fresh. Never red --
+    // Pika is the other net, and a missing snapshot doesn't stop a clean.
     {
         Check c{"snapshot", "Snapshot", "", Status::Amber};
-        c.detail = btrfs
-            ? "Not taken yet -- snapshots need the small root helper, due before the first clean (s005)."
-            : "Not available on " + (in.mount ? in.mount->fstype : std::string("this filesystem")) + ".";
+        if (!btrfs) {
+            c.detail = "Not available on " + (in.mount ? in.mount->fstype : std::string("this filesystem")) + ".";
+        } else if (!in.snap_possible) {
+            c.detail = "Can't be taken here: " + in.snap_why + ".";
+        } else if (in.snap_age_s && *in.snap_age_s >= -300 &&
+                   *in.snap_age_s < static_cast<std::int64_t>(in.snap_fresh_hours) * 3600) {
+            c.status = Status::Green;
+            c.detail = "Taken " + (human_age(*in.snap_age_s) == "just now" ? std::string("just now")
+                                                                           : human_age(*in.snap_age_s) + " ago") +
+                       " -- " + in.snap_dir + "/" + in.snap_newest + " (" + std::to_string(in.snap_count) +
+                       " kept, read-only).";
+        } else {
+            const std::string last = in.snap_age_s ? "The last one was " + human_age(*in.snap_age_s) + " ago"
+                                                   : std::string("None taken yet");
+            c.detail = in.helper ? last + " -- take one before a big clean."
+                                 : last + " -- taking one needs the root helper: ./install.sh --helper (sudo).";
+        }
         out.push_back(c);
     }
 

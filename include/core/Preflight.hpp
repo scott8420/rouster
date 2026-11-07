@@ -45,6 +45,15 @@ struct Inputs {
     std::uint64_t               free_bytes  = 0;
     std::uint64_t               total_bytes = 0;
     int                         pika_max_days = 7;   // REQUIREMENTS §3.3 default
+    // s013: the snapshot row. Read without root: the folder is 0755.
+    bool                        snap_possible = false;  // helper::place_for(home).ok
+    std::string                 snap_why;               // ...and why not
+    std::string                 snap_dir;               // "/home/.rouster-snapshots"
+    std::optional<std::int64_t> snap_age_s;             // the newest of Rouster's; nullopt = none
+    std::string                 snap_newest;            // its name
+    int                         snap_count = 0;
+    bool                        helper = false;         // the helper is installed
+    int                         snap_fresh_hours = 24;  // newer than this -> green
 };
 
 // Where Pika keeps its history, relative to home: the native and the Flatpak

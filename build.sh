@@ -21,7 +21,7 @@ if command -v mold >/dev/null 2>&1; then
 fi
 
 cmake -B build "${gen[@]}" "${launcher[@]}" "${linker[@]}"
-cmake --build build --target rouster rouster_selftest -j"$(nproc)"
+cmake --build build --target rouster rouster_selftest rouster-helper -j"$(nproc)"
 echo ""
-echo "Built: ./build/rouster  and  ./build/rouster_selftest"
+echo "Built: ./build/rouster, ./build/rouster_selftest, ./build/rouster-helper"
 echo "Smoke: ./build/rouster_selftest"

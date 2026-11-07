@@ -30,6 +30,7 @@
 #include "core/Rules.hpp"
 #include "core/Settings.hpp"
 #include "core/Profile.hpp"
+#include "core/Helper.hpp"
 
 #include <algorithm>
 #include <array>
@@ -47,6 +48,7 @@
 
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/statfs.h>
 #include <unistd.h>
 #include <filesystem>
 #include <iostream>
@@ -849,7 +851,31 @@ int main(int argc, char** argv) {
         auto cs = pf::evaluate(good);
         check("checklist: four rows (repos waits for s006)", cs.size() == 4);
         check("checklist: own btrfs subvolume is green", status_of(cs, "filesystem") == Status::Green);
-        check("checklist: snapshot is amber until the helper", status_of(cs, "snapshot") == Status::Amber);
+        check("checklist: snapshot is amber with none taken", status_of(cs, "snapshot") == Status::Amber);
+        {   // s013: the snapshot row
+            const auto detail_of = [](const std::vector<pf::Check>& v) { for (const auto& c : v) if (c.id == "snapshot") return c.detail; return std::string(); };
+            pf::Inputs sn = good;
+            sn.snap_possible = true; sn.helper = true; sn.snap_dir = "/home/.rouster-snapshots";
+            sn.snap_newest = "home-20261106-120000"; sn.snap_count = 3;
+            sn.snap_age_s = 2 * 3600;
+            const auto fresh = pf::evaluate(sn);
+            check("snapshot row: one 2 hours old -> green, names it", status_of(fresh, "snapshot") == Status::Green &&
+                  detail_of(fresh).find("home-20261106-120000") != std::string::npos, detail_of(fresh));
+            sn.snap_age_s = 30 * 3600;
+            check("snapshot row: 30 hours old -> amber, says when", status_of(pf::evaluate(sn), "snapshot") == Status::Amber &&
+                  detail_of(pf::evaluate(sn)).find("30 hours") != std::string::npos, detail_of(pf::evaluate(sn)));
+            sn.snap_age_s = -86400;   // a clock that went back: not green on a future stamp
+            check("snapshot row: a stamp from tomorrow is not fresh", status_of(pf::evaluate(sn), "snapshot") == Status::Amber);
+            sn.snap_age_s.reset(); sn.helper = false;
+            check("snapshot row: no helper -> amber, names install.sh --helper",
+                  detail_of(pf::evaluate(sn)).find("install.sh --helper") != std::string::npos, detail_of(pf::evaluate(sn)));
+            sn.snap_possible = false; sn.snap_why = "home shares the subvolume mounted at /";
+            check("snapshot row: can't be taken -> amber with the why", status_of(pf::evaluate(sn), "snapshot") == Status::Amber &&
+                  detail_of(pf::evaluate(sn)).find("mounted at /") != std::string::npos);
+            sn.mount = *w;   // ext4
+            sn.snap_possible = true; sn.helper = true; sn.snap_age_s = 60;
+            check("snapshot row: never green off btrfs, never red", status_of(pf::evaluate(sn), "snapshot") == Status::Amber);
+        }
         check("checklist: Pika 2 days ago is green", status_of(cs, "pika") == Status::Green);
         check("checklist: 500 GB free is green", status_of(cs, "free") == Status::Green);
 
@@ -902,6 +928,58 @@ int main(int argc, char** argv) {
               pf::human_age(30) == "just now" && pf::human_age(300) == "5 minutes" &&
               pf::human_age(3 * 3600) == "3 hours" && pf::human_age(86400 + 3600 * 20) == "44 hours" &&
               pf::human_age(9 * 86400) == "9 days");
+    }
+    // -- Helper: what the app and the root helper agree on (s013) -------------
+    {
+        std::cout << "\n-- helper --\n";
+        namespace hp = core::helper;
+        check("helper: snapshot:5 / :1 / :20 read", hp::parse("snapshot:5") == hp::Request{hp::Op::Snapshot, 5} &&
+              hp::parse("snapshot:1") && hp::parse("snapshot:20"));
+        bool none = true;
+        for (const char* bad : {"snapshot", "snapshot:", "snapshot:0", "snapshot:21", "snapshot:-1", "snapshot:+5",
+                                "snapshot:5:5", "snapshot: 5", "snapshot:5 ", "Snapshot:5", "snapshot:5;rm -rf /",
+                                "snapshot:0005", "dnf:1", "", ":5", "snapshot:1e2", "../snapshot:5"})
+            if (hp::parse(bad)) { none = false; std::cout << "  (read: " << bad << ")\n"; }
+        check("helper: anything else is not a request (17 tries)", none);
+        check("helper: text <-> parse", hp::text({hp::Op::Snapshot, 7}) == "snapshot:7" &&
+              hp::parse(hp::text({hp::Op::Snapshot, 7})) == hp::Request{hp::Op::Snapshot, 7});
+        const std::time_t t0 = 1794000000;   // a Nov 2026 second
+        const std::string n0 = hp::snapshot_name(t0);
+        check("helper: a snapshot name reads back to its second", hp::is_snapshot_name(n0) && hp::snapshot_time(n0) == t0, n0);
+        bool names_ok = true;
+        for (const char* bad : {"home-2026110-173400", "home-20261106_173400", "home-20261106-17340x", "x-20261106-173400",
+                                "home-20261106-1734000", ".rouster", "home-20261106-173400/..", "my-photos"})
+            if (hp::is_snapshot_name(bad)) names_ok = false;
+        check("helper: other names are never Rouster's", names_ok);
+        const std::vector<std::string> have = {"home-20261101-090000", "keep-me", "home-20261106-090000",
+                                               "home-20261103-090000", "home-20261102-090000", "home-20261105-090000",
+                                               "home-20261104-090000", "lost+found"};
+        const auto gone = hp::to_expire(have, 5);
+        check("helper: keep 5 of 6 -> the oldest goes, other names never", gone == std::vector<std::string>{"home-20261101-090000"},
+              gone.empty() ? "none" : gone.front());
+        check("helper: keep 2 -> four go, newest kept", hp::to_expire(have, 2).size() == 4 &&
+              hp::to_expire(have, 2).front() == "home-20261104-090000");
+        check("helper: keep 20 / keep 0 (read as 1)", hp::to_expire(have, 20).empty() && hp::to_expire(have, 0).size() == 5);
+        const hp::Line l{"snapshot", "ok", "took /home/.rouster-snapshots/home-x\tand\nmore"};
+        const auto back = hp::parse_line(hp::format_line(l));
+        check("helper: a result line round-trips, tabs/newlines flattened", back && back->op == "snapshot" &&
+              back->status == "ok" && back->detail == "took /home/.rouster-snapshots/home-x and more");
+        const auto lines = hp::parse_output("pkexec: junk\n" + hp::format_line({"snapshot", "failed", "why"}) +
+                                            "\nrouster-helper\tsnapshot\tmaybe\tx\n" + hp::format_line({"snapshot", "dry", "would"}) + "\n");
+        check("helper: output -> only well-formed lines (junk, a bad status skipped)", lines.size() == 2 &&
+              lines[0].status == "failed" && lines[1].status == "dry");
+        const fs::path tmp = fs::temp_directory_path() / "rouster_selftest_place";
+        std::error_code ec;
+        fs::create_directories(tmp, ec);
+        const auto pl = hp::place_for(tmp.string());
+        struct statfs sfs{};
+        ::statfs(tmp.c_str(), &sfs);
+        const bool tmp_btrfs = static_cast<unsigned long>(sfs.f_type) == 0x9123683EUL;
+        check("helper: place_for answers without root (" + std::string(tmp_btrfs ? "btrfs" : "not btrfs") + ")",
+              tmp_btrfs ? (pl.ok || !pl.why.empty()) : (!pl.ok && pl.why == "home is not on btrfs"), pl.ok ? pl.dir : pl.why);
+        check("helper: place_for on a missing folder -> no", !hp::place_for((tmp / "nope").string()).ok);
+        check("helper: list_snapshots on a missing folder -> empty", hp::list_snapshots((tmp / "nope").string()).empty());
+        fs::remove_all(tmp, ec);
     }
     // -- Door: the one door, on a fixture home (s004) --------------------------
     {
@@ -972,6 +1050,30 @@ int main(int argc, char** argv) {
                 case Verb::Copy: a.verb = v; a.from = H + "/Documents/report.pdf"; a.to = H + "/Documents/report v2.pdf"; break;
                 case Verb::Dedupe: a.verb = v; a.from = H + "/Documents/twin-a.bin"; a.to = H + "/Documents/twin-b.bin"; break;
                 case Verb::Settings: a.verb = v; a.content = "[org/x]\na=2\nb=3\n"; break;
+                case Verb::Root: a.verb = v; a.content = "snapshot:5"; break;
+            }
+            if (v == Verb::Root) {
+                // Runs as root through pkexec -- here a fake helper that says what it did.
+                std::vector<std::vector<std::string>> argvs;
+                door.set_root([&argvs](const std::vector<std::string>& av) {
+                    argvs.push_back(av);
+                    core::vcs::Run x;
+                    x.code = 0;
+                    x.out = core::helper::format_line({"snapshot", "ok", "took /home/.rouster-snapshots/home-20261106-120000"}) + "\n";
+                    return x;
+                }, false);
+                const auto r = door.run(plan(name + " one", {a}));
+                check("gate/root: done through the door", r.ok && r.done == 1, r.messages.empty() ? "" : r.messages.front());
+                check("gate/root: one step", door.batches().size() == batches + 1 && door.undo_label() == name + " one");
+                check("gate/root: argv is pkexec + the helper's fixed path + run + the one request word",
+                      argvs.size() == 1 && argvs[0] == std::vector<std::string>{"/usr/bin/pkexec", core::helper::kHelperPath, "run", "snapshot:5"});
+                const auto* rec = door.record(door.batches().back().records.front());
+                check("gate/root: what the helper said is kept as the note", rec && rec->note.find("home-20261106-120000") != std::string::npos);
+                check("gate/root: no user file changed", files_snapshot(home) == before);
+                const auto u = door.undo();
+                check("gate/root: undo closes the step, runs nothing, changes nothing",
+                      u.ok && u.done == 1 && argvs.size() == 1 && files_snapshot(home) == before);
+                continue;
             }
             if (v == Verb::Settings) {
                 // Changes settings, not files: the user's files stay; Rouster's records gain the two saved dumps.
@@ -1037,6 +1139,75 @@ int main(int argc, char** argv) {
             for (const auto& e : fs::directory_iterator(home / "Documents"))
                 if (e.path().filename().string().rfind(".rouster-", 0) == 0) stray = true;
             check("gate: no .rouster- staging names left", !stray);
+        }
+        {   // s013: the Root verb's policy, its failures, the manifest, a crash
+            const auto rt = [](std::string req) { dr::Action a; a.verb = dr::Verb::Root; a.content = std::move(req); return a; };
+            dr::Action named = rt("snapshot:5");
+            named.from = H + "/Documents";
+            check("door/root: refused -- a file named, an unknown word, out of range, a shell tail",
+                  !door.refusal(named).empty() && !door.refusal(rt("rm:1")).empty() && !door.refusal(rt("snapshot:99")).empty() &&
+                  !door.refusal(rt("snapshot:5; reboot")).empty() && door.refusal(rt("snapshot:3")).empty());
+            int calls = 0;
+            const auto fake = [&calls](int code, std::string out, std::string err) {
+                return [&calls, code, out, err](const std::vector<std::string>&) {
+                    ++calls;
+                    core::vcs::Run x; x.code = code; x.out = out; x.err = err; return x;
+                };
+            };
+            const std::string before = files_snapshot(home);
+            calls = 0;
+            door.set_root(fake(126, "", "Error executing command as another user: Not authorized"), false);
+            auto r = door.run(plan("snap", {rt("snapshot:5")}));
+            check("door/root: the password prompt dismissed (126) -> failed, says so, nothing changed",
+                  !r.ok && r.failed == 1 && calls == 1 && !r.messages.empty() &&
+                  r.messages.front().find("not authorised") != std::string::npos && files_snapshot(home) == before,
+                  r.messages.empty() ? "" : r.messages.front());
+            door.undo();
+            door.set_root(fake(127, "", "Error executing command as another user: Not authorized\n\nThis incident has been reported.\n"), false);
+            r = door.run(plan("snap", {rt("snapshot:5")}));
+            check("door/root: polkit says no (127, Not authorized -- seen in the sandbox) -> 'not authorised'", !r.ok &&
+                  !r.messages.empty() && r.messages.front().find("not authorised") != std::string::npos, r.messages.empty() ? "" : r.messages.front());
+            door.undo();
+            door.set_root(fake(1, core::helper::format_line({"snapshot", "failed", "home is not on btrfs"}) + "\n", ""), false);
+            r = door.run(plan("snap", {rt("snapshot:5")}));
+            check("door/root: the helper's own failure is the message", !r.ok && !r.messages.empty() &&
+                  r.messages.front().find("home is not on btrfs") != std::string::npos, r.messages.empty() ? "" : r.messages.front());
+            door.undo();
+            door.set_root(fake(0, "", ""), false);
+            r = door.run(plan("snap", {rt("snapshot:5")}));
+            check("door/root: exit 0 but no result line -> failed (never assumed)", !r.ok && r.failed == 1);
+            door.undo();
+            std::vector<std::string> seen;
+            door.set_root([&seen](const std::vector<std::string>& av) {
+                seen = av;
+                core::vcs::Run x; x.code = 0;
+                x.out = core::helper::format_line({"snapshot", "dry", "would take /home/.rouster-snapshots/home-x"}) + "\n";
+                return x;
+            }, true);
+            r = door.run(plan("snap dry", {rt("snapshot:5")}));
+            check("door/root: a fixture door asks for --dry-run", r.ok && seen.size() == 5 && seen[3] == "--dry-run");
+            dr::Door again(H, data);
+            again.load();
+            const dr::Record* last = nullptr;
+            for (const auto& b : again.batches()) if (b.label == "snap dry") last = again.record(b.records.front());
+            check("door/root: the note survives a reload", last && last->state == dr::State::Done &&
+                  last->note.find("would take") != std::string::npos);
+            door.undo();
+            // A crash after the intent: the helper ran or didn't -- it can't be looked at.
+            {
+                std::ofstream m(data + "/manifest.jsonl", std::ios::app);
+                m << R"({"t":"batch","batch":800,"label":"crash root","when":1})" << "\n"
+                  << R"({"t":"intent","id":8000,"batch":800,"verb":"root","from":"","to":"snapshot:5","when":1})" << "\n";
+            }
+            dr::Door crashed(H, data);
+            crashed.load();
+            bool noted = false;
+            for (const auto& u : crashed.unfinished()) if (u.find("root snapshot:5") != std::string::npos) noted = true;
+            const auto* cr = crashed.record(8000);
+            check("door/root: a crash after the intent -> done, noted 'may or may not'", cr && cr->state == dr::State::Done && noted);
+            const auto cu = crashed.undo();
+            check("door/root: ...and its undo just closes it", cu.ok);
+            door.load();
         }
         {   // s012d: the Settings verb's policy, a failed load, a crash
             const auto set = [](std::string ini) { dr::Action a; a.verb = dr::Verb::Settings; a.content = std::move(ini); return a; };
@@ -2913,6 +3084,9 @@ int main(int argc, char** argv) {
     //   Known.cpp     -- Rouster's own setting (promoted names), in its own data dir;
     //   Settings.cpp  -- Rouster's own files (rules.json), in its own data dir;
     //   Pipe.cpp      -- s012c: write() only into the pipes of the child it made (gpg's stdin, fd 3);
+    //   helper/main.cpp -- s013: the ROOT helper; it makes Rouster's snapshot folder and the snapshots.
+    //                    pkexec (the way to root) and the btrfs snapshot ioctls are gate tokens:
+    //                    only the door may run the helper, only the helper may snapshot;
 //   Stones.*      -- the in-memory undo demo: its verbs are NAMED remove /
     //                    rename and touch no disk (goes when a real model
     //                    adopts Undo.hpp);
@@ -2921,13 +3095,15 @@ int main(int argc, char** argv) {
         std::cout << "\n-- source gate --\n";
         const fs::path root = ROUSTER_SOURCE_DIR;
         const std::set<std::string> allowed = {"src/core/Door.cpp", "src/core/Recents.cpp", "src/selftest.cpp",
-            "src/core/Stones.cpp", "include/core/Stones.hpp", "src/core/Known.cpp", "src/core/Settings.cpp", "src/core/Pipe.cpp", "src/Registry.cpp", "include/Registry.hpp"};
+            "src/core/Stones.cpp", "include/core/Stones.hpp", "src/core/Known.cpp", "src/core/Settings.cpp", "src/core/Pipe.cpp", "src/Registry.cpp", "include/Registry.hpp",
+            "src/helper/main.cpp"};
         const std::vector<std::string> calls = {"rename", "renameat", "renameat2", "unlink", "unlinkat", "rmdir",
             "remove", "remove_all", "copy_file", "copy", "create_directory", "create_directories", "create_symlink",
             "create_hard_link", "resize_file", "truncate", "write", "fopen", "mkdir", "symlink", "link", "chmod",
             "permissions", "last_write_time"};
         const std::vector<std::string> tokens = {"ofstream", "O_WRONLY", "O_RDWR", "O_CREAT", "std::fstream",
-                                                 "FIDEDUPERANGE", "FICLONE"};
+                                                 "FIDEDUPERANGE", "FICLONE",
+                                                 "/usr/bin/pkexec", "BTRFS_IOC_SNAP"};
         // One line -> the write calls in it. Comments are dropped; a member
         // call (x.remove(...)) or another namespace's function (registry::
         // remove) is not a filesystem write; ::, std::, fs:: and bare are.

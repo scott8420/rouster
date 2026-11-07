@@ -5,6 +5,9 @@
 #   ./uninstall.sh --system        remove from /usr/local (sudo)
 #   ./uninstall.sh --prefix DIR    remove from DIR
 #   ./uninstall.sh --purge         also remove settings, recents and cache
+#   ./uninstall.sh --helper        remove the root helper + its polkit action
+#                                  (sudo). Rouster's snapshots stay -- they
+#                                  are yours; `sudo btrfs subvolume delete`.
 #
 # Removes exactly the paths in share/rouster/install-manifest.txt, and only
 # those inside the prefix. --purge never touches documents, archives, manifests
@@ -21,7 +24,19 @@ while [[ $# -gt 0 ]]; do
         --system) PREFIX=/usr/local ;;
         --prefix) shift; PREFIX="${1:?--prefix needs a directory}" ;;
         --purge)  PURGE=1 ;;
-        -h|--help) sed -n '2,11p' "$0"; exit 0 ;;
+        --helper)
+            HMANIFEST=/usr/local/share/rouster/helper-manifest.txt
+            if [[ ! -f "$HMANIFEST" ]]; then echo "uninstall.sh: the helper isn't installed" >&2; exit 1; fi
+            while IFS= read -r f; do
+                case "$f" in
+                    /usr/local/libexec/rouster/*|/usr/share/polkit-1/actions/$APP_ID.policy|/usr/local/share/rouster/helper-manifest.txt)
+                        sudo rm -f -- "$f" && echo "  removed $f" ;;
+                    *) echo "  skipped (not the helper's): $f" ;;
+                esac
+            done < "$HMANIFEST"
+            sudo rmdir /usr/local/libexec/rouster 2>/dev/null || true
+            exit 0 ;;
+        -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
         *) echo "uninstall.sh: unknown option: $1" >&2; exit 2 ;;
     esac
     shift

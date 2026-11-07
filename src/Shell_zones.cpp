@@ -1453,6 +1453,11 @@ void Shell::build_preflight_page() {  // zone: Preflight
     m_pf_page.append(m_pf_summary);
     m_pf_rows.set_margin_top(10);
     m_pf_page.append(m_pf_rows);
+    m_pf_said.add_css_class("hero-caption");
+    m_pf_said.set_wrap(true);
+    m_pf_said.set_justify(Gtk::Justification::CENTER);
+    m_pf_said.set_visible(false);
+    m_pf_page.append(m_pf_said);
     m_pf_button.set_label("Check again");
     m_pf_button.add_css_class("ghost");
     m_pf_button.set_halign(Gtk::Align::CENTER);

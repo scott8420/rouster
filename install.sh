@@ -5,6 +5,10 @@
 #   ./install.sh --system        install to /usr/local (sudo)
 #   ./install.sh --prefix DIR    install to DIR
 #   ./install.sh --build         run ./build.sh first
+#   ./install.sh --helper        ALSO install the root helper + its polkit
+#                                action (sudo; always /usr/local/libexec and
+#                                /usr/share/polkit-1 -- s013). Alone it is
+#                                the helper only: ./install.sh --helper
 #
 # Installs the binary, the .desktop file, the scalable + symbolic hicolor icons,
 # and share/rouster/install-manifest.txt listing every path written, which
@@ -16,19 +20,44 @@ APP=rouster
 APP_ID=io.github.scott8420.Rouster
 PREFIX="$HOME/.local"
 DO_BUILD=0
+DO_HELPER=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --system) PREFIX=/usr/local ;;
         --prefix) shift; PREFIX="${1:?--prefix needs a directory}" ;;
         --build)  DO_BUILD=1 ;;
-        -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
+        --helper) DO_HELPER=1 ;;
+        -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
         *) echo "install.sh: unknown option: $1" >&2; exit 2 ;;
     esac
     shift
 done
 
 [[ $DO_BUILD -eq 1 ]] && ./build.sh
+
+# -- The root helper (s013): fixed paths, because the polkit action names the
+# program by its exact path. Owned by root, 0755; its own manifest.
+if [[ $DO_HELPER -eq 1 ]]; then
+    HELPER=/usr/local/libexec/rouster/rouster-helper
+    POLICY=/usr/share/polkit-1/actions/$APP_ID.policy
+    HMANIFEST=/usr/local/share/rouster/helper-manifest.txt
+    if [[ ! -x build/rouster-helper ]]; then
+        echo "install.sh: build/rouster-helper not found -- run ./build.sh (or pass --build)" >&2
+        exit 1
+    fi
+    sudo install -D -o root -g root -m 755 build/rouster-helper "$HELPER"
+    sudo install -D -o root -g root -m 644 "data/$APP_ID.policy" "$POLICY"
+    hm_tmp="$(mktemp)"
+    printf '%s\n' "$HELPER" "$POLICY" "$HMANIFEST" > "$hm_tmp"
+    sudo install -D -o root -g root -m 644 "$hm_tmp" "$HMANIFEST"
+    rm -f "$hm_tmp"
+    echo "Installed Rouster's root helper"
+    echo "  $HELPER"
+    echo "  $POLICY"
+    # --helper alone: the app is not reinstalled.
+    [[ -x build/$APP && -f "$PREFIX/share/$APP/install-manifest.txt" ]] || exit 0
+fi
 if [[ ! -x build/$APP ]]; then
     echo "install.sh: build/$APP not found -- run ./build.sh (or pass --build)" >&2
     exit 1

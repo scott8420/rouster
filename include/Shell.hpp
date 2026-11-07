@@ -126,6 +126,9 @@ private:
     void on_dups_keep(std::size_t group, std::size_t member);   // category: handler: make another member the keeper
     void on_dups_run();                          // category: handler: the checked copies -> a plan -> worker -> the door
     void on_dups_acted();                        // category: handler: the door finished (Dispatcher, UI thread)
+    void on_snapshot_take();                     // category: handler: s013 -- Preflight's Take snapshot -> worker -> the door -> pkexec
+    void on_snapshot_taken();                    // category: handler: the helper answered (Dispatcher, UI thread)
+    void stop_preflight();                       // category: helper: join a snapshot in flight (close, dtor)
     void on_archive_find();                      // category: handler: look for old files (worker)
     void on_archive_cancel();                    // category: handler: stop looking
     void on_archive_found();                     // category: handler: the worker finished (Dispatcher, UI thread)
@@ -511,6 +514,13 @@ private:
     widgets::Label  m_pf_summary;
     widgets::Box    m_pf_rows;
     widgets::Button m_pf_button;
+    // s013: Take snapshot -- the door's Root verb on a worker (pkexec waits on the password).
+    Gtk::Label         m_pf_said;
+    bool               m_pf_acting = false;   // UI thread: the snapshot worker owns m_door
+    std::thread        m_pf_worker;
+    std::mutex         m_pf_mx;
+    core::door::Result m_pf_result;
+    Glib::Dispatcher   m_snapshot_taken;
 
     // Activity (s004): what went through the door, and the way back.
     std::unique_ptr<core::door::Door> m_door;

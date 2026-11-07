@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!-- Rouster's root helper (s013). One action, one program, a fixed verb list.
+     auth_admin_keep: one password covers a few minutes of Rouster's root work. -->
+<policyconfig>
+  <vendor>Rouster</vendor>
+  <vendor_url>https://github.com/scott8420/rouster</vendor_url>
+  <action id="io.github.scott8420.Rouster.helper">
+    <description>Run Rouster's system maintenance</description>
+    <message>Rouster needs your password to take a snapshot of your home folder</message>
+    <icon_name>io.github.scott8420.Rouster</icon_name>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/libexec/rouster/rouster-helper</annotate>
+  </action>
+</policyconfig>

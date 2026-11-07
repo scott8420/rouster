@@ -71,18 +71,28 @@
 // ~/.config/dconf (never-touch) is never opened. A crash between intent and
 // outcome can't be looked at; it counts as done (Undo is safe either way).
 //
-// Hard-delete does not exist here, and will not (§1.1).
+// One verb runs as ROOT (s013, REQUIREMENTS §1.4): Root hands ONE request
+// word (`content`, e.g. "snapshot:5" -- core::helper::parse decides what is
+// one) to Rouster's helper through pkexec. No path, no command crosses; the
+// helper checks again for itself. What it said is kept as the record's
+// `note` ("took /home/.rouster-snapshots/home-..."). Its undo moves nothing
+// and closes the step: a snapshot isn't taken back (Rouster's own expire
+// after the newest few). A crash between intent and outcome can't be looked
+// at; it counts as done, and Activity says it may or may not have happened.
+// With a fixture home (ROUSTER_HOME) the helper is asked for a --dry-run.
+//
+// Hard-delete of a user's file does not exist here, and will not (§1.1).
 // ─────────────────────────────────────────────────────────────────────────────
 namespace rouster::core::door {
 
-enum class Verb { Trash, Move, Write, Clone, Dedupe, MakeDir, Copy, Settings };
-const char* verb_name(Verb v);   // "trash", "move", "write", "clone", "dedupe", "mkdir", "copy", "settings"
+enum class Verb { Trash, Move, Write, Clone, Dedupe, MakeDir, Copy, Settings, Root };
+const char* verb_name(Verb v);   // "trash", "move", "write", "clone", "dedupe", "mkdir", "copy", "settings", "root"
 bool creates(Verb v);            // Write, Clone, MakeDir, Copy: `to` is made (Copy: from `from`; the others have no source)
 // THE VERB TABLE the selftest gate walks: a verb added to the enum and not
 // here fails the gate's count; every verb here is run through the door,
 // checked to be one step, and undone back to the exact tree.
 const std::vector<Verb>& verbs();
-inline constexpr int kVerbCount = 8;
+inline constexpr int kVerbCount = 9;
 inline constexpr std::size_t kWriteMax = 4 * 1024 * 1024;   // Write is for text Rouster made (RESTORE.txt, a dconf dump): 4 MiB (64 KB until s012)
 
 struct Action {
@@ -93,6 +103,7 @@ struct Action {
     std::string reason;          // why the module proposed it (shown in preview)
     std::uint64_t bytes = 0;     // for the preview
     std::string content;         // Write: the file's text (<= kWriteMax). Settings: the dconf dump to load.
+                                 // Root: the helper request ("snapshot:5").
     std::uint32_t mode = 0644;   // Write: its permissions (s012c: secrets.tar.gpg is 0600)
     std::string url;             // Clone: what to clone
     std::string branch;          // Clone: check this branch out ("" = the remote's default)
@@ -116,6 +127,14 @@ using DconfRunner = std::function<vcs::Run(const std::vector<std::string>& argv,
 // desktop's. RULES: fixtures, never the real home. (s012d)
 std::vector<std::string> fixture_dconf_argv(const std::string& home, const std::vector<std::string>& argv);
 DconfRunner fixture_dconf(const std::string& home);
+
+// How the door runs the root helper (argv; no stdin). Default: vcs::child,
+// 15 minutes (pkexec waits on the password prompt). The selftest passes a fake.
+using RootRunner = std::function<vcs::Run(const std::vector<std::string>& argv)>;
+// {"pkexec", kHelperPath, "run", ["--dry-run",] request}
+std::vector<std::string> root_argv(const std::string& request, bool dry);
+// Is the helper installed where the polkit action says it is?
+bool helper_installed();
 
 struct Plan {
     std::string         label;   // "Sweep: 3 caches" -- names the undo step
@@ -141,6 +160,7 @@ struct Record {
     std::int64_t  when = 0;         // unix seconds
     State         state = State::Intent;
     std::string   error;
+    std::string   note;             // Root: what the helper said it did
 };
 
 struct Batch {
@@ -180,6 +200,7 @@ public:
 
     Result run(const Plan& plan);
     void set_dconf(DconfRunner r) { m_dconf = std::move(r); }
+    void set_root(RootRunner r, bool dry) { m_root = std::move(r); m_root_dry = dry; }
     Result undo();                          // the last batch not yet undone
     bool        can_undo() const;
     std::string undo_label() const;
@@ -203,7 +224,10 @@ private:
     bool prep_settings(Record& r, const Action& a);          // save dump + text to load (Rouster's records)
     bool do_settings(Record& r);                             // dconf load /
     bool undo_settings(Record& r, std::string& why);         // reset the added keys, load the saved dump
+    bool do_root(Record& r);                                 // pkexec rouster-helper run <request>
     DconfRunner m_dconf;
+    RootRunner  m_root;
+    bool        m_root_dry = false;
     Record* find(std::uint64_t id);
 
     std::string m_home, m_data, m_manifest, m_trash;

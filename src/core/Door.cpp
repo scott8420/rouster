@@ -1,6 +1,7 @@
 #include "core/Door.hpp"
 #include "core/Scan.hpp"   // never_touch / classify_dir: the policy is the scan's policy
 #include "core/Git.hpp"    // the Clone verb
+#include "core/Helper.hpp" // the Root verb: what a request is, where the helper lives
 
 #include "json.hpp"
 
@@ -39,13 +40,14 @@ const char* verb_name(Verb v) {
         case Verb::MakeDir: return "mkdir";
         case Verb::Copy: return "copy";
         case Verb::Settings: return "settings";
+        case Verb::Root: return "root";
     }
     return "?";
 }
 bool creates(Verb v) { return v == Verb::Write || v == Verb::Clone || v == Verb::MakeDir || v == Verb::Copy; }
 
 const std::vector<Verb>& verbs() {
-    static const std::vector<Verb> v = {Verb::Trash, Verb::Move, Verb::Write, Verb::Clone, Verb::Dedupe, Verb::MakeDir, Verb::Copy, Verb::Settings};
+    static const std::vector<Verb> v = {Verb::Trash, Verb::Move, Verb::Write, Verb::Clone, Verb::Dedupe, Verb::MakeDir, Verb::Copy, Verb::Settings, Verb::Root};
     return v;
 }
 
@@ -159,6 +161,15 @@ DconfRunner fixture_dconf(const std::string& home) {
     };
 }
 
+std::vector<std::string> root_argv(const std::string& request, bool dry) {
+    std::vector<std::string> v = {"/usr/bin/pkexec", helper::kHelperPath, "run"};
+    if (dry) v.push_back("--dry-run");
+    v.push_back(request);
+    return v;
+}
+
+bool helper_installed() { return ::access(helper::kHelperPath, X_OK) == 0; }
+
 Door::Door(const std::string& home, const std::string& data_dir) {
     std::error_code ec;
     m_home = fs::weakly_canonical(home, ec).string();
@@ -166,6 +177,7 @@ Door::Door(const std::string& home, const std::string& data_dir) {
     m_manifest = m_data + "/manifest.jsonl";
     m_trash = m_home + "/.local/share/Trash";
     m_dconf = [](const std::vector<std::string>& argv, const std::string& in) { return vcs::feed(argv, in, "", 60); };
+    m_root = [](const std::vector<std::string>& argv) { return vcs::child(argv, 15 * 60); };
 }
 
 Record* Door::find(std::uint64_t id) {
@@ -223,7 +235,7 @@ bool Door::load() {
             m_records.push_back(r);
             for (auto& b : m_batches) if (b.id == r.batch) b.records.push_back(r.id);
         } else if (Record* r = find(j.value("id", 0ull))) {
-            if (t == "done")        r->state = State::Done;
+            if (t == "done")        { r->state = State::Done; r->note = j.value("note", ""); }
             else if (t == "failed") { r->state = State::Failed; r->error = j.value("error", ""); }
             else if (t == "undone") r->state = State::Undone;
             // "undo-failed" leaves it Done: still in the Trash / still moved.
@@ -237,6 +249,11 @@ bool Door::load() {
         if (r.verb == Verb::Settings) {   // can't be looked at: count it done -- Undo is safe either way
             r.state = State::Done;
             m_unfinished.push_back("settings load -- may or may not have happened; Undo puts the saved settings back");
+            continue;
+        }
+        if (r.verb == Verb::Root) {       // the same: what root did can't be looked at from here
+            r.state = State::Done;
+            m_unfinished.push_back("root " + r.to + " -- may or may not have happened");
             continue;
         }
         Identity at_to{}, at_from{};
@@ -263,6 +280,11 @@ std::string Door::refusal(const Action& a, const std::vector<std::string>& made,
         return p.empty() || p[0] != '/' || fs::path(p).lexically_normal().string() != p ||
                (p.size() > 1 && p.back() == '/');
     };
+    if (a.verb == Verb::Root) {       // no path: one request word for the root helper
+        if (!a.from.empty() || !a.to.empty()) return "a root request names no file";
+        if (!helper::parse(a.content)) return "not a request the helper knows: " + a.content;
+        return {};
+    }
     if (a.verb == Verb::Settings) {   // no path: settings, through dconf
         if (!a.from.empty() || !a.to.empty()) return "a settings load names no file";
         if (auto why = dconf_problem(a.content); !why.empty()) return "not a dconf dump: " + why;
@@ -558,6 +580,7 @@ Result Door::run(const Plan& plan) {
         if (r.verb == Verb::Copy) r.src = a.from;
         r.when = now_s();
         if (r.verb == Verb::Settings) { if (!prep_settings(r, a)) { /* r.error set */ } }
+        else if (r.verb == Verb::Root) { r.to = a.content; }
         else if (creates(r.verb)) { if (!do_create(r, a)) { /* r.error set */ } }
         else if (r.verb == Verb::Dedupe) { if (!identity_of(r.to, r.ident)) r.error = "vanished before it could be shared"; }
         else if (!identity_of(r.from, r.ident)) { r.error = "vanished before it could be moved"; }
@@ -577,13 +600,16 @@ Result Door::run(const Plan& plan) {
             Record& live = m_records.back();
             const bool acted = live.verb == Verb::Dedupe     ? do_dedupe(live)
                              : live.verb == Verb::Settings ? do_settings(live)
+                             : live.verb == Verb::Root     ? do_root(live)
                                                            : rename_noreplace(live.from, live.to) == 0;
             if (acted) {
                 live.state = State::Done;
-                append(json{{"t", "done"}, {"id", live.id}}.dump());
+                json dj{{"t", "done"}, {"id", live.id}};
+                if (!live.note.empty()) dj["note"] = live.note;
+                append(dj.dump());
                 ++res.done;
             } else {
-                if (live.verb != Verb::Dedupe && live.verb != Verb::Settings)
+                if (live.verb != Verb::Dedupe && live.verb != Verb::Settings && live.verb != Verb::Root)
                     live.error = errno == EXDEV ? "on another filesystem -- Rouster never copies-and-deletes"
                                                 : std::string(std::strerror(errno));
                 if (!live.info.empty()) ::unlink(live.info.c_str());
@@ -592,12 +618,14 @@ Result Door::run(const Plan& plan) {
                 append(json{{"t", "failed"}, {"id", live.id}, {"error", live.error}}.dump());
                 ++res.failed;
                 res.messages.push_back("failed: " + (live.verb == Verb::Settings ? std::string("GNOME settings")
+                                                     : live.verb == Verb::Root ? "root " + live.to
                                                      : creates(live.verb) || live.verb == Verb::Dedupe ? live.to : live.from) +
                                        " -- " + live.error);
             }
         } else {
             ++res.failed;
             res.messages.push_back("failed: " + (r.verb == Verb::Settings ? std::string("GNOME settings")
+                                                 : r.verb == Verb::Root ? "root " + r.to
                                                  : creates(r.verb) ? r.to : r.from) + " -- " + r.error);
         }
     }
@@ -660,7 +688,25 @@ bool Door::undo_settings(Record& r, std::string& why) {
     return true;
 }
 
+bool Door::do_root(Record& r) {
+    const auto x = m_root(root_argv(r.to, m_root_dry));
+    const auto lines = helper::parse_output(x.out);
+    for (const auto& l : lines) r.note += (r.note.empty() ? "" : "; ") + l.detail;
+    if (x.code == 0 && !lines.empty()) return true;
+    const auto first = [](const std::string& s) { return s.substr(0, s.find('\n')); };
+    if (x.timed_out)        r.error = "the helper did not finish in time";
+    else if (x.code == 126 || x.err.find("Not authorized") != std::string::npos || x.err.find("dismissed") != std::string::npos)
+        r.error = "not authorised -- the password prompt was dismissed or refused; nothing ran";   // pkexec: 126 dismissed, 127 refused
+    else if (x.code == 127) r.error = !helper_installed() ? std::string("the root helper isn't installed -- ./install.sh --helper")
+                                    : "pkexec could not run the helper" + (x.err.empty() ? std::string() : " -- " + first(x.err));
+    else if (!lines.empty() && !r.note.empty()) r.error = r.note;
+    else if (!x.err.empty()) r.error = first(x.err);
+    else                    r.error = "the helper failed (exit " + std::to_string(x.code) + ")";
+    return false;
+}
+
 bool Door::undo_one(Record& r, std::string& why) {
+    if (r.verb == Verb::Root) return true;   // nothing moved: the step is closed (a snapshot isn't taken back)
     if (r.verb == Verb::Settings) return undo_settings(r, why);
     Identity now{};
     if (!identity_of(r.to, now)) { why = "no longer at " + r.to; return false; }

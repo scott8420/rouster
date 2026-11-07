@@ -43,6 +43,8 @@ add_library(rouster_core STATIC
     src/core/Settings.cpp
     # Known (s007b): the names promoted to known-optional -- Rouster's own setting.
     src/core/Known.cpp
+    # Helper (s013): what the app and the root helper agree on -- pure, also in the helper.
+    src/core/Helper.cpp
     # The SHORTCUT-REGISTRY paradigm: one list, two consumers (App wires accels
     # from it, ShortcutsDialog renders from it) so a key and its advertised row
     # can't drift. GTK-free, so it lives in core and the selftest guards it
@@ -63,6 +65,13 @@ add_executable(rouster_selftest src/selftest.cpp)
 target_link_libraries(rouster_selftest PRIVATE rouster_core)
 # The source gate reads src/ and include/ at test time.
 target_compile_definitions(rouster_selftest PRIVATE ROUSTER_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+
+# ── rouster-helper (s013) -- the small ROOT helper, run only through pkexec ──────
+# Its own tiny link line: libc + the shared, pure Helper.cpp. No GTK, no spdlog,
+# no json -- the less a root program carries, the less there is to trust.
+# Installed by `install.sh --helper` at core::helper::kHelperPath.
+add_executable(rouster-helper src/helper/main.cpp src/core/Helper.cpp)
+target_include_directories(rouster-helper PRIVATE include)
 
 # ── App resources (gresource) -- the RESOURCE-PIPELINE paradigm ────────────────
 # glib-compile-resources embeds resources/rouster.gresource.xml into a C source;

@@ -165,13 +165,15 @@ Shell::Shell()
 
 // The worker must be gone before the members it touches (m_report, the
 // dispatcher). close-request does this too; the dtor is the backstop.
-Shell::~Shell() { m_rl_timer.disconnect(); stop_scan(); stop_sweep(); stop_dev(); stop_dups(); stop_archive(); stop_profile(); }
+Shell::~Shell() { m_rl_timer.disconnect(); stop_scan(); stop_sweep(); stop_dev(); stop_dups(); stop_archive(); stop_profile(); stop_preflight(); }
 
 void Shell::build_ui() {
     m_home = home_dir();
     m_door = std::make_unique<core::door::Door>(m_home, data_dir());
     if (const char* h = std::getenv("ROUSTER_HOME"); h && *h)   // s012d: a fixture's settings are the fixture's own
         m_door->set_dconf(core::door::fixture_dconf(m_home));
+    if (const char* h = std::getenv("ROUSTER_HOME"); h && *h)   // s013: a fixture asks root for a dry run only
+        m_door->set_root([](const std::vector<std::string>& a) { return core::vcs::child(a, 15 * 60); }, true);
     m_door->load();
     build_shell();     // zone
     build_pages();     // zone
@@ -187,13 +189,14 @@ void Shell::build_ui() {
     rl_save(false);   // arms the watch timer if it is on; writes nothing
     paint_rules();
 
-    signal_close_request().connect([this] { stop_scan(); stop_sweep(); stop_dev(); stop_dups(); stop_archive(); stop_profile(); return false; }, false);
+    signal_close_request().connect([this] { stop_scan(); stop_sweep(); stop_dev(); stop_dups(); stop_archive(); stop_profile(); stop_preflight(); return false; }, false);
     m_scan_finished.connect(sigc::mem_fun(*this, &Shell::on_scan_done));
     m_sweep_finished.connect(sigc::mem_fun(*this, &Shell::on_sweep_found));
     m_dev_finished.connect(sigc::mem_fun(*this, &Shell::on_dev_found));
     m_dev_acted.connect(sigc::mem_fun(*this, &Shell::on_dev_acted));
     m_dups_finished.connect(sigc::mem_fun(*this, &Shell::on_dups_found));
     m_dups_acted.connect(sigc::mem_fun(*this, &Shell::on_dups_acted));
+    m_snapshot_taken.connect(sigc::mem_fun(*this, &Shell::on_snapshot_taken));
     m_archive_finished.connect(sigc::mem_fun(*this, &Shell::on_archive_found));
     m_profile_finished.connect(sigc::mem_fun(*this, &Shell::on_profile_found));
     m_profile_looked.connect(sigc::mem_fun(*this, &Shell::on_profile_looked));
