@@ -45,6 +45,7 @@ void Shell::bind_actions() {  // bindings: actions + recents group
     add_action("preflight",     sigc::mem_fun(*this, &Shell::on_preflight));
     add_action("dump-registry", sigc::mem_fun(*this, &Shell::on_dump_registry));
     add_action("about",         sigc::mem_fun(*this, &Shell::on_about));
+    add_action("help",          sigc::mem_fun(*this, &Shell::on_help));
     add_action("shortcuts",     sigc::mem_fun(*this, &Shell::on_shortcuts));
     add_action("quit",          [this]() { close(); });
 

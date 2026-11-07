@@ -1,6 +1,7 @@
 #include "Shell.hpp"
 #include "core/Helper.hpp"
 #include "AboutWindow.hpp"
+#include "HelpWindow.hpp"
 #include "ShortcutsDialog.hpp"
 #include "Log.hpp"
 #include "Registry.hpp"
@@ -1606,6 +1607,12 @@ void Shell::on_shortcuts() {  // handler: the keyboard reference
     // core::shortcut_registry(), the list App wires accels from.
     if (!m_shortcuts) m_shortcuts = std::make_unique<ShortcutsDialog>();
     m_shortcuts->show(*this);
+}
+
+void Shell::on_help() {  // handler: s013a2 -- Help, open at the page you're on
+    if (!m_help) m_help = std::make_unique<HelpWindow>(*this);
+    m_help->show_topic(m_stack.get_visible_child_name());
+    m_help->present();
 }
 
 void Shell::on_about() {  // handler: open the About window

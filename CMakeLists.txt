@@ -45,6 +45,8 @@ add_library(rouster_core STATIC
     src/core/Known.cpp
     # Helper (s013): what the app and the root helper agree on -- pure, also in the helper.
     src/core/Helper.cpp
+    # Help (s013a2): the help text as data -- the selftest holds it to the pages.
+    src/core/Help.cpp
     # The SHORTCUT-REGISTRY paradigm: one list, two consumers (App wires accels
     # from it, ShortcutsDialog renders from it) so a key and its advertised row
     # can't drift. GTK-free, so it lives in core and the selftest guards it
@@ -116,6 +118,7 @@ add_executable(rouster
     src/Shell_handlers.cpp
     src/Shell_helpers.cpp
     src/AboutWindow.cpp
+    src/HelpWindow.cpp
     src/ShortcutsDialog.cpp
     src/Registry.cpp
     src/Log.cpp

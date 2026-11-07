@@ -242,3 +242,16 @@ window.page-profile button.act {
 }
 window.rouster textview.pr-notes, window.rouster textview.pr-notes text { background-color: rgba(0,0,0,0.25); color: #ffffff; border-radius: 8px; }
 .pr-diff { font-family: monospace; font-size: 0.9em; }
+
+/* Help (s013a2): its own window, the same skin. */
+window.rouster.help {
+  background-image: radial-gradient(circle at 80% 10%, rgba(167,139,250,0.30), transparent 55%),
+                    linear-gradient(160deg, #1f1a3d 0%, #2a2252 55%, #15112c 100%);
+}
+window.rouster.help .sidebar-section { margin: 14px 12px 4px 12px; }
+.help-h { font-weight: 700; font-size: 1.12em; color: #ffffff; margin-top: 16px; }
+.help-p { color: rgba(244,241,251,0.86); }
+.help-cmd {
+  font-family: monospace; color: #dffbea; background-color: rgba(0,0,0,0.32);
+  border-radius: 6px; padding: 6px 10px; margin: 2px 0 2px 8px;
+}

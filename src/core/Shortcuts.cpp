@@ -115,7 +115,7 @@ const std::vector<ShortcutSpec>& shortcut_registry() {
         {"General", "win.pick-folder",   {"<Ctrl>o"}, "", "Scan a folder\u2026"},
         {"General", "win.shortcuts",     {"<Ctrl>question", "<Ctrl>slash"}, "",
          "Keyboard shortcuts (this window)"},
-        {"General", "win.about",         {"F1"}, "", "About Rouster"},
+        {"General", "win.help",          {"F1"}, "", "Help for this page"},
         {"General", "win.quit",          {"<Ctrl>q"}, "", "Quit"},
 
         // ── Mouse ─────────────────────────────────────────────────────────────

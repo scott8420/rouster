@@ -71,6 +71,7 @@
 namespace rouster {
 
 class AboutWindow;
+class HelpWindow;
 class ShortcutsDialog;
 
 class Shell : public Gtk::ApplicationWindow {
@@ -176,6 +177,7 @@ private:
     void on_recent_clear();                      // category: handler: empty the recents list
     void on_dump_registry();                     // category: handler: print the live widget tree
     void on_about();                             // category: handler: open the About window
+    void on_help();                              // category: handler: s013a2 -- Help at the current page's topic (F1)
     void on_shortcuts();                         // category: handler: the keyboard reference
 
     // ── helpers ────────────────────────────────────────────────────────────
@@ -538,6 +540,7 @@ private:
     Glib::RefPtr<Gio::SimpleAction> m_act_scan, m_act_cancel, m_act_pick;
 
     std::unique_ptr<AboutWindow>     m_about;
+    std::unique_ptr<HelpWindow>      m_help;    // s013a2: F1, opens at the page you're on
     std::unique_ptr<ShortcutsDialog> m_shortcuts;
 };
 

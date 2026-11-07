@@ -31,6 +31,7 @@
 #include "core/Settings.hpp"
 #include "core/Profile.hpp"
 #include "core/Helper.hpp"
+#include "core/Help.hpp"
 
 #include <algorithm>
 #include <array>
@@ -3154,6 +3155,48 @@ int main(int argc, char** argv) {
         }
         check("source gate: no write call outside the door", hits.empty(),
               hits.empty() ? std::to_string(files) + " files clean" : hits.front() + (hits.size() > 1 ? " (+" + std::to_string(hits.size() - 1) + ")" : ""));
+    }
+    // -- Help (s013a2): the text held to the app --------------------------------
+    {
+        std::cout << "\n-- help --\n";
+        namespace hl = core::help;
+        bool pages = true;
+        std::string missing;
+        // Every sidebar page (Shell_zones' m_stack ids) has a topic -- F1 opens it.
+        for (const char* id : {"scan", "sweep", "dups", "dev", "projects", "rules", "archive", "preflight", "profile", "activity"})
+            if (!hl::find(id)) { pages = false; missing += std::string(id) + " "; }
+        check("help: every sidebar page has a topic", pages, missing);
+        std::set<std::string> ids;
+        bool full = true, unique = true;
+        for (const auto& t : hl::topics()) {
+            if (!ids.insert(t.id).second) unique = false;
+            if (t.title.empty() || t.lead.empty() || t.group.empty() || t.sections.empty()) full = false;
+            for (const auto& sec : t.sections) if (sec.paras.empty()) full = false;
+        }
+        check("help: ids unique; no topic or section empty", unique && full, std::to_string(hl::topics().size()) + " topics");
+        check("help: groups stay together (the list shows each once)", [&] {
+            std::vector<std::string> seen;
+            for (const auto& t : hl::topics()) if (seen.empty() || seen.back() != t.group) seen.push_back(t.group);
+            return std::set<std::string>(seen.begin(), seen.end()).size() == seen.size();
+        }());
+        check("help: search -- empty is all; 'snapshot' finds Preflight + the helper; 'Snapshot PASSWORD' any case; nonsense none",
+              hl::search("").size() == hl::topics().size() &&
+              [&] { int n = 0; for (auto* t : hl::search("snapshot")) n += t->id == "preflight" || t->id == "helper"; return n == 2; }() &&
+              !hl::search("Snapshot PASSWORD").empty() && hl::search("zzqx flarb").empty());
+        check("help: an unknown id is no topic", hl::find("nope") == nullptr);
+        // The help names the helper's real path and commands -- they mustn't drift.
+        const auto* h = hl::find("helper");
+        bool path = false, inst = false;
+        for (const auto& sec : h->sections) for (const auto& p : sec.paras) {
+            if (p.find(core::helper::kHelperPath) != std::string::npos) path = true;
+            if (p == "$ ./install.sh --helper") inst = true;
+        }
+        check("help: the helper topic names its real path and install line", path && inst);
+        const auto* pf = hl::find("preflight");
+        bool keep = false;
+        for (const auto& sec : pf->sections) for (const auto& p : sec.paras)
+            if (p.find("newest " + std::to_string(core::helper::kKeepDefault)) != std::string::npos) keep = true;
+        check("help: Preflight's keep-N matches the code", keep);
     }
     // -- Shortcuts: the registry paradigm, exercised ---------------------------
     // A seed's claim isn't a fact until a consumer exercises it. The registry's

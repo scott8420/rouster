@@ -1,4 +1,5 @@
 #include "Shell.hpp"
+#include "HelpWindow.hpp"      // complete type for ~unique_ptr<HelpWindow>
 #include "AboutWindow.hpp"      // complete type for ~unique_ptr<AboutWindow> in ~Shell()
 #include "ShortcutsDialog.hpp"  // ditto
 #include "Log.hpp"
