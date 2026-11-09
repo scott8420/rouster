@@ -379,6 +379,55 @@ std::vector<Move> moves(const std::string& data_dir, const std::string& rel) {
     return v;
 }
 
+Rows query(const std::string& data_dir, const std::string& sql, const std::vector<Param>& params, std::size_t limit) {
+    Rows out;
+    Db d;
+    const Opened o = open_ro(d, data_dir);
+    if (o != Opened::Ok) { out.error = o == Opened::Missing ? "no catalog yet -- Look first" : "the catalog won't open"; return out; }
+    sqlite3_stmt* st = nullptr;
+    const char* tail = nullptr;
+    if (sqlite3_prepare_v2(d.db, sql.c_str(), -1, &st, &tail) != SQLITE_OK) { out.error = d.err(); return out; }
+    Stmt q(d.db, "SELECT 1");   // owns nothing useful; swap in the real statement for RAII
+    sqlite3_finalize(q.s);
+    q.s = st;
+    if (!st) { out.error = "empty query"; return out; }
+    for (const char* t = tail; t && *t; ++t)
+        if (!std::isspace(static_cast<unsigned char>(*t)) && *t != ';') { out.error = "one statement only"; return out; }
+    if (!sqlite3_stmt_readonly(st)) { out.error = "a query may only read"; return out; }
+    for (const auto& p : params) {
+        const int i = sqlite3_bind_parameter_index(st, p.name.c_str());
+        if (i > 0) sqlite3_bind_int64(st, i, p.value);
+    }
+    const int n = sqlite3_column_count(st);
+    for (int c = 0; c < n; ++c) out.columns.push_back(sqlite3_column_name(st, c));
+    int rc;
+    while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
+        if (out.rows.size() >= limit) { out.truncated = true; break; }
+        std::vector<std::string> row;
+        row.reserve(static_cast<std::size_t>(n));
+        for (int c = 0; c < n; ++c) row.push_back(q.t(c));
+        out.rows.push_back(std::move(row));
+    }
+    if (rc != SQLITE_ROW && rc != SQLITE_DONE) { out.error = d.err(); return out; }
+    out.ok = true;
+    return out;
+}
+
+long set_kinds(const std::string& data_dir, const std::vector<std::pair<std::string, std::string>>& ext_kind) {
+    Db d;
+    std::string why;
+    if (open_rw(d, path_of(data_dir), false, why) != Opened::Ok) return -1;
+    if (!d.exec("BEGIN IMMEDIATE")) return -1;
+    Stmt u(d.db, "UPDATE files SET kind = ?1 WHERE coalesce(ext, '') = ?2 AND coalesce(kind, '') <> ?1");
+    long changed = 0;
+    for (const auto& [ext, kind] : ext_kind) {
+        if (!u.bind(1, kind).bind(2, ext).done()) { d.exec("ROLLBACK"); return -1; }
+        changed += sqlite3_changes(d.db);
+    }
+    if (!d.exec("COMMIT")) return -1;
+    return changed;
+}
+
 bool valid_verdict(const std::string& v) {
     if (v.empty() || v.size() > 32 || v.front() == '-' || v.back() == '-') return false;
     return std::all_of(v.begin(), v.end(), [](char c) { return (c >= 'a' && c <= 'z') || c == '-'; });

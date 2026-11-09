@@ -2,6 +2,7 @@
 #include "widgets/Widgets.hpp"
 #include "core/Scan.hpp"     // s002: the read-only walker
 #include "core/Catalog.hpp"  // s015b: the catalog, recorded after each Look
+#include "core/Tidy.hpp"     // s015c: the Tidy report (read-only)
 #include "core/Door.hpp"     // s004: the one door
 #include "core/Sweep.hpp"    // s006: the first module that acts
 #include "core/Dev.hpp"      // s007: dev projects
@@ -96,6 +97,7 @@ private:
     void build_dev_page();                       // category: zone: Dev projects (s007)
     void build_dups_page();                      // category: zone: Duplicates (s008)
     void build_archive_page();                   // category: zone: Archive (s009)
+    void build_tidy_page();                      // category: zone: Tidy (s015c) -- the report
     void build_projects_page();                  // category: zone: Projects (s010)
     void build_rules_page();                     // category: zone: Rules (s011)
     void build_profile_page();                   // category: zone: Profile backup (s012a)
@@ -142,6 +144,8 @@ private:
     void on_snapshot_taken();                    // category: handler: the helper answered (Dispatcher, UI thread)
     void stop_preflight();                       // category: helper: join a snapshot in flight (close, dtor)
     void on_archive_find();                      // category: handler: look for old files (worker)
+    void on_tidy_look();                         // category: handler: s015c -- Look at home, record, report (worker)
+    void on_tidy_found();                        // category: handler: the report is ready (Dispatcher, UI thread)
     void on_archive_cancel();                    // category: handler: stop looking
     void on_archive_found();                     // category: handler: the worker finished (Dispatcher, UI thread)
     void on_archive_view(bool stored);           // category: handler: Old files / In the archive
@@ -218,6 +222,8 @@ private:
     void paint_dups();                           // category: helper: mode switch, one card per group, rows with checks
     void dups_gate();                            // category: helper: the act button's label + whether it may act
     void stop_archive();                         // category: helper: cancel + join (close, dtor)
+    void stop_tidy();                            // category: helper: cancel + join (close, dtor)
+    void paint_tidy();                           // category: helper: s015c -- the report's cards
     bool tick_archive();                         // category: helper: the live counters while looking
     void paint_archive();                        // category: helper: view switch, cards per top folder / the stored list
     void archive_gate();
@@ -406,6 +412,22 @@ private:
     int              m_ar_months = core::archive::kDefaultMonths;
     static constexpr std::size_t kArchiveShown = 300;   // rows painted; unpainted rows are never checked
     std::size_t      m_ar_painted = 0;
+    // s015c: Tidy -- start | running | results. Report only.
+    Gtk::Box                              m_td_page{Gtk::Orientation::VERTICAL, 0};
+    Gtk::Stack                            m_td_states;
+    Gtk::Box                              m_td_list{Gtk::Orientation::VERTICAL, 12};
+    Gtk::Label                            m_td_sub, m_td_caption, m_td_run_big, m_td_run_caption;
+    Gtk::Spinner                          m_td_spinner;
+    Glib::Dispatcher                      m_tidy_finished;
+    std::shared_ptr<core::scan::Progress> m_td_progress;
+    std::thread                           m_td_worker;
+    std::mutex                            m_td_mx;
+    core::tidy::Report                    m_td_found;   // written by the worker
+    core::catalog::Delta                  m_td_cat;     // ...with what the Look did to the catalog
+    core::tidy::Report                    m_td_shown;   // UI thread only
+    core::catalog::Delta                  m_td_cat_shown;
+    sigc::connection                      m_td_tick;
+
     Glib::Dispatcher                      m_archive_finished;
     std::shared_ptr<core::scan::Progress> m_ar_progress;
     std::thread                           m_ar_worker;

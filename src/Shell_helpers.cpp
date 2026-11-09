@@ -872,6 +872,108 @@ void Shell::dups_gate() {  // helper: the act button's label + whether it may ac
 // list comes from the manifest on the UI thread (the door is the UI's). Rows
 // past kArchiveShown aren't painted and are never checked.
 // ─────────────────────────────────────────────────────────────────────────────
+void Shell::stop_tidy() {  // helper: cancel + join (close, dtor)
+    if (m_td_progress) m_td_progress->cancel = true;
+    if (m_td_worker.joinable()) m_td_worker.join();
+    m_td_tick.disconnect();
+}
+
+void Shell::paint_tidy() {  // helper: s015c -- the report's cards
+    namespace td = core::tidy;
+    while (auto* c = m_td_list.get_first_child()) m_td_list.remove(*c);
+    const auto& r = m_td_shown;
+    const auto now = static_cast<std::int64_t>(std::time(nullptr));
+
+    std::string cap = with_commas(r.files) + " of your files, " + scan::human_bytes(r.bytes) + ". Proposed: ";
+    for (std::size_t i = 0; i < r.groups.size(); ++i)
+        cap += (i ? ", " : "") + with_commas(r.groups[i].files) + " " +
+               (r.groups[i].verdict == td::Verdict::Short ? "short life" :
+                r.groups[i].verdict == td::Verdict::Dormant ? "dormant" : "undecided");
+    cap += "; " + with_commas(r.active) + " active";
+    if (r.kept) cap += ", " + with_commas(r.kept) + " you said to keep where they are";
+    cap += ". A report only -- nothing moves until the Closet.";
+    if (m_td_cat_shown.ok && !m_td_cat_shown.began &&
+        (m_td_cat_shown.fresh || m_td_cat_shown.moved || m_td_cat_shown.gone))
+        cap += "  Since the last Look: " + with_commas(m_td_cat_shown.fresh) + " new, " +
+               with_commas(m_td_cat_shown.moved) + " moved, " + with_commas(m_td_cat_shown.gone) + " gone.";
+    m_td_caption.set_text(cap);
+
+    const auto card = [&](const std::string& title, const std::string& sub) {
+        auto c = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 4);
+        c->add_css_class("card");
+        c->append(*text(title, "card-title"));
+        if (!sub.empty()) {
+            auto s = text(sub, "card-sub");
+            s->set_wrap(true);
+            c->append(*s);
+        }
+        m_td_list.append(*c);
+        return c;
+    };
+    const auto line = [&](Gtk::Box* into, const std::string& left, const std::string& mid, const std::string& right,
+                          const std::string& chip, const std::string& tip) {
+        auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 12);
+        row->set_margin_start(6);
+        auto l = text(left, "detail-path");
+        l->set_hexpand(true);
+        l->set_ellipsize(Pango::EllipsizeMode::MIDDLE);
+        if (!tip.empty()) l->set_tooltip_text(tip);
+        row->append(*l);
+        if (!mid.empty()) row->append(*text(mid, "dim", 1.0f));
+        if (!right.empty()) {
+            auto rt = text(right, "detail-size", 1.0f);
+            rt->set_width_chars(9);
+            row->append(*rt);
+        }
+        if (!chip.empty()) {
+            auto ch = text(chip, "td-query", 0.5f);
+            ch->set_valign(Gtk::Align::CENTER);
+            ch->set_tooltip_text("Proposed by the \u201c" + chip + "\u201d query");
+            row->append(*ch);
+        }
+        into->append(*row);
+    };
+
+    constexpr std::size_t kShow = 40;
+    for (const auto& g : r.groups) {
+        auto c = card(std::string(td::verdict_name(g.verdict)) + " \u00b7 " + with_commas(g.files) + " \u00b7 " +
+                      scan::human_bytes(g.bytes), td::verdict_why(g.verdict));
+        if (g.rows.empty()) { c->append(*text("Nothing proposed.", "dim")); continue; }
+        for (std::size_t i = 0; i < g.rows.size() && i < kShow; ++i) {
+            const auto& row = g.rows[i];
+            line(c, "~/" + row.rel + (row.package ? "  (package, whole)" : ""),
+                 !row.last_used ? "" : now - row.last_used < 86400 ? "used today" : "unused " + td::age(now - row.last_used),
+                 scan::human_bytes(row.bytes), row.query,
+                 m_home + "/" + row.rel);
+        }
+        if (g.rows.size() > kShow) c->append(*text("... and " + with_commas(g.rows.size() - kShow) + " more", "dim"));
+    }
+
+    if (!r.folders.empty()) {
+        auto c = card("Folders that need tidying \u00b7 " + with_commas(r.folders.size()),
+                      "Worst first: files arriving, kinds mixed together, a lot unused in a year.");
+        for (const auto& f : r.folders)
+            line(c, f.rel.empty() ? "~ (the top of home)" : "~/" + f.rel, f.why, with_commas(f.files) + " files", "", "");
+    }
+
+    {
+        auto c = card("The top of home \u00b7 " + with_commas(r.top.size()) + " folders" +
+                      (r.loose.empty() ? "" : " \u00b7 " + with_commas(r.loose.size()) + " loose files"),
+                      "What of yours is in each. (Which of these belong at the top -- the skeleton -- is still your call.)");
+        for (const auto& t : r.top)
+            line(c, "~/" + t.name, t.note.empty() ? scan::human_bytes(t.bytes) : t.note,
+                 t.files ? with_commas(t.files) + " files" : "", "", "");
+        for (std::size_t i = 0; i < r.loose.size() && i < 12; ++i) line(c, "~/" + r.loose[i], "loose", "", "", "");
+        if (r.loose.size() > 12) c->append(*text("... and " + with_commas(r.loose.size() - 12) + " more loose", "dim"));
+    }
+
+    if (!r.drift.empty() || !r.notes.empty()) {
+        auto c = card("Drift", "Where things land, and what isn't where it says.");
+        for (const auto& d : r.drift) { auto l = text("- " + d, "card-sub"); l->set_wrap(true); c->append(*l); }
+        for (const auto& n : r.notes) { auto l = text("- " + n, "pf-amber"); l->set_wrap(true); c->append(*l); }
+    }
+}
+
 void Shell::stop_archive() {  // helper: cancel + join (close, dtor)
     if (m_ar_progress) m_ar_progress->cancel = true;
     if (m_ar_worker.joinable()) m_ar_worker.join();

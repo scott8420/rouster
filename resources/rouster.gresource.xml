@@ -16,6 +16,7 @@
     <file preprocess="xml-stripblanks" alias="rouster-scan-symbolic.svg">icons/scalable/apps/rouster-scan-symbolic.svg</file>
     <file preprocess="xml-stripblanks" alias="rouster-sweep-symbolic.svg">icons/scalable/apps/rouster-sweep-symbolic.svg</file>
     <file preprocess="xml-stripblanks" alias="rouster-system-symbolic.svg">icons/scalable/apps/rouster-system-symbolic.svg</file>
+    <file preprocess="xml-stripblanks" alias="rouster-tidy-symbolic.svg">icons/scalable/apps/rouster-tidy-symbolic.svg</file>
     <file preprocess="xml-stripblanks" alias="rouster-ok-symbolic.svg">icons/scalable/apps/rouster-ok-symbolic.svg</file>
     <file preprocess="xml-stripblanks" alias="rouster-warn-symbolic.svg">icons/scalable/apps/rouster-warn-symbolic.svg</file>
     <file preprocess="xml-stripblanks" alias="rouster-stop-symbolic.svg">icons/scalable/apps/rouster-stop-symbolic.svg</file>
@@ -30,6 +31,7 @@
     <file preprocess="xml-stripblanks" alias="rouster-hero-scan.svg">icons/scalable/apps/rouster-hero-scan.svg</file>
     <file preprocess="xml-stripblanks" alias="rouster-hero-sweep.svg">icons/scalable/apps/rouster-hero-sweep.svg</file>
     <file preprocess="xml-stripblanks" alias="rouster-hero-system.svg">icons/scalable/apps/rouster-hero-system.svg</file>
+    <file preprocess="xml-stripblanks" alias="rouster-hero-tidy.svg">icons/scalable/apps/rouster-hero-tidy.svg</file>
     <file preprocess="xml-stripblanks" alias="rouster-hero-dev.svg">icons/scalable/apps/rouster-hero-dev.svg</file>
     <file preprocess="xml-stripblanks" alias="rouster-hero-dups.svg">icons/scalable/apps/rouster-hero-dups.svg</file>
     <file preprocess="xml-stripblanks" alias="rouster-hero-archive.svg">icons/scalable/apps/rouster-hero-archive.svg</file>

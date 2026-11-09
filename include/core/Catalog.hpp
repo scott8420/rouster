@@ -102,6 +102,25 @@ bool decide(const std::string& data_dir, const std::string& rel, const std::stri
             const std::string& detail, std::int64_t now, std::string* why = nullptr);
 std::vector<Decision> decisions(const std::string& data_dir);                      // newest first
 
+// s015c: a READ-ONLY query over the catalog -- the named verdict queries
+// (core/Tidy) and, later, your own SQL. The database is opened read-only and a
+// statement that would write is refused before it runs. Parameters are bound
+// by name (":now" -> 1700000000), never spliced. At most `limit` rows.
+struct Param { std::string name; std::int64_t value; };
+struct Rows {
+    bool ok = false;
+    std::string error;
+    std::vector<std::string> columns;
+    std::vector<std::vector<std::string>> rows;   // NULL -> ""
+    bool truncated = false;
+};
+Rows query(const std::string& data_dir, const std::string& sql, const std::vector<Param>& params = {},
+           std::size_t limit = 20000);
+
+// s015c: fill files.kind (a content type, from GIO in the app) by extension.
+// Only rows whose kind differs are touched. Returns how many changed; -1 = no catalog.
+long set_kinds(const std::string& data_dir, const std::vector<std::pair<std::string, std::string>>& ext_kind);
+
 // How the filesystem holding `path` keeps atime, from /proc/self/mountinfo:
 // "noatime", "relatime", "strictatime" (neither flag), or "" when unknown.
 std::string atime_mode(const std::string& path);

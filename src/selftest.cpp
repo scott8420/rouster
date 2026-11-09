@@ -36,6 +36,7 @@
 #include "core/About.hpp"
 #include "core/System.hpp"
 #include "core/Catalog.hpp"
+#include "core/Tidy.hpp"
 
 #include <sqlite3.h>
 
@@ -50,6 +51,7 @@
 #include <sstream>
 #include <set>
 #include <map>
+#include <optional>
 #include <random>
 #include <utility>
 
@@ -3592,6 +3594,138 @@ int main(int argc, char** argv) {
               !ct::record("", H, "", mine, {}, N4).ok && !ct::record("relative/dir", H, "", mine, {}, N4).ok);
         fs::remove_all(home, ec);
     }
+    // -- Tidy (s015c): the report -- verdicts as named queries ------------------
+    {
+        std::cout << "\n-- tidy --\n";
+        namespace ct = core::catalog;
+        namespace td = core::tidy;
+        const fs::path home = fs::temp_directory_path() / ("rouster_tidy_" + std::to_string(::getpid()));
+        std::error_code ec;
+        fs::remove_all(home, ec);
+        const std::string H = home.string(), D = H + "/.local/share/rouster";
+        const std::int64_t NOW = 1790000000, DAY = 86400;
+        const auto at = [&](const std::string& rel, std::size_t bytes, std::int64_t used) {
+            bool ok = put(home, rel, bytes);
+            struct timespec ts[2] = {{static_cast<time_t>(used), 0}, {static_cast<time_t>(used), 0}};
+            ::utimensat(AT_FDCWD, (home / rel).c_str(), ts, AT_SYMLINK_NOFOLLOW);
+            return ok;
+        };
+        bool made = at("Downloads/setup-2.4.iso", 90000, NOW - 60 * DAY) && at("Downloads/fresh.iso", 80000, NOW - DAY) &&
+                    at("Pictures/Screenshots/Screenshot from 2024-01-02.png", 3000, NOW - 300 * DAY) &&
+                    at("Documents/report (1).pdf", 4000, NOW - 2 * DAY) &&
+                    at("Documents/old letter.odt", 5000, NOW - 3 * 365 * DAY) &&
+                    at("Documents/keep me.odt", 5000, NOW - 3 * 365 * DAY) &&
+                    at("Archive/2020/x.txt", 100, NOW - 6 * 365 * DAY) && at("loose.txt", 100, NOW - DAY) &&
+                    at("old.iso", 7000, NOW - 90 * DAY) && at("Desktop/note.txt", 100, NOW - DAY) &&
+                    at("Desktop/sub/deep.txt", 100, NOW - DAY) && at("Novels/Tapper.scriv/Files/a.rtf", 2000, NOW - DAY) &&
+                    at("Develop/proj/.git/HEAD", 40, NOW) && at("Develop/proj/src/main.cpp", 400, NOW) &&
+                    at("Develop/ws/backups/s001 (1).zip", 400, NOW - 4 * 365 * DAY) &&
+                    put_bytes(home, ".config/user-dirs.dirs",
+                              "# written by xdg-user-dirs-update\nXDG_DOWNLOAD_DIR=\"$HOME/Downloads\"\n"
+                              "XDG_MUSIC_DIR=\"$HOME/Music\"\nXDG_DESKTOP_DIR=\"$HOME/Desktop\"\n");
+        for (int k = 0; k < 6; ++k)   // a mixed, busy folder
+            made &= at("Downloads/mix" + std::to_string(k) + (k % 3 == 0 ? ".pdf" : k % 3 == 1 ? ".mp3" : ".zip"), 100, NOW - DAY);
+        check("tidy: fixture made", made);
+        fs::create_directories(D, ec);
+
+        check("tidy: no catalog -> no report, said", !td::report(D, H, NOW).ok && !ct::query(D, "SELECT 1").ok);
+        core::scan::Progress p;
+        std::vector<core::scan::Seen> mine;
+        core::scan::scan(H, H, p, 0, &mine);
+        const auto d = ct::record(D, H, "", mine, {}, NOW - 10 * DAY);   // the catalog began 10 days ago
+        check("tidy: decide keep-here on one", d.ok && ct::decide(D, "Documents/keep me.odt", "keep-here", "", NOW));
+
+        // The read-only query: reads, binds, refuses anything that writes.
+        const auto q1 = ct::query(D, "SELECT count(*) FROM files WHERE size > :min", {{":min", 4500}});
+        const auto qd = ct::query(D, "DELETE FROM files");
+        const auto q2 = ct::query(D, "SELECT 1; DELETE FROM files");
+        const auto qa = ct::query(D, "ATTACH DATABASE '/tmp/x.db' AS x");
+        check("catalog/query: reads, with a bound parameter", q1.ok && q1.rows.size() == 1 && q1.columns.size() == 1 &&
+              std::stoi(q1.rows[0][0]) >= 4, q1.error);
+        check("catalog/query: a statement that writes is refused; so is a second statement; so is ATTACH",
+              !qd.ok && !q2.ok && !qa.ok && ct::summary(D).files == mine.size(), qd.error + " / " + q2.error);
+        const long kinds = ct::set_kinds(D, {{"pdf", "application/pdf"}, {"mp3", "audio/mpeg"}, {"zip", "application/zip"},
+                                             {"odt", "application/vnd.oasis.opendocument.text"}});
+        const long again = ct::set_kinds(D, {{"pdf", "application/pdf"}});
+        check("catalog/set_kinds: by extension; only rows that differ", kinds >= 6 && again == 0 &&
+              ct::query(D, "SELECT kind FROM files WHERE path = 'Downloads/mix0.pdf'").rows.at(0).at(0) == "application/pdf");
+
+        const std::string disk = files_snapshot(home);
+        const auto bytes_of = [](const std::string& f) {
+            std::ifstream in(f, std::ios::binary);
+            return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        };
+        const std::string db = bytes_of(D + "/catalog.db");
+        const auto r = td::report(D, H, NOW);
+        check("tidy: the report reads -- it changes no file and not the catalog", r.ok && files_snapshot(home) == disk &&
+              bytes_of(D + "/catalog.db") == db, r.error);
+        const auto rows_of = [&](td::Verdict v) {
+            std::map<std::string, std::string> m;
+            for (const auto& row : r.groups.at(static_cast<std::size_t>(v)).rows) m[row.rel] = row.query;
+            return m;
+        };
+        const auto sh = rows_of(td::Verdict::Short), dm = rows_of(td::Verdict::Dormant), un = rows_of(td::Verdict::Undecided);
+        const auto show = [](const std::map<std::string, std::string>& m) {
+            std::string s;
+            for (const auto& [k, v] : m) s += k + "<" + v + "> ";
+            return s;
+        };
+        check("tidy: short life -- the old installers (top of home too), the old screenshot, the reflex save; "
+              "not a fresh installer", sh == std::map<std::string, std::string>{
+                  {"Downloads/setup-2.4.iso", "installers"}, {"old.iso", "installers"},
+                  {"Pictures/Screenshots/Screenshot from 2024-01-02.png", "screenshots"},
+                  {"Documents/report (1).pdf", "reflex"}}, show(sh));
+        check("tidy: dormant -- unused 18 months; not what's in the Archive, not what you said to keep, "
+              "not a dev workspace's backup (Dev's)",
+              dm == std::map<std::string, std::string>{{"Documents/old letter.odt", "dormant"}}, show(dm));
+        check("tidy: undecided -- loose at the top of home and on the Desktop (not deeper; an earlier query wins)",
+              un == std::map<std::string, std::string>{{"loose.txt", "loose"}, {"Desktop/note.txt", "loose"}}, show(un));
+        check("tidy: the rest is active, counted; the keep-here is counted as kept",
+              r.kept == 1 && r.active == r.files - 7 && r.files == mine.size(),
+              std::to_string(r.active) + " active of " + std::to_string(r.files));
+        bool dl_first = !r.folders.empty() && r.folders.front().rel == "Downloads" &&
+                        r.folders.front().why.find("kinds mixed") != std::string::npos;
+        check("tidy: folder health -- the mixed, busy Downloads is worst, and says why", dl_first,
+              r.folders.empty() ? "" : r.folders.front().rel + ": " + r.folders.front().why);
+        std::map<std::string, td::Top> tops;
+        for (const auto& t : r.top) tops[t.name] = t;
+        check("tidy: the top of home -- each folder, what of yours is in it; code is Dev projects'; the Archive named",
+              tops.count("Develop") && tops["Develop"].files == 1 && tops["Develop"].note.empty() &&
+              tops.count("Documents") && tops["Documents"].files == 3 && tops["Archive"].note == "the Archive" &&
+              !tops.count(".config") && r.loose == std::vector<std::string>{"loose.txt", "old.iso"});
+        bool music = false, closet = false;
+        for (const auto& l : r.drift) {
+            if (l.find("~/Music, which isn't there") != std::string::npos) music = true;
+            if (l.find("No ~/Closet") != std::string::npos) closet = true;
+        }
+        check("tidy: drift -- an XDG folder pointing nowhere; no Closet yet", music && closet && r.notes.empty());
+        check("tidy: every query is read-only SQL, ids unique, all three verdicts used", [&] {
+            std::set<std::string> ids;
+            std::set<int> vs;
+            for (const auto& q : td::queries()) {
+                if (!ids.insert(q.id).second || !ct::query(D, q.sql, {{":now", NOW}, {":short", 1}, {":dormant", 1}}).ok) return false;
+                vs.insert(static_cast<int>(q.verdict));
+            }
+            return vs.size() == 3;
+        }());
+        check("tidy: age reads plainly", td::age(DAY) == "1 day" && td::age(90 * DAY) == "3 months" &&
+              td::age(3 * 365 * DAY) == "3 years");
+
+        // Preflight's "Last opened" row (s015c).
+        namespace pf = core::preflight;
+        pf::Inputs in;
+        in.home = H; in.total_bytes = 1000ull * 1000 * 1000 * 1000; in.free_bytes = in.total_bytes / 2;
+        const auto row = [&](const std::string& mode) -> std::optional<pf::Check> {
+            in.atime_mode = mode;
+            for (const auto& c : pf::evaluate(in)) if (c.id == "atime") return c;
+            return std::nullopt;
+        };
+        const auto rel = row("relatime"), noa = row("noatime"), unk = row("");
+        check("preflight: 'Last opened' -- relatime green, noatime amber (never red), unknown no row",
+              rel && rel->status == pf::Status::Green && noa && noa->status == pf::Status::Amber && !unk &&
+              pf::gather(H).atime_mode == ct::atime_mode(H));
+        fs::remove_all(home, ec);
+    }
     // -- The source gate: no write call outside the door (s004) --------------
     // RULES: "every write goes through it, and the selftest fails on a write
     // that does not." Allowlisted, each for a reason:
@@ -3681,7 +3815,7 @@ int main(int argc, char** argv) {
         bool pages = true;
         std::string missing;
         // Every sidebar page (Shell_zones' m_stack ids) has a topic -- F1 opens it.
-        for (const char* id : {"scan", "sweep", "system", "dups", "dev", "projects", "rules", "archive", "preflight", "profile", "activity"})
+        for (const char* id : {"scan", "sweep", "system", "dups", "dev", "tidy", "projects", "rules", "archive", "preflight", "profile", "activity"})
             if (!hl::find(id)) { pages = false; missing += std::string(id) + " "; }
         check("help: every sidebar page has a topic", pages, missing);
         std::set<std::string> ids;

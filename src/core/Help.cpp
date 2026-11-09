@@ -26,7 +26,7 @@ std::vector<Topic> build() {
                 "- Undo. Every act is one step in Activity, and Undo puts it back."}},
             {"The sidebar", {
                 "- Clean up: Smart Scan, Sweep, System, Duplicates, Dev projects.",
-                "- Organize: Projects, Rules, Archive.",
+                "- Organize: Tidy, Projects, Rules, Archive.",
                 "- Safety: Preflight, Profile backup, Activity."}},
             {"Getting help", {
                 "Press F1 on any page to open its help. Ctrl+? lists the keyboard shortcuts."}},
@@ -166,6 +166,28 @@ std::vector<Topic> build() {
         }});
 
     // ── Organize ────────────────────────────────────────────────────────────
+    t.push_back({"tidy", "Tidy", "Organize",
+        "Reads your whole home and proposes a lifespan for what it finds. A report only -- nothing moves.",
+        {
+            {"How to use it", {
+                "Press Look. Rouster looks through your home (like Smart Scan), updates its catalog, and reports:",
+                "- Short life -- installers and disk images, screenshots and the like unused for a month, reflex saves "
+                "such as \"report (1).pdf\" or \"Copy of notes\".",
+                "- Dormant -- neither opened nor changed in 18 months: candidates for the Archive.",
+                "- Undecided -- loose at the top of home or on the Desktop: no home yet.",
+                "- Active -- everything else; counted, not listed.",
+                "Each row names the query that proposed it. The first query to claim a file wins."}},
+            {"Also in the report", {
+                "Folders that need tidying, worst first (files arriving, kinds mixed, much unused in a year); the top "
+                "of home, folder by folder; and drift -- folders your desktop points at that aren't there, and where "
+                "new files land."}},
+            {"Good to know", {
+                "\"Unused\" is the later of last opened and last changed. If your home is mounted noatime, Rouster "
+                "can't know last opened (Preflight says so) and goes by last change.",
+                "Your own files only: hidden files, code in git repositories and caches are left out; a Scrivener "
+                "project is one item. Moving things comes with the Closet."}},
+        }});
+
     t.push_back({"projects", "Projects", "Organize",
         "Starts projects from templates, names files the project's way, and files them where they belong.",
         {
@@ -215,7 +237,9 @@ std::vector<Topic> build() {
                 "- Filesystem -- green when home is btrfs on its own subvolume, so it can be snapshotted on its own.",
                 "- Snapshot -- green when one of Rouster's snapshots is under a day old.",
                 "- Pika Backup -- green when Pika ran in the last 7 days. Off btrfs, Pika is the only net, so a stale one is red.",
-                "- Free space -- red under 2 GB, a note under 10 GB or 10%."}},
+                "- Free space -- red under 2 GB, a note under 10 GB or 10%.",
+                "- Last opened -- whether your home keeps when files were last opened (relatime does); a note if "
+                "it's mounted noatime, when Tidy can only go by last change. Never stops anything."}},
             {"Red stops, amber notes", {
                 "A red check turns off every act button until it clears, and the button says why. Amber never blocks."}},
             {"Take snapshot", {

@@ -54,6 +54,9 @@ struct Inputs {
     int                         snap_count = 0;
     bool                        helper = false;         // the helper is installed
     int                         snap_fresh_hours = 24;  // newer than this -> green
+    // s015c: how home's filesystem keeps atime (catalog::atime_mode) -- Tidy's
+    // "last opened" means nothing on a noatime home. "" = unknown: no row.
+    std::string                 atime_mode;
 };
 
 // Where Pika keeps its history, relative to home: the native and the Flatpak

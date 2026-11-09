@@ -1,4 +1,5 @@
 #include "core/Preflight.hpp"
+#include "core/Catalog.hpp"
 #include "core/Scan.hpp"   // human_bytes
 #include "core/Helper.hpp" // s013: where Rouster's snapshots are
 #include "core/Door.hpp"   // helper_installed
@@ -93,6 +94,7 @@ Inputs gather(const std::string& home) {
     buf << mi.rdbuf();
     const auto mounts = parse_mountinfo(buf.str());
     if (const Mount* m = find_mount(mounts, home)) in.mount = *m;
+    in.atime_mode = catalog::atime_mode(home);   // s015c
 
     const std::time_t now = std::time(nullptr);
     for (const auto& rel : pika_history_paths()) {
@@ -213,6 +215,21 @@ std::vector<Check> evaluate(const Inputs& in) {
         if (in.total_bytes == 0)                                  { c.status = Status::Red;   c.detail = "Could not read free space."; }
         else if (in.free_bytes < 2 * GB)                          c.status = Status::Red;
         else if (in.free_bytes < 10 * GB || pct < 10)             c.status = Status::Amber;
+        out.push_back(c);
+    }
+
+    // 4b. s015c: "last opened" -- Tidy's lifetime is time since last USE.
+    // Never red: Tidy still works (by last change), it just knows less.
+    if (!in.atime_mode.empty()) {
+        Check c{"atime", "Last opened", "", Status::Green};
+        if (in.atime_mode == "noatime") {
+            c.status = Status::Amber;
+            c.detail = "Home is mounted noatime -- Rouster can't tell when a file was last opened; Tidy goes by "
+                       "when it last changed.";
+        } else {
+            c.detail = "Kept by the filesystem (" + in.atime_mode + (in.atime_mode == "relatime" ? ", at most daily" : "") +
+                       ") -- Tidy can tell a file you still open from one you don't.";
+        }
         out.push_back(c);
     }
 

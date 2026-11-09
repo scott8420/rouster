@@ -25,6 +25,8 @@ add_library(rouster_core STATIC
     # The catalog (s015b): Rouster's memory of your files -- first seen, history,
     # moves, decisions -- in its own catalog.db. The only file that opens a database.
     src/core/Catalog.cpp
+    # Tidy (s015c): the report -- verdicts as named queries over the catalog; read-only.
+    src/core/Tidy.cpp
     src/core/Preflight.cpp
     # THE ONE DOOR (s004): the only file that changes a user's files. The
     # selftest's source gate fails if any other file makes a write call.

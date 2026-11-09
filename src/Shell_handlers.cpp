@@ -15,6 +15,7 @@
 #include <giomm/asyncresult.h>
 #include <giomm/file.h>
 #include <giomm/appinfo.h>
+#include <giomm/contenttype.h>
 #include <glibmm/convert.h>
 
 #include <chrono>
@@ -857,6 +858,97 @@ void Shell::on_archive_find() {  // handler: look for old files (worker)
 void Shell::on_archive_cancel() {  // handler: stop looking
     if (m_ar_progress) m_ar_progress->cancel = true;
     if (auto lg = log::get(log::Area::Archive)) lg->info("cancel requested");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tidy (s015c). One worker: a fresh Look at the whole home (the Smart Scan
+// walk, so the catalog is current), the catalog recorded, kinds filled from
+// GIO by extension, then the report -- all read-only for your files.
+// ─────────────────────────────────────────────────────────────────────────────
+void Shell::on_tidy_look() {  // handler: Look at home, record, report (worker)
+    if (m_td_worker.joinable()) return;
+    m_td_progress = std::make_shared<core::scan::Progress>();
+    m_td_run_big.set_text("0 files");
+    m_td_run_caption.set_text("Looking through your home...");
+    m_td_spinner.start();
+    m_td_states.set_visible_child("running");
+    if (auto lg = log::get(log::Area::Tidy)) lg->info("look '{}'", m_home);
+    m_td_worker = std::thread([this, prog = m_td_progress, home = m_home, data = data_dir()] {
+        const auto t0 = std::chrono::steady_clock::now();
+        std::vector<core::scan::Seen> mine;
+        const core::scan::Report sr = core::scan::scan(home, home, *prog, 0, &mine);
+        core::catalog::Delta cat;
+        core::tidy::Report rep;
+        if (!sr.refused.empty()) rep.error = "not looked: " + sr.refused;
+        else if (sr.cancelled) rep.error = "stopped -- nothing recorded";
+        else {
+            std::vector<std::string> not_walked = sr.unwalked;
+            not_walked.insert(not_walked.end(), sr.skipped.begin(), sr.skipped.end());
+            const auto now = static_cast<std::int64_t>(std::time(nullptr));
+            cat = core::catalog::record(data, sr.home, "", mine, not_walked, now);
+            if (!cat.ok) rep.error = "the catalog: " + cat.error;
+            else {
+                // Kinds by extension, from shared-mime-info (name globs; contents never read).
+                std::vector<std::pair<std::string, std::string>> kinds;
+                const auto exts = core::catalog::query(data, "SELECT DISTINCT ext FROM files WHERE ext <> ''");
+                for (const auto& row : exts.rows) {
+                    bool uncertain = false;
+                    const std::string ct = Gio::content_type_guess("x." + row[0], std::string(), uncertain);
+                    if (!ct.empty() && !(uncertain && ct == "application/octet-stream")) kinds.emplace_back(row[0], ct);
+                }
+                const long changed = core::catalog::set_kinds(data, kinds);
+                if (auto lg = log::get(log::Area::Catalog)) lg->info("kinds: {} extensions, {} rows set", kinds.size(), changed);
+                rep = core::tidy::report(data, sr.home, now);
+            }
+        }
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+        if (auto lg = log::get(log::Area::Tidy)) {
+            if (!rep.ok) lg->warn("no report: {}", rep.error);
+            else {
+                lg->info("report: {} files, {} active, {} kept; short {}, dormant {}, undecided {}; {} folders need it; "
+                         "{} drift; {} ms", rep.files, rep.active, rep.kept, rep.groups[0].files, rep.groups[1].files,
+                         rep.groups[2].files, rep.folders.size(), rep.drift.size(), ms);
+                for (const auto& g : rep.groups)
+                    for (const auto& row : g.rows)
+                        lg->debug("proposed {} by '{}': {}", core::tidy::verdict_name(g.verdict), row.query, row.rel);
+                for (const auto& n : rep.notes) lg->warn("{}", n);
+            }
+        }
+        if (auto lg = log::get(log::Area::Catalog); lg && cat.ok)
+            lg->info("look {} '~' (tidy): {} files, {} new, {} changed, {} read, {} moved, {} gone, {} returned",
+                     cat.look, cat.files, cat.fresh, cat.changed, cat.read, cat.moved, cat.gone, cat.returned);
+        {
+            std::lock_guard lk(m_td_mx);
+            m_td_found = std::move(rep);
+            m_td_cat = std::move(cat);
+        }
+        m_tidy_finished.emit();
+    });
+    m_td_tick = Glib::signal_timeout().connect([this] {
+        if (!m_td_progress) return false;
+        const auto f = m_td_progress->files.load();
+        m_td_run_big.set_text(std::to_string(f) + " files");
+        m_td_run_caption.set_text(m_td_progress->done.load() ? "Reading the catalog..." : "Looking through your home...");
+        return true;
+    }, 150);
+}
+
+void Shell::on_tidy_found() {  // handler: the report is ready (Dispatcher -> UI thread)
+    if (m_td_worker.joinable()) m_td_worker.join();
+    m_td_tick.disconnect();
+    m_td_spinner.stop();
+    {
+        std::lock_guard lk(m_td_mx);
+        m_td_shown = m_td_found;
+        m_td_cat_shown = m_td_cat;
+    }
+    if (!m_td_shown.ok) {
+        m_td_sub.set_text("No report: " + m_td_shown.error + ".");
+        m_td_states.set_visible_child("start");
+        return;
+    }
+    paint_tidy();
+    m_td_states.set_visible_child("results");
 }
 
 void Shell::on_archive_found() {  // handler: the worker finished (Dispatcher -> UI thread)
