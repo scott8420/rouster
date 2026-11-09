@@ -148,4 +148,47 @@ std::string redirect_downloads(const std::string& user_dirs_text);
 // itself; the "screenshots" query gathers the old ones instead.
 door::Plan closet_plan(const std::string& home, bool redirect);
 
+// ── s016b: the Closet's review, the Junk Drawer, keep-here ───────────────────
+// What sits at the top of ~/Closet (not the Junk Drawer, not hidden names,
+// not partial downloads), each with its expiry if it came as short life.
+// READ-ONLY: opendir / lstat and the catalog (read-only).
+struct ClosetItem {
+    std::string   rel;               // "Closet/old.iso"
+    std::uint64_t bytes = 0;         // disk usage (a folder: everything in it, one filesystem)
+    bool          dir = false;       // a folder or a package
+    std::int64_t  expires = 0;       // 0 = no expiry (to be sorted)
+    std::int64_t  arrived = 0;       // the catalog's first seen (0 = not cataloged yet -- Look)
+    std::uint64_t dev = 0, ino = 0;  // identity now -- re-checked at plan time
+    std::int64_t  changed = 0;       // its mtime now (a file)
+};
+bool expired(const ClosetItem& it, std::int64_t now);   // has an expiry, and it has passed
+struct ClosetView {
+    bool                    closet = false;   // ~/Closet is a folder
+    std::vector<ClosetItem> items;            // expired first (oldest expiry first), then by expiry, then the rest by name
+    std::size_t             expired = 0, expiring = 0;   // expiring: has an expiry not yet passed
+    std::uint64_t           bytes = 0;
+    std::size_t             junk = 0;         // entries in the Junk Drawer (they never age out)
+};
+ClosetView closet(const std::string& data_dir, const std::string& home, std::int64_t now);
+
+// The review's two acts, each ONE door step (previewed by the UI), each item
+// looked at again (same inode; a file's same mtime) -- changed or gone is left out:
+//   review_plan -- EXPIRED items to the Trash. An item not past its expiry is
+//                  left out ("not expired yet"): nothing is trashed unasked.
+//   junk_plan   -- items to ~/Closet/Junk Drawer/<name> (kept, no home, never
+//                  ages out); a name taken there is left out. Made if missing.
+struct Review {
+    door::Plan               plan;      // previewed stays false: only the UI sets it
+    std::vector<std::string> dropped;
+    std::size_t              n = 0;
+    std::uint64_t            bytes = 0;
+};
+Review review_plan(const std::string& home, const std::vector<ClosetItem>& items, std::int64_t now);
+Review junk_plan(const std::string& home, const std::vector<ClosetItem>& items);
+
+// Keep here: the decision "keep-here" on a proposed file -- never proposed
+// again (the queries skip it). Forget records "keep-off"; the newest wins.
+// kept(): the files whose newest decision is keep-here and that are there now.
+std::vector<std::string> kept(const std::string& data_dir);
+
 }  // namespace rouster::core::tidy

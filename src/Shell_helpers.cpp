@@ -930,7 +930,11 @@ void Shell::paint_tidy() {  // helper: s015c -- the report's cards
         if (!chip.empty()) {
             auto ch = text(chip, "td-query", 0.5f);
             ch->set_valign(Gtk::Align::CENTER);
-            ch->set_tooltip_text("Proposed by the \u201c" + chip + "\u201d query");
+            ch->set_tooltip_text(chip == "expired" || chip == "short" || chip == "to sort"   // s016b: the Closet's chips
+                                     ? std::string("In the Closet: ") + (chip == "expired" ? "past its 30 days"
+                                                                       : chip == "short" ? "short life, ageing"
+                                                                                         : "waiting to be sorted")
+                                     : "Proposed by the \u201c" + chip + "\u201d query");
             row->append(*ch);
         }
         into->append(*row);
@@ -980,6 +984,99 @@ void Shell::paint_tidy() {  // helper: s015c -- the report's cards
         }
     }
 
+    if (!m_td_keep_said.empty()) {
+        auto k = text(m_td_keep_said, "dim");
+        k->set_wrap(true);
+        k->set_margin_start(16);
+        m_td_list.append(*k);
+    }
+    // s016b: the Closet's own card -- what's in it, each short-life item's expiry; the review.
+    m_tc_cbs.clear();
+    m_tc_all = nullptr; m_tc_gate = nullptr; m_tc_trash = nullptr; m_tc_junk = nullptr;
+    m_tc_view = td::closet(data_dir(), m_home, now);
+    {
+        std::set<std::string> still;
+        for (const auto& it : m_tc_view.items) if (m_tc_checked.count(it.rel)) still.insert(it.rel);
+        m_tc_checked.swap(still);
+    }
+    if (m_tc_view.closet) {
+        const auto& v = m_tc_view;
+        std::string head = "In the Closet \u00b7 " + with_commas(v.items.size());
+        if (!v.items.empty()) head += " \u00b7 " + scan::human_bytes(v.bytes);
+        if (v.expired) head += " \u00b7 " + with_commas(v.expired) + " expired";
+        auto c = card(head, "Short-life files wait here 30 days, then come up for the Trash -- only when you check them. "
+                            "The rest wait to be sorted, or go to the Junk Drawer: kept, no home yet, never ages out." +
+                            std::string(v.junk ? " (" + with_commas(v.junk) + " in the Junk Drawer now.)" : ""));
+        if (v.items.empty()) {
+            c->append(*text("Nothing waiting.", "dim"));
+        } else {
+            auto all = Gtk::make_managed<Gtk::CheckButton>("Select all \u00b7 " + with_commas(v.items.size()));
+            all->set_margin_top(4);
+            all->signal_toggled().connect([this, all] {
+                if (m_td_bulk) return;
+                const bool on = all->get_active() || all->get_inconsistent();
+                m_td_bulk = true;
+                all->set_inconsistent(false);
+                all->set_active(on);
+                for (auto& [b, rel] : m_tc_cbs) b->set_active(on);
+                m_td_bulk = false;
+                closet_gate();
+            });
+            c->append(*all);
+            m_tc_all = all;
+            auto rows_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 4);
+            auto sc = Gtk::make_managed<Gtk::ScrolledWindow>();
+            sc->set_policy(Gtk::PolicyType::NEVER, Gtk::PolicyType::AUTOMATIC);
+            sc->set_min_content_height(static_cast<int>(std::min<std::size_t>(v.items.size() * 25, 420)));
+            sc->set_max_content_height(420);
+            sc->set_propagate_natural_height(true);
+            rows_box->set_margin_end(14);
+            sc->set_child(*rows_box);
+            c->append(*sc);
+            for (const auto& it : v.items) {
+                auto rw = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 10);
+                auto cb = Gtk::make_managed<Gtk::CheckButton>();
+                cb->set_active(m_tc_checked.count(it.rel) > 0);
+                const std::string rel = it.rel;
+                cb->signal_toggled().connect([this, cb, rel] {
+                    if (cb->get_active()) m_tc_checked.insert(rel); else m_tc_checked.erase(rel);
+                    if (!m_td_bulk) closet_gate();
+                });
+                m_tc_cbs.emplace_back(cb, rel);
+                rw->append(*cb);
+                auto inner = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 0);
+                inner->set_hexpand(true);
+                const bool ex = td::expired(it, now);
+                const std::string when =
+                    ex ? "expired " + td::age(now - it.expires) + " ago"
+                  : it.expires ? "expires in " + td::age(it.expires - now)
+                  : !it.arrived ? "new -- Look again to date it"
+                  : now - it.arrived < 86400 ? "arrived today"
+                                             : "here " + td::age(now - it.arrived);
+                line(inner, "~/" + it.rel + (it.dir ? "/" : ""), when, scan::human_bytes(it.bytes),
+                     ex ? "expired" : it.expires ? "short" : "to sort", ex ? "Past its 30 days: the Trash, if you check it"
+                                                                 : "~/" + it.rel);
+                rw->append(*inner);
+                rows_box->append(*rw);
+            }
+        }
+        auto bar = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 12);
+        bar->set_margin_top(6);
+        auto gate = text("", "dim");
+        gate->set_hexpand(true);
+        gate->set_wrap(true);
+        bar->append(*gate);
+        auto junk = Gtk::make_managed<Gtk::Button>("To the Junk Drawer");
+        junk->add_css_class("ghost");
+        junk->signal_clicked().connect(sigc::mem_fun(*this, &Shell::on_closet_junk));
+        bar->append(*junk);
+        auto trash = Gtk::make_managed<Gtk::Button>("Move to the Trash");
+        trash->add_css_class("act");
+        trash->signal_clicked().connect(sigc::mem_fun(*this, &Shell::on_closet_trash));
+        bar->append(*trash);
+        if (!v.items.empty()) { c->append(*bar); m_tc_gate = gate; m_tc_trash = trash; m_tc_junk = junk; }
+    }
+
     // s016a2: hands off -- folders Rouster leaves alone (Tidy, Archive, Duplicates).
     {
         auto c = card("Hands off \u00b7 " + with_commas(r.hands_off.size()) +
@@ -1014,6 +1111,8 @@ void Shell::paint_tidy() {  // helper: s015c -- the report's cards
     m_td_painted.clear();
     m_td_go.fill(nullptr);
     m_td_gates.fill(nullptr);
+    m_td_all.fill(nullptr);
+    for (auto& v : m_td_cbs) v.clear();
     for (const auto& g : r.groups) {
         const auto vi = static_cast<std::size_t>(g.verdict);
         auto c = card(std::string(td::verdict_name(g.verdict)) + " \u00b7 " + with_commas(g.files) + " \u00b7 " +
@@ -1024,6 +1123,31 @@ void Shell::paint_tidy() {  // helper: s015c -- the report's cards
         std::map<std::string, std::string> to;
         for (const auto& a : dest.plan.actions)
             if (a.verb == core::door::Verb::Move) to[a.from.substr(m_home.size() + 1)] = a.to.substr(m_home.size() + 1);
+        // s016a3: "Select all" over the offered rows, then every row in a scroller.
+        auto all = Gtk::make_managed<Gtk::CheckButton>("Select all \u00b7 " + with_commas(shown.size()));
+        all->set_margin_top(4);
+        all->signal_toggled().connect([this, vi, all] {
+            if (m_td_bulk) return;
+            const bool on = all->get_active() || all->get_inconsistent();
+            m_td_bulk = true;
+            all->set_inconsistent(false);
+            all->set_active(on);
+            for (auto* b : m_td_cbs[vi]) b->set_active(on);   // each row's handler updates m_td_checked
+            m_td_bulk = false;
+            tidy_gate();
+        });
+        c->append(*all);
+        m_td_all[vi] = all;
+        auto rows_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 4);
+        auto sc = Gtk::make_managed<Gtk::ScrolledWindow>();
+        sc->set_policy(Gtk::PolicyType::NEVER, Gtk::PolicyType::AUTOMATIC);
+        // Inside the page's own scroller natural height isn't propagated: ask for the rows' height, at most 420.
+        sc->set_min_content_height(static_cast<int>(std::min<std::size_t>(shown.size() * 25, 420)));
+        sc->set_max_content_height(420);
+        sc->set_propagate_natural_height(true);
+        rows_box->set_margin_end(14);   // the overlay scrollbar stays off the chips
+        sc->set_child(*rows_box);
+        c->append(*sc);
         for (const auto& row : shown) {
             m_td_painted.insert(row.rel);
             auto rw = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 10);
@@ -1034,8 +1158,9 @@ void Shell::paint_tidy() {  // helper: s015c -- the report's cards
             const std::string rel = row.rel;
             cb->signal_toggled().connect([this, cb, rel] {
                 if (cb->get_active()) m_td_checked.insert(rel); else m_td_checked.erase(rel);
-                tidy_gate();
+                if (!m_td_bulk) tidy_gate();
             });
+            if (it != to.end()) m_td_cbs[vi].push_back(cb);
             rw->append(*cb);
             auto inner = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 0);
             inner->set_hexpand(true);
@@ -1044,7 +1169,16 @@ void Shell::paint_tidy() {  // helper: s015c -- the report's cards
                  scan::human_bytes(row.bytes), row.query,
                  it != to.end() ? "\u2192 ~/" + it->second : "Not offered: changed since the Look -- Look again");
             rw->append(*inner);
-            c->append(*rw);
+            auto keep = Gtk::make_managed<Gtk::Button>("Keep here");
+            keep->add_css_class("ghost");
+            keep->add_css_class("small");
+            keep->set_valign(Gtk::Align::CENTER);
+            keep->set_tooltip_text("Leave it where it is -- never proposed again. Forget (under \u201cKept here\u201d) undoes it.");
+            keep->signal_clicked().connect([this, rel] {
+                Glib::signal_idle().connect_once([this, rel] { on_tidy_keep(rel, true); });
+            });
+            rw->append(*keep);
+            rows_box->append(*rw);
         }
         if (g.rows.size() > kTidyShown)
             c->append(*text("... and " + with_commas(g.rows.size() - kTidyShown) + " more -- not shown, never checked", "dim"));
@@ -1062,6 +1196,36 @@ void Shell::paint_tidy() {  // helper: s015c -- the report's cards
         c->append(*bar);
         m_td_go[vi] = go;
         m_td_gates[vi] = gate;
+    }
+
+    if (const auto kept = td::kept(data_dir()); !kept.empty()) {   // s016b
+        auto c = card("Kept here \u00b7 " + with_commas(kept.size()),
+                      "Files you said stay where they are -- never proposed again. Forget lets Tidy propose one again.");
+        auto rows_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 4);
+        auto sc = Gtk::make_managed<Gtk::ScrolledWindow>();
+        sc->set_policy(Gtk::PolicyType::NEVER, Gtk::PolicyType::AUTOMATIC);
+        sc->set_min_content_height(static_cast<int>(std::min<std::size_t>(kept.size() * 30, 240)));
+        sc->set_max_content_height(240);
+        sc->set_propagate_natural_height(true);
+        rows_box->set_margin_end(14);
+        sc->set_child(*rows_box);
+        for (const auto& rel : kept) {
+            auto rw = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 10);
+            auto l = text("~/" + rel, "detail-path");
+            l->set_hexpand(true);
+            l->set_ellipsize(Pango::EllipsizeMode::MIDDLE);
+            l->set_tooltip_text(m_home + "/" + rel);
+            rw->append(*l);
+            auto forget = Gtk::make_managed<Gtk::Button>("Forget");
+            forget->add_css_class("ghost");
+            forget->add_css_class("small");
+            forget->signal_clicked().connect([this, rel] {
+                Glib::signal_idle().connect_once([this, rel] { on_tidy_keep(rel, false); });
+            });
+            rw->append(*forget);
+            rows_box->append(*rw);
+        }
+        c->append(*sc);
     }
 
     if (!r.folders.empty()) {
@@ -1104,10 +1268,54 @@ void Shell::tidy_gate() {  // helper: s016 -- each card's act button: label + ma
         m_td_go[vi]->set_label(n ? (g.verdict == td::Verdict::Undecided ? "Gather " : "Move ") + files + " to " + where
                                  : "Move to " + where);
         m_td_go[vi]->set_sensitive(n > 0 && !m_pf_red && !busy);
+        if (auto* all = m_td_all[vi]) {   // s016a3: all / none / some of the offered rows
+            std::size_t on = 0;
+            for (auto* b : m_td_cbs[vi]) if (b->get_active()) ++on;
+            const auto& offered = m_td_cbs[vi];
+            m_td_bulk = true;
+            all->set_sensitive(!offered.empty() && !busy);
+            all->set_inconsistent(on > 0 && on < offered.size());
+            all->set_active(!offered.empty() && on == offered.size());
+            m_td_bulk = false;
+        }
         m_td_gates[vi]->set_text(m_pf_red ? "Preflight has a red check. Tidy waits until it clears -- see Preflight."
                                  : !n ? "Nothing checked."
                                       : scan::human_bytes(bytes) + " checked. One step; Undo takes it back. "
                                         "Hover a row to see where it goes.");
+    }
+    closet_gate();
+}
+
+void Shell::closet_gate() {  // helper: s016b -- the Closet card's buttons: counts, labels, may they act
+    namespace td = core::tidy;
+    if (!m_tc_trash || !m_tc_junk || !m_tc_gate) return;
+    const bool busy = m_td_worker.joinable() || door_busy();
+    const auto now = static_cast<std::int64_t>(std::time(nullptr));
+    std::size_t n = 0, ex = 0;
+    std::uint64_t bytes = 0;
+    for (const auto& it : m_tc_view.items) {
+        if (!m_tc_checked.count(it.rel)) continue;
+        ++n; bytes += it.bytes;
+        if (td::expired(it, now)) ++ex;
+    }
+    const auto many = [](std::size_t k) { return with_commas(k) + (k == 1 ? " item" : " items"); };
+    m_tc_trash->set_label(ex ? "Move " + many(ex) + " to the Trash" : "Move to the Trash");
+    m_tc_trash->set_sensitive(ex > 0 && !m_pf_red && !busy);
+    m_tc_junk->set_label(n ? many(n) + " to the Junk Drawer" : "To the Junk Drawer");
+    m_tc_junk->set_sensitive(n > 0 && !m_pf_red && !busy);
+    m_tc_gate->set_text(m_pf_red ? "Preflight has a red check. Tidy waits until it clears -- see Preflight."
+                        : !n ? "Nothing checked. Only expired items can go to the Trash."
+                             : scan::human_bytes(bytes) + " checked" +
+                                   (ex < n ? " -- " + with_commas(n - ex) + " not expired, so not for the Trash" : "") +
+                                   ". One step; Undo takes it back.");
+    if (m_tc_all) {
+        std::size_t on = 0;
+        for (auto& [b, rel] : m_tc_cbs) if (b->get_active()) ++on;
+        m_td_bulk = true;
+        m_tc_all->set_sensitive(!busy);
+        m_tc_all->set_inconsistent(on > 0 && on < m_tc_cbs.size());
+        m_tc_all->set_active(!m_tc_cbs.empty() && on == m_tc_cbs.size());
+        m_td_bulk = false;
     }
 }
 

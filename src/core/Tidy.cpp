@@ -1,6 +1,7 @@
 #include "core/Tidy.hpp"
 #include "core/Archive.hpp"   // destination(), the Archive's place
 #include "core/Catalog.hpp"
+#include "core/Rules.hpp"     // in_progress(): a partial download isn't in the Closet yet
 #include "core/Scan.hpp"   // human_bytes
 
 #include <algorithm>
@@ -191,6 +192,7 @@ Report report(const std::string& data_dir, const std::string& home, std::int64_t
     std::sort(r.loose.begin(), r.loose.end());
 
     for (const auto& [rel, a] : folders) {
+        if (rel == kCloset || rel.rfind(std::string(kCloset) + "/", 0) == 0) continue;   // s016b: the Closet has its own card
         Folder f{rel, a.files, a.bytes, a.arrived, a.kinds.size(), a.unread, 0, ""};
         const double unread_share = a.files ? static_cast<double>(a.unread) / static_cast<double>(a.files) : 0;
         f.score = static_cast<double>(a.arrived) +
@@ -439,6 +441,165 @@ door::Plan closet_plan(const std::string& home, bool redirect) {
         p.actions.push_back(w);
     }
     return p;
+}
+
+// ── s016b: the Closet's review ───────────────────────────────────────────────
+namespace {
+
+// Disk usage of a folder, one filesystem, no symlinks followed (like Scan).
+std::uint64_t du(const std::string& dir, dev_t dev, int depth = 0) {
+    if (depth > 64) return 0;
+    DIR* d = ::opendir(dir.c_str());
+    if (!d) return 0;
+    std::uint64_t n = 0;
+    while (const dirent* e = ::readdir(d)) {
+        const std::string name = e->d_name;
+        if (name == "." || name == "..") continue;
+        const std::string p = dir + "/" + name;
+        struct stat st{};
+        if (::lstat(p.c_str(), &st) != 0 || st.st_dev != dev) continue;
+        n += static_cast<std::uint64_t>(st.st_blocks) * 512;
+        if (S_ISDIR(st.st_mode)) n += du(p, dev, depth + 1);
+    }
+    ::closedir(d);
+    return n;
+}
+
+// Look at an item again: still the same object, a file not changed.
+std::string recheck(const std::string& home, const ClosetItem& it) {
+    struct stat st{};
+    if (::lstat((home + "/" + it.rel).c_str(), &st) != 0) return "gone since the Look";
+    if (st.st_ino != it.ino || (it.dev && st.st_dev != it.dev)) return "a different file is there now";
+    if (!it.dir && (!S_ISREG(st.st_mode) || st.st_mtim.tv_sec != it.changed)) return "changed since the Look";
+    return {};
+}
+
+}  // namespace
+
+bool expired(const ClosetItem& it, std::int64_t now) { return it.expires > 0 && it.expires <= now; }
+
+ClosetView closet(const std::string& data_dir, const std::string& home, std::int64_t now) {
+    ClosetView v;
+    const std::string root = home + "/" + kCloset;
+    v.closet = is_dir(root);
+    if (!v.closet) return v;
+    // The newest decision and first-seen of every cataloged file in the Closet (read-only).
+    std::map<std::string, std::pair<std::int64_t, std::int64_t>> known;   // rel -> (expires, first seen)
+    const auto q = catalog::query(data_dir,
+        "SELECT f.path, coalesce(f.first_seen, 0), coalesce((SELECT d.verdict || ' ' || coalesce(d.detail, '') "
+        "FROM decisions d WHERE d.file_id = f.id ORDER BY d.id DESC LIMIT 1), '') "
+        "FROM files f WHERE f.gone IS NULL AND f.path GLOB 'Closet/*' AND f.path NOT GLOB 'Closet/*/*'");
+    if (q.ok)
+        for (const auto& row : q.rows) {
+            const std::string& dec = row[2];
+            const std::int64_t ex = dec.rfind("short ", 0) == 0 ? expiry_of(dec.substr(6)) : 0;
+            known[row[0]] = {ex, i(row[1])};
+        }
+    if (DIR* d = ::opendir(root.c_str())) {
+        while (const dirent* e = ::readdir(d)) {
+            const std::string name = e->d_name;
+            if (name.empty() || name[0] == '.' || rules::in_progress(name)) continue;
+            const std::string rel = std::string(kCloset) + "/" + name;
+            struct stat st{};
+            if (::lstat((home + "/" + rel).c_str(), &st) != 0) continue;
+            if (rel == kJunkDrawer) {
+                if (S_ISDIR(st.st_mode))
+                    if (DIR* j = ::opendir((home + "/" + rel).c_str())) {
+                        while (const dirent* je = ::readdir(j))
+                            if (je->d_name[0] != '.') ++v.junk;
+                        ::closedir(j);
+                    }
+                continue;
+            }
+            if (!S_ISREG(st.st_mode) && !S_ISDIR(st.st_mode)) continue;   // a symlink, a socket: not ours to judge
+            ClosetItem it;
+            it.rel = rel;
+            it.dir = S_ISDIR(st.st_mode);
+            it.dev = st.st_dev;
+            it.ino = st.st_ino;
+            it.changed = st.st_mtim.tv_sec;
+            it.bytes = static_cast<std::uint64_t>(st.st_blocks) * 512 + (it.dir ? du(home + "/" + rel, st.st_dev) : 0);
+            if (const auto k = known.find(rel); k != known.end()) { it.expires = k->second.first; it.arrived = k->second.second; }
+            if (expired(it, now)) ++v.expired; else if (it.expires) ++v.expiring;
+            v.bytes += it.bytes;
+            v.items.push_back(std::move(it));
+        }
+        ::closedir(d);
+    }
+    std::sort(v.items.begin(), v.items.end(), [](const ClosetItem& a, const ClosetItem& b) {
+        const bool ea = a.expires > 0, eb = b.expires > 0;
+        if (ea != eb) return ea;                                   // with an expiry first
+        if (ea && a.expires != b.expires) return a.expires < b.expires;   // soonest (most past) first
+        return a.rel < b.rel;
+    });
+    return v;
+}
+
+Review review_plan(const std::string& home, const std::vector<ClosetItem>& items, std::int64_t now) {
+    Review r;
+    r.plan.label = "Tidy: Closet review -- expired to the Trash";
+    for (const auto& it : items) {
+        if (it.rel.rfind(std::string(kCloset) + "/", 0) != 0 || it.rel == kJunkDrawer) {
+            r.dropped.push_back(it.rel + ": not in the Closet");
+            continue;
+        }
+        if (!expired(it, now)) { r.dropped.push_back(it.rel + ": not expired yet"); continue; }
+        if (const auto why = recheck(home, it); !why.empty()) { r.dropped.push_back(it.rel + ": " + why); continue; }
+        door::Action a;
+        a.verb = door::Verb::Trash;
+        a.from = home + "/" + it.rel;
+        a.bytes = it.bytes;
+        a.reason = "short life, expired " + age(now - it.expires) + " ago";
+        r.plan.actions.push_back(a);
+        ++r.n;
+        r.bytes += it.bytes;
+    }
+    return r;
+}
+
+Review junk_plan(const std::string& home, const std::vector<ClosetItem>& items) {
+    Review r;
+    r.plan.label = "Tidy: to the Junk Drawer";
+    std::set<std::string> planned, taken;
+    std::vector<door::Action> dirs, moves;
+    need_dirs(home, kJunkDrawer, planned, dirs, "the Junk Drawer -- kept things with no home yet");
+    for (const auto& it : items) {
+        if (it.rel.rfind(std::string(kCloset) + "/", 0) != 0 || it.rel == kJunkDrawer ||
+            it.rel.find('/', std::string(kCloset).size() + 1) != std::string::npos) {
+            r.dropped.push_back(it.rel + ": not at the top of the Closet");
+            continue;
+        }
+        if (const auto why = recheck(home, it); !why.empty()) { r.dropped.push_back(it.rel + ": " + why); continue; }
+        const std::string to_rel = std::string(kJunkDrawer) + "/" + base_of(it.rel);
+        if (exists(home + "/" + to_rel) || taken.count(to_rel)) {
+            r.dropped.push_back(it.rel + ": its name is taken in the Junk Drawer");
+            continue;
+        }
+        taken.insert(to_rel);
+        door::Action a;
+        a.verb = door::Verb::Move;
+        a.from = home + "/" + it.rel;
+        a.to = home + "/" + to_rel;
+        a.bytes = it.bytes;
+        a.reason = "kept, no home yet -- never ages out";
+        moves.push_back(a);
+        ++r.n;
+        r.bytes += it.bytes;
+    }
+    if (r.n) {
+        r.plan.actions = std::move(dirs);
+        r.plan.actions.insert(r.plan.actions.end(), moves.begin(), moves.end());
+    }
+    return r;
+}
+
+std::vector<std::string> kept(const std::string& data_dir) {
+    std::vector<std::string> out;
+    const auto q = catalog::query(data_dir,
+        "SELECT f.path FROM files f WHERE f.gone IS NULL AND (SELECT d.verdict FROM decisions d WHERE d.file_id = f.id "
+        "ORDER BY d.id DESC LIMIT 1) = 'keep-here' ORDER BY f.path");
+    if (q.ok) for (const auto& row : q.rows) out.push_back(row[0]);
+    return out;
 }
 
 }  // namespace rouster::core::tidy

@@ -3884,6 +3884,123 @@ int main(int argc, char** argv) {
             ct::decide(D, "Pictures", "hands-on", "", NOW);
         }
 
+        // -- s016b: the Closet's review, the Junk Drawer, keep-here ---------------------
+        {
+            namespace dr = core::door;
+            const auto no_trash = [&] {
+                std::istringstream in(files_snapshot(home));
+                std::string l, out;
+                while (std::getline(in, l)) if (l.find("/.local/share/Trash") == std::string::npos) out += l + "\n";
+                return out;
+            };
+            fs::create_directories(home / "Closet/Junk Drawer");
+            put(home, "Closet/a.iso", 50000);
+            put(home, "Closet/b.png", 9000);
+            put(home, "Closet/c.txt", 5000);
+            put(home, "Closet/pack/inner.bin", 20000);
+            put(home, "Closet/.hidden", 10);
+            put(home, "Closet/dl.iso.part", 10);
+            core::scan::Progress p4;
+            std::vector<core::scan::Seen> m4;
+            core::scan::scan(H, H, p4, 0, &m4);
+            const auto d4 = ct::record(D, H, "", m4, {}, NOW);
+            ct::decide(D, "Closet/a.iso", "short", "expires " + std::to_string(NOW - DAY), NOW - 31 * DAY);
+            ct::decide(D, "Closet/b.png", "short", "expires " + std::to_string(NOW + 10 * DAY), NOW);
+            const auto v = td::closet(D, H, NOW);
+            std::vector<std::string> order;
+            for (const auto& it : v.items) order.push_back(it.rel);
+            const bool pack_ok = v.items.size() == 4 && v.items[3].dir && v.items[3].bytes >= 20000;
+            check("closet/review: the view -- expired first, then expiring, then the rest by name; hidden, partial "
+                  "downloads and the Junk Drawer not listed; a folder sized whole",
+                  d4.ok && v.closet && v.expired == 1 && v.expiring == 1 && v.junk == 0 && pack_ok &&
+                  order == std::vector<std::string>{"Closet/a.iso", "Closet/b.png", "Closet/c.txt", "Closet/pack"},
+                  order.empty() ? "" : order.front());
+            check("closet/review: each item's arrival from the catalog", v.items.size() == 4 && v.items[0].arrived > 0);
+            check("closet/review: the Closet isn't a 'folder that needs tidying' -- it has its own card", [&] {
+                for (const auto& f : td::report(D, H, NOW).folders) if (f.rel.rfind("Closet", 0) == 0) return false;
+                return true;
+            }());
+            check("help: Tidy explains the Closet's review and Keep here", [&] {
+                const auto* t = core::help::find("tidy");
+                for (const auto& sec : t->sections) if (sec.heading == "The Closet's review") return true;
+                return false;
+            }());
+
+            const std::string tree1 = no_trash();
+            dr::Door door(H, D);
+            door.load();
+            auto rp = td::review_plan(H, v.items, NOW);
+            check("closet/review: only the expired one goes to the Trash; the others left out, 'not expired yet'",
+                  rp.n == 1 && rp.plan.actions.size() == 1 && rp.plan.actions[0].verb == dr::Verb::Trash &&
+                  rp.plan.actions[0].from == H + "/Closet/a.iso" && rp.dropped.size() == 3 &&
+                  rp.dropped[0].find("not expired yet") != std::string::npos);
+            const auto rr0 = door.run(rp.plan);
+            check("closet/review: unpreviewed -> refused, nothing changed", !rr0.ok && no_trash() == tree1);
+            rp.plan.previewed = true;
+            const auto rr = door.run(rp.plan);
+            const auto v2 = td::closet(D, H, NOW);
+            check("closet/review: run -> a.iso in the Trash, the rest stay", rr.ok && !fs::exists(home / "Closet/a.iso") &&
+                  fs::exists(home / "Closet/b.png") && v2.items.size() == 3 && v2.expired == 0,
+                  rr.messages.empty() ? "" : rr.messages.front());
+            const auto ru = door.undo();
+            check("closet/review: undo -> exact", ru.ok && no_trash() == tree1, ru.messages.empty() ? "" : ru.messages.front());
+            check("closet/review: later, past its expiry, b.png is offered too",
+                  td::review_plan(H, td::closet(D, H, NOW + 11 * DAY).items, NOW + 11 * DAY).n == 2);
+
+            // The Junk Drawer.
+            const auto v3 = td::closet(D, H, NOW);
+            std::vector<td::ClosetItem> pick;
+            for (const auto& it : v3.items) if (it.rel == "Closet/c.txt" || it.rel == "Closet/pack") pick.push_back(it);
+            auto jp = td::junk_plan(H, pick);
+            check("closet/junk: two moves into the Junk Drawer (it exists, not made again)",
+                  jp.n == 2 && jp.plan.actions.size() == 2 && jp.dropped.empty() &&
+                  jp.plan.actions[0].to == H + "/Closet/Junk Drawer/c.txt");
+            jp.plan.previewed = true;
+            const auto jr = door.run(jp.plan);
+            const auto v4 = td::closet(D, H, NOW);
+            check("closet/junk: run -> in the Junk Drawer, counted there, gone from the review",
+                  jr.ok && fs::exists(home / "Closet/Junk Drawer/c.txt") && fs::exists(home / "Closet/Junk Drawer/pack/inner.bin") &&
+                  v4.junk == 2 && v4.items.size() == 2, jr.messages.empty() ? "" : jr.messages.front());
+            const auto ju = door.undo();
+            check("closet/junk: undo -> exact", ju.ok && no_trash() == tree1, ju.messages.empty() ? "" : ju.messages.front());
+            put(home, "Closet/Junk Drawer/c.txt", 7);
+            const auto taken = td::junk_plan(H, pick);
+            check("closet/junk: a name taken in the Junk Drawer -> left out, said", taken.n == 1 && taken.dropped.size() == 1 &&
+                  taken.dropped[0].find("taken") != std::string::npos);
+            fs::remove(home / "Closet/Junk Drawer/c.txt", ec);
+            put(home, "Closet/c.txt", 5001);   // changed since the view
+            fs::last_write_time(home / "Closet/c.txt", fs::last_write_time(home / "Closet/c.txt") + std::chrono::hours(1));
+            const auto ch = td::junk_plan(H, pick);
+            check("closet/junk: a file changed since the view -> left out", ch.n == 1 && ch.dropped.size() == 1 &&
+                  ch.dropped[0].find("changed") != std::string::npos);
+            auto outside = v3.items.front();
+            outside.rel = "Documents/x";
+            check("closet/review: an item outside the Closet is refused by both plans",
+                  td::junk_plan(H, {outside}).n == 0 && td::review_plan(H, {outside}, NOW + 100 * DAY).n == 0);
+
+            // Keep here -- never proposed again; Forget (keep-off) brings it back.
+            const auto rk = td::report(D, H, NOW);
+            std::string prop;
+            for (const auto& g : rk.groups) if (!g.rows.empty() && prop.empty()) prop = g.rows.front().rel;
+            const auto proposed = [&](const td::Report& rr2) {
+                for (const auto& g : rr2.groups) for (const auto& row : g.rows) if (row.rel == prop) return true;
+                return false;
+            };
+            const auto kept0 = td::kept(D);   // an earlier test already kept one
+            const bool k1 = !prop.empty() && ct::decide(D, prop, "keep-here", "", NOW);
+            const auto kept1 = td::kept(D);
+            const auto rk2 = td::report(D, H, NOW);
+            check("keep-here: kept -> not proposed, counted kept, listed by kept()",
+                  k1 && rk.ok && rk2.ok && !proposed(rk2) && rk2.kept == rk.kept + 1 &&
+                  kept1.size() == kept0.size() + 1 && std::find(kept1.begin(), kept1.end(), prop) != kept1.end(),
+                  prop + " proposed=" + std::to_string(proposed(rk2)) + " kept " + std::to_string(rk.kept) + "->" +
+                  std::to_string(rk2.kept) + " list " + std::to_string(td::kept(D).size()));
+            const bool k2 = ct::decide(D, prop, "keep-off", "", NOW);
+            const auto rk3 = td::report(D, H, NOW);
+            check("keep-here: Forget (keep-off) -> proposed again, gone from kept()", k2 && proposed(rk3) && td::kept(D) == kept0);
+            fs::remove_all(home / "Closet", ec);
+        }
+
         // Preflight's "Last opened" row (s015c).
         namespace pf = core::preflight;
         pf::Inputs in;

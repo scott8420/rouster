@@ -967,6 +967,8 @@ void Shell::on_tidy_found() {  // handler: the report is ready (Dispatcher -> UI
     // dormant is a guess about the future, like Archive's -- not pre-checked.
     m_td_said.clear();
     m_td_checked.clear();
+    m_tc_checked.clear();   // s016b: the Closet card -- nothing pre-checked
+    m_td_keep_said.clear();
     for (const auto& g : m_td_shown.groups)
         if (g.verdict != core::tidy::Verdict::Dormant)
             for (std::size_t i = 0; i < g.rows.size() && i < kTidyShown; ++i) m_td_checked.insert(g.rows[i].rel);
@@ -1052,6 +1054,81 @@ void Shell::on_tidy_forget(const std::string& rel) {  // handler: s016a2 -- a ha
     const bool ok = core::catalog::decide(data_dir(), rel, "hands-on", "", static_cast<std::int64_t>(std::time(nullptr)), &why);
     if (auto lg = log::get(log::Area::Tidy)) lg->info("hands on '{}': {}", rel, ok ? "forgotten" : why);
     tidy_rereport(ok ? "~/" + rel + " is no longer hands off." : "Not changed: " + why);
+}
+
+void Shell::on_tidy_keep(const std::string& rel, bool keep) {  // handler: s016b -- Keep here / its Forget
+    std::string why;
+    const bool ok = core::catalog::decide(data_dir(), rel, keep ? "keep-here" : "keep-off", "",
+                                          static_cast<std::int64_t>(std::time(nullptr)), &why);
+    if (auto lg = log::get(log::Area::Tidy)) lg->info("{} '{}': {}", keep ? "keep here" : "keep off", rel, ok ? "recorded" : why);
+    m_td_checked.erase(rel);
+    m_td_keep_said = ok ? (keep ? "~/" + rel + " stays where it is -- never proposed again. Forget under \u201cKept here\u201d undoes it."
+                                : "~/" + rel + " may be proposed again.")
+                        : "Not changed: " + why;
+    tidy_rereport(m_td_said);   // the Hands-off card's own line stays its own
+}
+
+namespace {
+std::vector<rouster::core::tidy::ClosetItem> checked_items(const rouster::core::tidy::ClosetView& v,
+                                                           const std::set<std::string>& checked) {
+    std::vector<rouster::core::tidy::ClosetItem> out;
+    for (const auto& it : v.items) if (checked.count(it.rel)) out.push_back(it);
+    return out;
+}
+}  // namespace
+
+void Shell::on_closet_trash() {  // handler: s016b -- the review: checked, expired -> the Trash (one step)
+    namespace td = core::tidy;
+    if (!m_door || door_busy() || m_td_worker.joinable()) return;
+    if (m_td_states.get_visible_child_name() != "results") return;   // preview first: only from the card
+    paint_preflight();
+    if (m_pf_red) { closet_gate(); return; }
+    const auto now = static_cast<std::int64_t>(std::time(nullptr));
+    auto rv = td::review_plan(m_home, checked_items(m_tc_view, m_tc_checked), now);
+    if (auto lg = log::get(log::Area::Tidy)) {
+        lg->info("closet review: {} to the Trash, {} left out", rv.n, rv.dropped.size());
+        for (const auto& d : rv.dropped) lg->info("  left out: {}", d);
+    }
+    if (!rv.n) { if (m_tc_gate) m_tc_gate->set_text("Nothing expired among the checked items -- Look again."); return; }
+    rv.plan.previewed = true;   // the card on screen was the preview
+    const auto r = m_door->run(rv.plan);
+    if (auto lg = log::get(log::Area::Tidy)) {
+        lg->info("closet review: {} done, {} failed", r.done, r.failed);
+        for (const auto& m : r.messages) lg->warn("  {}", m);
+    }
+    const std::string n = std::to_string(rv.n) + (rv.n == 1 ? " expired item" : " expired items");
+    std::size_t odd = 0;   // "not expired yet" was said on the card -- only the surprises count here
+    for (const auto& d : rv.dropped) if (d.find("not expired yet") == std::string::npos) ++odd;
+    const std::string left = odd ? " " + std::to_string(odd) + " left out (changed since the Look) -- see the log." : "";
+    if (r.ok) tidy_done(core::scan::human_bytes(rv.bytes), n + " went to the Trash. Undo takes the step back." + left);
+    else tidy_done("Nothing moved", r.messages.empty() ? std::string("The door refused the plan.") : r.messages.front());
+}
+
+void Shell::on_closet_junk() {  // handler: s016b -- checked Closet items -> the Junk Drawer (one step)
+    namespace td = core::tidy;
+    if (!m_door || door_busy() || m_td_worker.joinable()) return;
+    if (m_td_states.get_visible_child_name() != "results") return;
+    paint_preflight();
+    if (m_pf_red) { closet_gate(); return; }
+    auto jp = td::junk_plan(m_home, checked_items(m_tc_view, m_tc_checked));
+    if (auto lg = log::get(log::Area::Tidy)) {
+        lg->info("junk drawer: {} moves, {} left out", jp.n, jp.dropped.size());
+        for (const auto& d : jp.dropped) lg->info("  left out: {}", d);
+    }
+    if (!jp.n) {
+        if (m_tc_gate) m_tc_gate->set_text((jp.dropped.empty() ? std::string("Nothing to do") : jp.dropped.front()) + " -- Look again.");
+        return;
+    }
+    jp.plan.previewed = true;
+    const auto r = m_door->run(jp.plan);
+    if (auto lg = log::get(log::Area::Tidy)) {
+        lg->info("junk drawer: {} done, {} failed", r.done, r.failed);
+        for (const auto& m : r.messages) lg->warn("  {}", m);
+    }
+    const std::string n = std::to_string(jp.n) + (jp.n == 1 ? " item" : " items");
+    const std::string left = jp.dropped.empty() ? "" : " " + std::to_string(jp.dropped.size()) + " left out -- see the log.";
+    if (r.ok) tidy_done(n, "in ~/Closet/Junk Drawer now -- kept, no home yet, never ages out. Undo takes the step back." + left);
+    else tidy_done("Nothing moved", r.messages.empty() ? std::string("The door refused the plan.") : r.messages.front());
 }
 
 void Shell::tidy_rereport(const std::string& said) {  // helper: s016a2 -- the report again from the catalog (no walk)

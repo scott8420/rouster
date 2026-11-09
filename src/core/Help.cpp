@@ -189,6 +189,14 @@ std::vector<Topic> build() {
                 "The Closet card makes ~/Closet and ~/Closet/Junk Drawer, and can point Downloads at the Closet "
                 "(~/.config/user-dirs.dirs -- the old one goes to the Trash, so Undo puts it back). Apps started after "
                 "that save there. GNOME's screenshots can't be pointed; the screenshots query gathers the old ones."}},
+            {"The Closet's review", {
+                "Once ~/Closet exists, its own card lists what's in it: short-life files with their expiry (\"expires "
+                "in 11 days\", \"expired 3 days ago\"), the rest waiting to be sorted. Nothing there is checked for you.",
+                "- Move to the Trash -- only expired items go; a checked item that hasn't expired stays put. Undo brings "
+                "them back.",
+                "- To the Junk Drawer -- kept, no home yet; things there never age out.",
+                "Keep here, on any proposed row, leaves that file where it is and it is never proposed again. The "
+                "\"Kept here\" card lists them; Forget lets Tidy propose one again."}},
             {"Hands off", {
                 "\"Leave a folder alone...\" marks a folder -- your Scrivener folder, covers, workups. Nothing inside it "
                 "is ever proposed: not by Tidy, not by Archive, not by Duplicates (a duplicate pair with either copy "

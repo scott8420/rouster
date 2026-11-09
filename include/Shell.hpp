@@ -153,6 +153,9 @@ private:
     void on_tidy_hands_off();                    // category: handler: s016a2 -- folder chooser -> leave it alone
     void on_tidy_forget(const std::string& rel); // category: handler: s016a2 -- a hands-off folder's Forget
     void tidy_rereport(const std::string& said); // category: helper: s016a2 -- the report again from the catalog (no walk)
+    void on_closet_trash();                      // category: handler: s016b -- the review: checked expired items -> the Trash
+    void on_closet_junk();                       // category: handler: s016b -- checked Closet items -> the Junk Drawer
+    void on_tidy_keep(const std::string& rel, bool keep); // category: handler: s016b -- Keep here / its Forget
     void on_archive_cancel();                    // category: handler: stop looking
     void on_archive_found();                     // category: handler: the worker finished (Dispatcher, UI thread)
     void on_archive_view(bool stored);           // category: handler: Old files / In the archive
@@ -232,6 +235,7 @@ private:
     void stop_tidy();                            // category: helper: cancel + join (close, dtor)
     void paint_tidy();                           // category: helper: s015c -- the report's cards
     void tidy_gate();                            // category: helper: s016 -- each card's act button: label + may it act
+    void closet_gate();                          // category: helper: s016b -- the Closet card's two buttons + Select all
     void tidy_done(const std::string& big, const std::string& caption);   // category: helper: s016 -- the done state
     bool tick_archive();                         // category: helper: the live counters while looking
     void paint_archive();                        // category: helper: view switch, cards per top folder / the stored list
@@ -419,7 +423,7 @@ private:
     std::vector<core::archive::Stored> m_ar_stored;  // from the manifest (UI thread only)
     bool             m_ar_view_stored = false;
     int              m_ar_months = core::archive::kDefaultMonths;
-    static constexpr std::size_t kTidyShown = 40;       // s016: rows painted per Tidy card; unpainted rows are never checked
+    static constexpr std::size_t kTidyShown = 2000;     // s016a3: rows painted per Tidy card (in a scroller); unpainted rows are never checked
     static constexpr std::size_t kArchiveShown = 300;   // rows painted; unpainted rows are never checked
     std::size_t      m_ar_painted = 0;
     // s015c: Tidy -- start | running | results. Report only.
@@ -442,6 +446,18 @@ private:
     std::string                           m_td_said;        // s016a2: one line on the Hands-off card (what just changed)   // s016: "Downloads land in the Closet" row
     std::array<Gtk::Button*, 3>           m_td_go{};        // the cards' act buttons (managed; reset each paint)
     std::array<Gtk::Label*, 3>            m_td_gates{};
+    std::array<Gtk::CheckButton*, 3>      m_td_all{};       // s016a3: each card's "Select all" (managed; reset each paint)
+    std::array<std::vector<Gtk::CheckButton*>, 3> m_td_cbs; // ...and its offered rows' checks
+    bool                                  m_td_bulk = false; // select-all in progress: rows don't re-gate one by one
+    // s016b: the Closet card -- what's in it, the review.
+    core::tidy::ClosetView                m_tc_view;        // UI thread only; read at paint
+    std::set<std::string>                 m_tc_checked;     // nothing pre-checked (the Trash is never pre-checked)
+    std::vector<std::pair<Gtk::CheckButton*, std::string>> m_tc_cbs;
+    Gtk::CheckButton*                     m_tc_all = nullptr;
+    Gtk::Label*                           m_tc_gate = nullptr;
+    Gtk::Button*                          m_tc_trash = nullptr;
+    Gtk::Button*                          m_tc_junk = nullptr;
+    std::string                           m_td_keep_said;   // s016b: one line at the top (what Keep here / Forget just did)
     Gtk::Label                            m_td_done_big, m_td_done_caption;
     sigc::connection                      m_td_tick;
 
