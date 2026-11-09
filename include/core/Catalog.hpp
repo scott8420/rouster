@@ -102,6 +102,21 @@ bool decide(const std::string& data_dir, const std::string& rel, const std::stri
             const std::string& detail, std::int64_t now, std::string* why = nullptr);
 std::vector<Decision> decisions(const std::string& data_dir);                      // newest first
 
+// s016a2: HANDS OFF. A folder (or a package) you said to leave alone: the
+// decision "hands-off" on its path; "hands-on" (Forget) clears it -- the newest
+// of the two for a path wins. Nothing under one is ever proposed by Tidy, and
+// Archive and Duplicates leave it out too. Your novels, covers and workups.
+std::vector<std::string> hands_off(const std::string& data_dir);   // rels, sorted
+// rel is one of `folders` or inside one.
+bool under(const std::vector<std::string>& folders, const std::string& rel);
+// ...or holds one (a folder item that would carry a hands-off folder with it).
+bool touches(const std::vector<std::string>& folders, const std::string& rel);
+// The SQL condition (for a query over `files`): the row is NOT under a hands-off folder.
+#define CATALOG_NOT_HANDS_OFF                                                                                 \
+    "NOT EXISTS (SELECT 1 FROM decisions h WHERE h.verdict = 'hands-off' AND h.id = (SELECT max(id) FROM "   \
+    "decisions WHERE path = h.path AND verdict IN ('hands-off', 'hands-on')) AND (files.path = h.path OR "   \
+    "substr(files.path, 1, length(h.path) + 1) = h.path || '/'))"
+
 // s015c: a READ-ONLY query over the catalog -- the named verdict queries
 // (core/Tidy) and, later, your own SQL. The database is opened read-only and a
 // statement that would write is refused before it runs. Parameters are bound

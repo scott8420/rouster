@@ -1,4 +1,6 @@
 #pragma once
+#include <array>
+#include <set>
 #include "widgets/Widgets.hpp"
 #include "core/Scan.hpp"     // s002: the read-only walker
 #include "core/Catalog.hpp"  // s015b: the catalog, recorded after each Look
@@ -146,6 +148,11 @@ private:
     void on_archive_find();                      // category: handler: look for old files (worker)
     void on_tidy_look();                         // category: handler: s015c -- Look at home, record, report (worker)
     void on_tidy_found();                        // category: handler: the report is ready (Dispatcher, UI thread)
+    void on_tidy_act(core::tidy::Verdict v);     // category: handler: s016 -- a card's checked rows -> one door step
+    void on_tidy_closet();                       // category: handler: s016 -- make the Closet / point Downloads at it
+    void on_tidy_hands_off();                    // category: handler: s016a2 -- folder chooser -> leave it alone
+    void on_tidy_forget(const std::string& rel); // category: handler: s016a2 -- a hands-off folder's Forget
+    void tidy_rereport(const std::string& said); // category: helper: s016a2 -- the report again from the catalog (no walk)
     void on_archive_cancel();                    // category: handler: stop looking
     void on_archive_found();                     // category: handler: the worker finished (Dispatcher, UI thread)
     void on_archive_view(bool stored);           // category: handler: Old files / In the archive
@@ -224,6 +231,8 @@ private:
     void stop_archive();                         // category: helper: cancel + join (close, dtor)
     void stop_tidy();                            // category: helper: cancel + join (close, dtor)
     void paint_tidy();                           // category: helper: s015c -- the report's cards
+    void tidy_gate();                            // category: helper: s016 -- each card's act button: label + may it act
+    void tidy_done(const std::string& big, const std::string& caption);   // category: helper: s016 -- the done state
     bool tick_archive();                         // category: helper: the live counters while looking
     void paint_archive();                        // category: helper: view switch, cards per top folder / the stored list
     void archive_gate();
@@ -410,6 +419,7 @@ private:
     std::vector<core::archive::Stored> m_ar_stored;  // from the manifest (UI thread only)
     bool             m_ar_view_stored = false;
     int              m_ar_months = core::archive::kDefaultMonths;
+    static constexpr std::size_t kTidyShown = 40;       // s016: rows painted per Tidy card; unpainted rows are never checked
     static constexpr std::size_t kArchiveShown = 300;   // rows painted; unpainted rows are never checked
     std::size_t      m_ar_painted = 0;
     // s015c: Tidy -- start | running | results. Report only.
@@ -426,6 +436,13 @@ private:
     core::catalog::Delta                  m_td_cat;     // ...with what the Look did to the catalog
     core::tidy::Report                    m_td_shown;   // UI thread only
     core::catalog::Delta                  m_td_cat_shown;
+    std::set<std::string>                 m_td_checked;     // s016: checked rows (painted rows only -- never one unseen)
+    std::set<std::string>                 m_td_painted;     // ...the rows on screen
+    bool                                  m_td_redirect = true;
+    std::string                           m_td_said;        // s016a2: one line on the Hands-off card (what just changed)   // s016: "Downloads land in the Closet" row
+    std::array<Gtk::Button*, 3>           m_td_go{};        // the cards' act buttons (managed; reset each paint)
+    std::array<Gtk::Label*, 3>            m_td_gates{};
+    Gtk::Label                            m_td_done_big, m_td_done_caption;
     sigc::connection                      m_td_tick;
 
     Glib::Dispatcher                      m_archive_finished;

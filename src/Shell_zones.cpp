@@ -255,8 +255,9 @@ void Shell::build_scan_page() {  // zone: Smart Scan
 // password prompt, then root), done (what the helper said, line by line).
 // ─────────────────────────────────────────────────────────────────────────────
 // ─────────────────────────────────────────────────────────────────────────────
-// Tidy (s015c) -- the report. start -> running -> results; no act bar: every
-// verdict is a proposal, and nothing moves until the Closet (s016).
+// Tidy (s015c) -- the report. start -> running -> results -> done (s016). Each
+// verdict card carries its own act button (one door step); the list on screen
+// is the preview.
 // ─────────────────────────────────────────────────────────────────────────────
 void Shell::build_tidy_page() {  // zone: Tidy
     m_td_states.set_transition_type(Gtk::StackTransitionType::CROSSFADE);
@@ -275,7 +276,7 @@ void Shell::build_tidy_page() {  // zone: Tidy
     m_td_sub.set_max_width_chars(56);
     m_td_sub.set_text("A minimalist and a hoarder collide. Rouster reads your whole home and proposes a lifespan for "
                       "what it finds -- short life, dormant, undecided -- and says which rule proposed each. "
-                      "A report only: nothing moves.");
+                      "Nothing moves until you check rows and press a card's button; each is one step, and Undo takes it back.");
     start->append(m_td_sub);
     auto look = Gtk::make_managed<Gtk::Button>("Look");
     look->add_css_class("orb");
@@ -333,6 +334,37 @@ void Shell::build_tidy_page() {  // zone: Tidy
     res->append(m_td_list);
     scroll->set_child(*res);
     m_td_states.add(*scroll, "results");
+
+    // done (s016): what the step did; Undo / Activity / Look again.
+    auto done = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 12);
+    done->set_valign(Gtk::Align::CENTER);
+    done->set_halign(Gtk::Align::CENTER);
+    done->set_margin(40);
+    done->append(*hero("rouster-hero-done", 112));
+    m_td_done_big.add_css_class("hero-big");
+    done->append(m_td_done_big);
+    m_td_done_caption.add_css_class("hero-sub");
+    m_td_done_caption.set_wrap(true);
+    m_td_done_caption.set_justify(Gtk::Justification::CENTER);
+    m_td_done_caption.set_max_width_chars(58);
+    done->append(m_td_done_caption);
+    auto btns = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 12);
+    btns->set_halign(Gtk::Align::CENTER);
+    btns->set_margin_top(12);
+    auto undo = Gtk::make_managed<Gtk::Button>("Undo");
+    undo->add_css_class("ghost");
+    undo->set_action_name("win.undo");
+    auto act = Gtk::make_managed<Gtk::Button>("Activity");
+    act->add_css_class("ghost");
+    act->signal_clicked().connect([this] { go_to("activity"); });
+    auto more = Gtk::make_managed<Gtk::Button>("Look again");
+    more->add_css_class("ghost");
+    more->signal_clicked().connect(sigc::mem_fun(*this, &Shell::on_tidy_look));
+    btns->append(*undo);
+    btns->append(*act);
+    btns->append(*more);
+    done->append(*btns);
+    m_td_states.add(*done, "done");
 
     m_td_page.append(m_td_states);
     m_stack.add(m_td_page, "tidy", "Tidy");

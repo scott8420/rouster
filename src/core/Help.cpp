@@ -167,7 +167,7 @@ std::vector<Topic> build() {
 
     // ── Organize ────────────────────────────────────────────────────────────
     t.push_back({"tidy", "Tidy", "Organize",
-        "Reads your whole home and proposes a lifespan for what it finds. A report only -- nothing moves.",
+        "Reads your whole home, proposes a lifespan for what it finds, and moves what you check -- one step per card, Undo takes it back.",
         {
             {"How to use it", {
                 "Press Look. Rouster looks through your home (like Smart Scan), updates its catalog, and reports:",
@@ -177,6 +177,23 @@ std::vector<Topic> build() {
                 "- Undecided -- loose at the top of home or on the Desktop: no home yet.",
                 "- Active -- everything else; counted, not listed.",
                 "Each row names the query that proposed it. The first query to claim a file wins."}},
+            {"Acting on it", {
+                "Each card has its own button. Short life and Undecided rows start checked, Dormant rows don't. "
+                "Hover a row to see where it would go.",
+                "- Short life -> ~/Closet, remembered with 30 days to live; after that a review offers it to the Trash. "
+                "Nothing is ever deleted unasked.",
+                "- Undecided -> gathered into ~/Closet, to be sorted.",
+                "- Dormant -> ~/Archive/<year last changed>/, its folders kept (Put back on the Archive page works any time).",
+                "A name already in the Closet gets \"(from Desktop)\" or the like. A file changed since the Look is left "
+                "out and said -- Look again.",
+                "The Closet card makes ~/Closet and ~/Closet/Junk Drawer, and can point Downloads at the Closet "
+                "(~/.config/user-dirs.dirs -- the old one goes to the Trash, so Undo puts it back). Apps started after "
+                "that save there. GNOME's screenshots can't be pointed; the screenshots query gathers the old ones."}},
+            {"Hands off", {
+                "\"Leave a folder alone...\" marks a folder -- your Scrivener folder, covers, workups. Nothing inside it "
+                "is ever proposed: not by Tidy, not by Archive, not by Duplicates (a duplicate pair with either copy "
+                "inside is left out whole). Forget takes the mark off. The mark lives in the catalog, by path: rename "
+                "the folder and mark it again."}},
             {"Also in the report", {
                 "Folders that need tidying, worst first (files arriving, kinds mixed, much unused in a year); the top "
                 "of home, folder by folder; and drift -- folders your desktop points at that aren't there, and where "
@@ -185,7 +202,7 @@ std::vector<Topic> build() {
                 "\"Unused\" is the later of last opened and last changed. If your home is mounted noatime, Rouster "
                 "can't know last opened (Preflight says so) and goes by last change.",
                 "Your own files only: hidden files, code in git repositories and caches are left out; a Scrivener "
-                "project is one item. Moving things comes with the Closet."}},
+                "project is one item. Nothing in the Closet is proposed again -- it waits there to be sorted."}},
         }});
 
     t.push_back({"projects", "Projects", "Organize",

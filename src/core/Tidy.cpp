@@ -1,8 +1,11 @@
 #include "core/Tidy.hpp"
+#include "core/Archive.hpp"   // destination(), the Archive's place
 #include "core/Catalog.hpp"
 #include "core/Scan.hpp"   // human_bytes
 
 #include <algorithm>
+#include <ctime>
+#include <sstream>
 #include <cstdio>
 #include <fstream>
 #include <map>
@@ -26,11 +29,13 @@ namespace {
 // "keep-here", with their last use.
 #define TIDY_LU "max(coalesce(last_read, 0), coalesce(last_changed, 0))"
 #define TIDY_BASE                                                                                  \
-    "SELECT path, coalesce(size, 0), " TIDY_LU ", package FROM files "                           \
+    "SELECT path, coalesce(size, 0), " TIDY_LU ", package, coalesce(dev, 0), coalesce(ino, 0), "              \
+    "coalesce(last_changed, 0) FROM files "                           \
     "WHERE gone IS NULL AND id NOT IN (SELECT file_id FROM decisions d WHERE file_id IS NOT NULL " \
     "AND verdict = 'keep-here' AND d.id = (SELECT max(id) FROM decisions WHERE file_id = d.file_id)) AND "   \
     "path NOT GLOB 'Develop/*' AND path NOT GLOB 'Projects/*' AND path NOT GLOB 'src/*' AND "          \
-    "path NOT GLOB 'dev/*' AND path NOT GLOB 'code/*' AND "
+    "path NOT GLOB 'dev/*' AND path NOT GLOB 'code/*' AND path NOT GLOB 'Closet/*' AND "               \
+    CATALOG_NOT_HANDS_OFF " AND "
 
 }  // namespace
 
@@ -45,9 +50,9 @@ const char* verdict_name(Verdict v) {
 
 const char* verdict_why(Verdict v) {
     switch (v) {
-        case Verdict::Short:     return "Useful once, done now -- they would wait in the Closet, then go to the Trash at a review.";
-        case Verdict::Dormant:   return "Neither opened nor changed in 18 months -- kept, finished: they would mature to the Archive.";
-        case Verdict::Undecided: return "Loose at the top of home or on the Desktop -- no home yet: they would go to the Closet to be sorted.";
+        case Verdict::Short:     return "Useful once, done now -- to the Closet, where each waits 30 days and is then offered to the Trash at a review.";
+        case Verdict::Dormant:   return "Neither opened nor changed in 18 months -- kept, finished: to ~/Archive/<year>/, their folders kept.";
+        case Verdict::Undecided: return "Loose at the top of home or on the Desktop -- no home yet: gathered into the Closet to be sorted.";
     }
     return "";
 }
@@ -146,7 +151,7 @@ Report report(const std::string& data_dir, const std::string& home, std::int64_t
         for (const auto& row : res.rows) {
             if (!claimed.insert(row[0]).second) continue;   // an earlier query has it
             const std::uint64_t b = u(row[1]);
-            g.rows.push_back({row[0], b, i(row[2]), q.id, row[3] == "1"});
+            g.rows.push_back({row[0], b, i(row[2]), q.id, row[3] == "1", u(row[4]), u(row[5]), i(row[6])});
             ++g.files;
             g.bytes += b;
         }
@@ -162,13 +167,15 @@ Report report(const std::string& data_dir, const std::string& home, std::int64_t
         if (kept.ok && !kept.rows.empty()) r.kept = u(kept.rows[0][0]);
     }
 
+    r.hands_off = catalog::hands_off(data_dir);
     struct Acc { std::uint64_t files = 0, bytes = 0, arrived = 0, unread = 0; std::set<std::string> kinds; };
     std::map<std::string, Acc> folders, tops;
     for (const auto& row : all.rows) {
         const std::uint64_t b = u(row[1]);
         ++r.files;
         r.bytes += b;
-        if (!claimed.count(row[0])) { ++r.active; r.active_bytes += b; }
+        if (catalog::under(r.hands_off, row[0])) { ++r.left_alone; r.left_alone_bytes += b; }
+        else if (!claimed.count(row[0])) { ++r.active; r.active_bytes += b; }
         const std::string& kind = row[2];
         const std::string major = kind.empty() ? "ext:" + row[3] : kind.substr(0, kind.find('/'));
         Acc& f = folders[parent_of(row[0])];
@@ -196,7 +203,7 @@ Report report(const std::string& data_dir, const std::string& home, std::int64_t
         if (a.files >= 5 && a.unread)
             bits.push_back(std::to_string(static_cast<int>(unread_share * 100 + 0.5)) + "% unused in a year");
         for (std::size_t k = 0; k < bits.size(); ++k) f.why += (k ? " · " : "") + bits[k];
-        if (f.score >= 3.0 && a.files >= 3) r.folders.push_back(std::move(f));
+        if (f.score >= 3.0 && a.files >= 3 && !catalog::under(r.hands_off, rel)) r.folders.push_back(std::move(f));
     }
     std::sort(r.folders.begin(), r.folders.end(), [](const Folder& a, const Folder& b) {
         return a.score != b.score ? a.score > b.score : a.rel < b.rel;
@@ -212,7 +219,8 @@ Report report(const std::string& data_dir, const std::string& home, std::int64_t
             Top t{n, 0, 0, ""};
             if (auto it = tops.find(n); it != tops.end()) { t.files = it->second.files; t.bytes = it->second.bytes; }
             struct stat g{};
-            if (n == "Archive") t.note = "the Archive";
+            if (catalog::under(r.hands_off, n)) t.note = "hands off";
+            else if (n == "Archive") t.note = "the Archive";
             else if (n == "Closet") t.note = "the Closet";
             else if (t.files == 0 && (dev_roots.count(n) || ::lstat((home + "/" + n + "/.git").c_str(), &g) == 0))
                 t.note = "code -- Dev projects' (not cataloged)";
@@ -230,12 +238,207 @@ Report report(const std::string& data_dir, const std::string& home, std::int64_t
         if (!rel.empty() && rel.front() == '/') continue;
         if (rel.empty()) { if (key != "DESKTOP") r.drift.push_back(key + " folder is home itself -- files of that kind land loose at the top"); continue; }
         if (!is_dir(home + "/" + rel)) r.drift.push_back(key + " folder points at ~/" + rel + ", which isn't there");
-        if (key == "DOWNLOAD" && rel != "Closet") r.drift.push_back("Downloads land in ~/" + rel + " (the Closet will take them -- s016)");
+        if (key == "DOWNLOAD" && rel != "Closet") r.drift.push_back("Downloads land in ~/" + rel + ", not the Closet");
     }
-    if (!is_dir(home + "/Closet")) r.drift.push_back("No ~/Closet yet -- the landing place for new files (s016 makes it)");
+    if (!is_dir(home + "/Closet")) r.drift.push_back("No ~/Closet yet -- the landing place for new files");
 
     r.ok = true;
     return r;
+}
+
+
+// ── s016: the acts ───────────────────────────────────────────────────────────
+namespace {
+
+std::string base_of(const std::string& rel) {
+    const auto s = rel.rfind('/');
+    return s == std::string::npos ? rel : rel.substr(s + 1);
+}
+
+// "Desktop/notes.txt" -> "notes (from Desktop).txt"; a top-level file -> "(from home)".
+std::string from_name(const std::string& rel) {
+    const std::string name = base_of(rel), par = parent_of(rel);
+    const std::string where = par.empty() ? "home" : base_of(par);
+    const auto dot = name.rfind('.');
+    if (dot == std::string::npos || dot == 0) return name + " (from " + where + ")";
+    return name.substr(0, dot) + " (from " + where + ")" + name.substr(dot);
+}
+
+// MakeDir for every missing folder from home/<first> down to `dir_rel`, parents first, once.
+void need_dirs(const std::string& home, const std::string& dir_rel, std::set<std::string>& planned,
+               std::vector<door::Action>& out, const std::string& why) {
+    std::size_t pos = 0;
+    while (true) {
+        const auto s = dir_rel.find('/', pos);
+        const std::string abs = home + "/" + dir_rel.substr(0, s);
+        struct stat st{};
+        if (::lstat(abs.c_str(), &st) != 0 && planned.insert(abs).second) {
+            door::Action a;
+            a.verb = door::Verb::MakeDir;
+            a.to = abs;
+            a.reason = why;
+            out.push_back(a);
+        }
+        if (s == std::string::npos) break;
+        pos = s + 1;
+    }
+}
+
+bool exists(const std::string& p) {
+    struct stat st{};
+    return ::lstat(p.c_str(), &st) == 0;
+}
+
+}  // namespace
+
+Act plan(const std::string& home, Verdict v, const std::vector<Row>& rows) {
+    Act act;
+    act.plan.label = v == Verdict::Short     ? "Tidy: short life to the Closet"
+                   : v == Verdict::Undecided ? "Tidy: gather into the Closet"
+                                             : "Tidy: dormant to the Archive";
+    std::set<std::string> planned;       // folders this plan makes
+    std::set<std::string> taken;         // destinations this plan fills
+    std::vector<door::Action> dirs, moves;
+    if (v != Verdict::Dormant) {
+        need_dirs(home, kCloset, planned, dirs, "the Closet -- the landing place");
+        need_dirs(home, kJunkDrawer, planned, dirs, "the Junk Drawer -- kept things with no home yet");
+    }
+    for (const auto& row : rows) {
+        const std::string from = home + "/" + row.rel;
+        struct stat st{};
+        if (::lstat(from.c_str(), &st) != 0) { act.dropped.push_back(row.rel + ": gone since the Look"); continue; }
+        if (st.st_ino != row.ino || (row.dev && st.st_dev != row.dev)) {
+            act.dropped.push_back(row.rel + ": a different file is there now");
+            continue;
+        }
+        if (!row.package && (!S_ISREG(st.st_mode) || st.st_mtim.tv_sec != row.changed)) {
+            act.dropped.push_back(row.rel + ": changed since the Look");
+            continue;
+        }
+        std::string to_rel;
+        if (v == Verdict::Dormant) {
+            std::tm tmv{};
+            const std::time_t t = st.st_mtim.tv_sec;
+            ::localtime_r(&t, &tmv);
+            to_rel = archive::destination(row.rel, tmv.tm_year + 1900);
+            if (exists(home + "/" + to_rel) || taken.count(to_rel)) {
+                act.dropped.push_back(row.rel + ": its place in the Archive is taken");
+                continue;
+            }
+            need_dirs(home, parent_of(to_rel), planned, dirs, "a folder in the archive");
+        } else {
+            to_rel = std::string(kCloset) + "/" + base_of(row.rel);
+            if (exists(home + "/" + to_rel) || taken.count(to_rel)) to_rel = std::string(kCloset) + "/" + from_name(row.rel);
+            if (exists(home + "/" + to_rel) || taken.count(to_rel)) {
+                act.dropped.push_back(row.rel + ": its name is taken in the Closet");
+                continue;
+            }
+        }
+        taken.insert(to_rel);
+        door::Action a;
+        a.verb = door::Verb::Move;
+        a.from = from;
+        a.to = home + "/" + to_rel;
+        a.bytes = row.bytes;
+        a.reason = std::string(verdict_name(v)) + " -- proposed by '" + row.query + "'";
+        moves.push_back(a);
+        ++act.moves;
+        act.bytes += row.bytes;
+        if (v == Verdict::Short) act.shorts.push_back(row.rel);
+    }
+    if (act.moves) {
+        act.plan.actions = std::move(dirs);
+        act.plan.actions.insert(act.plan.actions.end(), moves.begin(), moves.end());
+    }
+    return act;
+}
+
+std::size_t remember(const std::string& data_dir, const std::string& home, const Act& act, std::int64_t now) {
+    std::size_t n = 0;
+    for (const auto& rel : act.shorts) {
+        const std::string from = home + "/" + rel;
+        for (const auto& a : act.plan.actions) {
+            if (a.verb != door::Verb::Move || a.from != from) continue;
+            if (!exists(from) && exists(a.to) &&
+                catalog::decide(data_dir, rel, "short", "expires " + std::to_string(now + kShortAge), now))
+                ++n;
+            break;
+        }
+    }
+    return n;
+}
+
+std::int64_t expiry_of(const std::string& detail) {
+    static const std::string pre = "expires ";
+    if (detail.rfind(pre, 0) != 0 || detail.size() == pre.size()) return 0;
+    for (std::size_t k = pre.size(); k < detail.size(); ++k)
+        if (detail[k] < '0' || detail[k] > '9') return 0;
+    return std::stoll(detail.substr(pre.size()));
+}
+
+ClosetState closet_state(const std::string& home) {
+    ClosetState c;
+    c.closet = is_dir(home + "/" + kCloset);
+    c.junk = is_dir(home + "/" + kJunkDrawer);
+    c.dirs_file = exists(home + "/.config/user-dirs.dirs");
+    for (const auto& [key, rel] : user_dirs(home))
+        if (key == "DOWNLOAD") c.download = rel;
+    c.redirected = c.download == kCloset;
+    return c;
+}
+
+std::string redirect_downloads(const std::string& text) {
+    static const std::string line = "XDG_DOWNLOAD_DIR=\"$HOME/Closet\"";
+    std::istringstream in(text);
+    std::string out, l;
+    bool done = false;
+    while (std::getline(in, l)) {
+        if (!done && l.rfind("XDG_DOWNLOAD_DIR=", 0) == 0) { out += line + "\n"; done = true; continue; }
+        out += l + "\n";
+    }
+    if (!done) out += line + "\n";
+    return out;
+}
+
+door::Plan closet_plan(const std::string& home, bool redirect) {
+    door::Plan p;
+    const ClosetState c = closet_state(home);
+    p.label = !c.closet ? (redirect && !c.redirected ? "Tidy: make the Closet, Downloads land there" : "Tidy: make the Closet")
+                        : "Tidy: Downloads land in the Closet";
+    std::set<std::string> planned;
+    need_dirs(home, kCloset, planned, p.actions, "the Closet -- the landing place");
+    need_dirs(home, kJunkDrawer, planned, p.actions, "the Junk Drawer -- kept things with no home yet");
+    if (redirect && !c.redirected) {
+        const std::string f = home + "/.config/user-dirs.dirs";
+        std::string text;
+        std::uint32_t mode = 0644;
+        if (c.dirs_file) {
+            std::ifstream in(f, std::ios::binary);
+            std::ostringstream ss;
+            ss << in.rdbuf();
+            text = ss.str();
+            struct stat st{};
+            if (::lstat(f.c_str(), &st) == 0) mode = st.st_mode & 0777;
+            door::Action t;
+            t.verb = door::Verb::Trash;
+            t.from = f;
+            t.bytes = text.size();
+            t.reason = "the old setting (Downloads in ~/" + (c.download.empty() ? std::string("Downloads") : c.download) +
+                       ") -- Undo brings it back";
+            p.actions.push_back(t);
+        } else {
+            text = "# This file is written by xdg-user-dirs-update\n";
+        }
+        door::Action w;
+        w.verb = door::Verb::Write;
+        w.to = f;
+        w.content = redirect_downloads(text);
+        w.mode = mode;
+        w.bytes = w.content.size();
+        w.reason = "Downloads land in ~/Closet -- for apps started after this";
+        p.actions.push_back(w);
+    }
+    return p;
 }
 
 }  // namespace rouster::core::tidy

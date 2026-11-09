@@ -1,3 +1,4 @@
+#include <map>
 #include "Shell.hpp"
 #include "core/Recents.hpp"
 #include "core/Preflight.hpp"
@@ -891,7 +892,8 @@ void Shell::paint_tidy() {  // helper: s015c -- the report's cards
                 r.groups[i].verdict == td::Verdict::Dormant ? "dormant" : "undecided");
     cap += "; " + with_commas(r.active) + " active";
     if (r.kept) cap += ", " + with_commas(r.kept) + " you said to keep where they are";
-    cap += ". A report only -- nothing moves until the Closet.";
+    if (r.left_alone) cap += ", " + with_commas(r.left_alone) + " left alone (hands off)";
+    cap += ". Nothing moves until you press a card's button.";
     if (m_td_cat_shown.ok && !m_td_cat_shown.began &&
         (m_td_cat_shown.fresh || m_td_cat_shown.moved || m_td_cat_shown.gone))
         cap += "  Since the last Look: " + with_commas(m_td_cat_shown.fresh) + " new, " +
@@ -934,19 +936,132 @@ void Shell::paint_tidy() {  // helper: s015c -- the report's cards
         into->append(*row);
     };
 
-    constexpr std::size_t kShow = 40;
+    // s016: the Closet -- made, and where Downloads land. Its card lists every step (the preview).
+    {
+        const auto st = td::closet_state(m_home);
+        if (!st.closet || !st.junk || !st.redirected) {
+            auto c = card(st.closet ? "The Closet" : "The Closet \u00b7 not made yet",
+                          "~/Closet is where new files land and strays wait to be sorted; ~/Closet/Junk Drawer keeps "
+                          "things worth keeping that have no home yet (they never age out).");
+            if (!st.redirected) {
+                auto cb = Gtk::make_managed<Gtk::CheckButton>(
+                    "Downloads land in the Closet (now ~/" + (st.download.empty() ? std::string("Downloads") : st.download) + ")");
+                cb->set_active(m_td_redirect);
+                cb->signal_toggled().connect([this, cb] {
+                    m_td_redirect = cb->get_active();
+                    Glib::signal_idle().connect_once([this] { paint_tidy(); });   // not from inside the row's own signal
+                });
+                c->append(*cb);
+            }
+            const auto plan = td::closet_plan(m_home, m_td_redirect);
+            for (const auto& a : plan.actions) {
+                const std::string where = "~/" + (a.verb == core::door::Verb::Trash ? a.from : a.to).substr(m_home.size() + 1);
+                const std::string verb = a.verb == core::door::Verb::MakeDir ? "make" :
+                                         a.verb == core::door::Verb::Trash ? "to the Trash" : "write";
+                line(c, where, a.reason, "", verb, "");
+            }
+            if (!st.redirected && m_td_redirect) {
+                auto n = text("Screenshots can't be pointed: GNOME saves them into Pictures/Screenshots itself. "
+                              "The \u201cscreenshots\u201d query gathers the old ones instead.", "dim");
+                n->set_wrap(true);
+                c->append(*n);
+            }
+            auto bar = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 12);
+            auto gate = text(m_pf_red ? "Preflight has a red check -- see Preflight." : "One step; Undo takes it back.", "dim");
+            gate->set_hexpand(true);
+            gate->set_wrap(true);
+            bar->append(*gate);
+            auto go = Gtk::make_managed<Gtk::Button>(!st.closet ? "Make the Closet" : "Point Downloads at the Closet");
+            go->add_css_class("act");
+            go->set_sensitive(!plan.actions.empty() && !m_pf_red && !door_busy());
+            go->signal_clicked().connect(sigc::mem_fun(*this, &Shell::on_tidy_closet));
+            bar->append(*go);
+            c->append(*bar);
+        }
+    }
+
+    // s016a2: hands off -- folders Rouster leaves alone (Tidy, Archive, Duplicates).
+    {
+        auto c = card("Hands off \u00b7 " + with_commas(r.hands_off.size()) +
+                      (r.left_alone ? " \u00b7 " + with_commas(r.left_alone) + " files, " + scan::human_bytes(r.left_alone_bytes) : ""),
+                      "Folders you said to leave alone -- your novels, covers and workups. Nothing inside one is ever "
+                      "proposed by Tidy, Archive or Duplicates. Forget takes the mark off.");
+        for (const auto& rel : r.hands_off) {
+            auto rw = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 10);
+            auto l = text("~/" + rel, "detail-path");
+            l->set_hexpand(true);
+            l->set_ellipsize(Pango::EllipsizeMode::MIDDLE);
+            l->set_tooltip_text(m_home + "/" + rel);
+            rw->append(*l);
+            auto forget = Gtk::make_managed<Gtk::Button>("Forget");
+            forget->add_css_class("ghost");
+            forget->add_css_class("small");
+            forget->signal_clicked().connect([this, rel] {
+                Glib::signal_idle().connect_once([this, rel] { on_tidy_forget(rel); });   // not from inside the row's own signal
+            });
+            rw->append(*forget);
+            c->append(*rw);
+        }
+        if (!m_td_said.empty()) { auto s = text(m_td_said, "dim"); s->set_wrap(true); c->append(*s); }
+        auto mark = Gtk::make_managed<Gtk::Button>("Leave a folder alone\u2026");
+        mark->add_css_class("ghost");
+        mark->set_halign(Gtk::Align::END);
+        mark->signal_clicked().connect(sigc::mem_fun(*this, &Shell::on_tidy_hands_off));
+        c->append(*mark);
+    }
+
+    // The verdict cards: a check per painted row, the destination in its tooltip, one act button each.
+    m_td_painted.clear();
+    m_td_go.fill(nullptr);
+    m_td_gates.fill(nullptr);
     for (const auto& g : r.groups) {
+        const auto vi = static_cast<std::size_t>(g.verdict);
         auto c = card(std::string(td::verdict_name(g.verdict)) + " \u00b7 " + with_commas(g.files) + " \u00b7 " +
                       scan::human_bytes(g.bytes), td::verdict_why(g.verdict));
         if (g.rows.empty()) { c->append(*text("Nothing proposed.", "dim")); continue; }
-        for (std::size_t i = 0; i < g.rows.size() && i < kShow; ++i) {
-            const auto& row = g.rows[i];
-            line(c, "~/" + row.rel + (row.package ? "  (package, whole)" : ""),
+        std::vector<td::Row> shown(g.rows.begin(), g.rows.begin() + static_cast<std::ptrdiff_t>(std::min(g.rows.size(), kTidyShown)));
+        const auto dest = td::plan(m_home, g.verdict, shown);   // read-only: where each would go, for the tooltips
+        std::map<std::string, std::string> to;
+        for (const auto& a : dest.plan.actions)
+            if (a.verb == core::door::Verb::Move) to[a.from.substr(m_home.size() + 1)] = a.to.substr(m_home.size() + 1);
+        for (const auto& row : shown) {
+            m_td_painted.insert(row.rel);
+            auto rw = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 10);
+            auto cb = Gtk::make_managed<Gtk::CheckButton>();
+            cb->set_active(m_td_checked.count(row.rel) > 0);
+            const auto it = to.find(row.rel);
+            cb->set_sensitive(it != to.end());
+            const std::string rel = row.rel;
+            cb->signal_toggled().connect([this, cb, rel] {
+                if (cb->get_active()) m_td_checked.insert(rel); else m_td_checked.erase(rel);
+                tidy_gate();
+            });
+            rw->append(*cb);
+            auto inner = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 0);
+            inner->set_hexpand(true);
+            line(inner, "~/" + row.rel + (row.package ? "  (package, whole)" : ""),
                  !row.last_used ? "" : now - row.last_used < 86400 ? "used today" : "unused " + td::age(now - row.last_used),
                  scan::human_bytes(row.bytes), row.query,
-                 m_home + "/" + row.rel);
+                 it != to.end() ? "\u2192 ~/" + it->second : "Not offered: changed since the Look -- Look again");
+            rw->append(*inner);
+            c->append(*rw);
         }
-        if (g.rows.size() > kShow) c->append(*text("... and " + with_commas(g.rows.size() - kShow) + " more", "dim"));
+        if (g.rows.size() > kTidyShown)
+            c->append(*text("... and " + with_commas(g.rows.size() - kTidyShown) + " more -- not shown, never checked", "dim"));
+        auto bar = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 12);
+        bar->set_margin_top(6);
+        auto gate = text("", "dim");
+        gate->set_hexpand(true);
+        gate->set_wrap(true);
+        bar->append(*gate);
+        auto go = Gtk::make_managed<Gtk::Button>("Move");
+        go->add_css_class("act");
+        const auto v = g.verdict;
+        go->signal_clicked().connect([this, v] { on_tidy_act(v); });
+        bar->append(*go);
+        c->append(*bar);
+        m_td_go[vi] = go;
+        m_td_gates[vi] = gate;
     }
 
     if (!r.folders.empty()) {
@@ -971,7 +1086,36 @@ void Shell::paint_tidy() {  // helper: s015c -- the report's cards
         auto c = card("Drift", "Where things land, and what isn't where it says.");
         for (const auto& d : r.drift) { auto l = text("- " + d, "card-sub"); l->set_wrap(true); c->append(*l); }
         for (const auto& n : r.notes) { auto l = text("- " + n, "pf-amber"); l->set_wrap(true); c->append(*l); }
+    }    tidy_gate();
+}
+
+void Shell::tidy_gate() {  // helper: s016 -- each card's act button: label + may it act
+    namespace td = core::tidy;
+    const bool busy = m_td_worker.joinable() || door_busy();
+    for (const auto& g : m_td_shown.groups) {
+        const auto vi = static_cast<std::size_t>(g.verdict);
+        if (!m_td_go[vi] || !m_td_gates[vi]) continue;
+        std::size_t n = 0;
+        std::uint64_t bytes = 0;
+        for (const auto& row : g.rows)
+            if (m_td_checked.count(row.rel) && m_td_painted.count(row.rel)) { ++n; bytes += row.bytes; }
+        const std::string files = with_commas(n) + (n == 1 ? " file" : " files");
+        const std::string where = g.verdict == td::Verdict::Dormant ? "~/Archive" : "~/Closet";
+        m_td_go[vi]->set_label(n ? (g.verdict == td::Verdict::Undecided ? "Gather " : "Move ") + files + " to " + where
+                                 : "Move to " + where);
+        m_td_go[vi]->set_sensitive(n > 0 && !m_pf_red && !busy);
+        m_td_gates[vi]->set_text(m_pf_red ? "Preflight has a red check. Tidy waits until it clears -- see Preflight."
+                                 : !n ? "Nothing checked."
+                                      : scan::human_bytes(bytes) + " checked. One step; Undo takes it back. "
+                                        "Hover a row to see where it goes.");
     }
+}
+
+void Shell::tidy_done(const std::string& big, const std::string& caption) {  // helper: s016 -- the done state
+    m_td_done_big.set_text(big);
+    m_td_done_caption.set_text(caption);
+    m_td_states.set_visible_child("done");
+    paint_activity();
 }
 
 void Shell::stop_archive() {  // helper: cancel + join (close, dtor)

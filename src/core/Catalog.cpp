@@ -457,4 +457,27 @@ std::vector<Decision> decisions(const std::string& data_dir) {
     return v;
 }
 
+bool touches(const std::vector<std::string>& folders, const std::string& rel) {
+    if (under(folders, rel)) return true;
+    for (const auto& f : folders)
+        if (f.size() > rel.size() && f.compare(0, rel.size(), rel) == 0 && f[rel.size()] == '/') return true;
+    return false;
+}
+
+std::vector<std::string> hands_off(const std::string& data_dir) {
+    std::vector<std::string> v;
+    Db d;
+    if (open_ro(d, data_dir) != Opened::Ok) return v;
+    Stmt q(d.db, "SELECT h.path FROM decisions h WHERE h.verdict = 'hands-off' AND h.id = (SELECT max(id) FROM "
+                 "decisions WHERE path = h.path AND verdict IN ('hands-off', 'hands-on')) GROUP BY h.path ORDER BY h.path");
+    while (q.row()) v.push_back(q.t(0));
+    return v;
+}
+
+bool under(const std::vector<std::string>& folders, const std::string& rel) {
+    for (const auto& f : folders)
+        if (rel == f || (rel.size() > f.size() && rel.compare(0, f.size(), f) == 0 && rel[f.size()] == '/')) return true;
+    return false;
+}
+
 }  // namespace rouster::core::catalog

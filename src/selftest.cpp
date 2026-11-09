@@ -1111,7 +1111,7 @@ int main(int argc, char** argv) {
             std::istringstream in(snap);
             std::string out;
             for (std::string l; std::getline(in, l);)
-                if (l.find("/.local/share/Trash/") == std::string::npos) out += l + "\n";
+                if (l.find("/.local/share/Trash") == std::string::npos) out += l + "\n";
             return out;
         };
         auto fake_dconf = std::make_shared<FakeDconf>();
@@ -1832,7 +1832,7 @@ int main(int argc, char** argv) {
                 std::istringstream in(snap);
                 std::string out;
                 for (std::string l; std::getline(in, l);)
-                    if (l.find("/.local/share/Trash/") == std::string::npos) out += l + "\n";
+                    if (l.find("/.local/share/Trash") == std::string::npos) out += l + "\n";
                 return out;
             };
             core::scan::Progress pg;
@@ -2234,7 +2234,7 @@ int main(int argc, char** argv) {
             std::istringstream in(snap);
             std::string o;
             for (std::string l; std::getline(in, l);)
-                if (l.find("/.local/share/Trash/") == std::string::npos) o += l + "\n";
+                if (l.find("/.local/share/Trash") == std::string::npos) o += l + "\n";
             return o;
         };
         auto u = door.undo();
@@ -2332,7 +2332,7 @@ int main(int argc, char** argv) {
             std::istringstream in(snap);
             std::string out;
             for (std::string l; std::getline(in, l);)
-                if (l.find("/.local/share/Trash/") == std::string::npos) out += l + "\n";
+                if (l.find("/.local/share/Trash") == std::string::npos) out += l + "\n";
             return out;
         };
         dr::Door door(H, H + "/.local/share/rouster");
@@ -2640,8 +2640,8 @@ int main(int argc, char** argv) {
         check("rules: undo -- exact outside the Trash", u.ok && [&] {
             std::istringstream a(files_snapshot(home)), b(b1);
             std::string x, y, l;
-            while (std::getline(a, l)) if (l.find("/.local/share/Trash/") == std::string::npos) x += l + "\n";
-            while (std::getline(b, l)) if (l.find("/.local/share/Trash/") == std::string::npos) y += l + "\n";
+            while (std::getline(a, l)) if (l.find("/.local/share/Trash") == std::string::npos) x += l + "\n";
+            while (std::getline(b, l)) if (l.find("/.local/share/Trash") == std::string::npos) y += l + "\n";
             return x == y;
         }());
         {   // Trash, and File into a project
@@ -3304,7 +3304,7 @@ int main(int argc, char** argv) {
             std::istringstream in(snap);
             std::string o;
             for (std::string l; std::getline(in, l);)
-                if (l.find("/.local/share/Trash/") == std::string::npos) o += l + "\n";
+                if (l.find("/.local/share/Trash") == std::string::npos) o += l + "\n";
             return o;
         };
         auto u1 = door.undo();
@@ -3710,6 +3710,179 @@ int main(int argc, char** argv) {
         }());
         check("tidy: age reads plainly", td::age(DAY) == "1 day" && td::age(90 * DAY) == "3 months" &&
               td::age(3 * 365 * DAY) == "3 years");
+
+        // -- s016: the Closet + Tidy acts -------------------------------------------
+        {
+            namespace dr = core::door;
+            const auto no_trash = [&] {   // the tree, minus the Trash (undo sends made folders there)
+                std::istringstream in(files_snapshot(home));
+                std::string l, out;
+                while (std::getline(in, l)) if (l.find("/.local/share/Trash") == std::string::npos) out += l + "\n";
+                return out;
+            };
+            const auto group = [&](td::Verdict v) { return r.groups.at(static_cast<std::size_t>(v)).rows; };
+            const std::string tree0 = no_trash();
+            const std::string dirs0 = bytes_of(H + "/.config/user-dirs.dirs");
+            dr::Door door(H, D);
+            door.load();
+
+            // Pure pieces.
+            const std::string red = td::redirect_downloads("# x\nXDG_DOWNLOAD_DIR=\"$HOME/Downloads\"\nXDG_MUSIC_DIR=\"$HOME/Music\"\n");
+            check("closet: redirect_downloads -- the line replaced, the rest kept; added when missing",
+                  red == "# x\nXDG_DOWNLOAD_DIR=\"$HOME/Closet\"\nXDG_MUSIC_DIR=\"$HOME/Music\"\n" &&
+                  td::redirect_downloads("") == "XDG_DOWNLOAD_DIR=\"$HOME/Closet\"\n", red);
+            check("closet: expiry_of reads only 'expires <digits>'", td::expiry_of("expires 1790000000") == 1790000000 &&
+                  td::expiry_of("expires ") == 0 && td::expiry_of("expires 12x") == 0 && td::expiry_of("keep") == 0);
+            const auto st0 = td::closet_state(H);
+            check("closet: state before -- no Closet, Downloads in ~/Downloads", !st0.closet && !st0.junk &&
+                  st0.dirs_file && st0.download == "Downloads" && !st0.redirected);
+
+            // Make the Closet, Downloads pointed at it -- one step; Undo puts the old setting back exactly.
+            auto cp = td::closet_plan(H, true);
+            const bool shape = cp.actions.size() == 4 && cp.actions[0].verb == dr::Verb::MakeDir &&
+                               cp.actions[1].verb == dr::Verb::MakeDir && cp.actions[2].verb == dr::Verb::Trash &&
+                               cp.actions[3].verb == dr::Verb::Write && cp.actions[3].to == H + "/.config/user-dirs.dirs";
+            const auto refused = door.run(cp);
+            check("closet: the plan -- Closet, Junk Drawer, the old setting to the Trash, the new one written; "
+                  "unpreviewed it is refused, nothing changed", shape && !refused.ok && no_trash() == tree0);
+            cp.previewed = true;
+            const auto cr = door.run(cp);
+            const auto st1 = td::closet_state(H);
+            const std::string dirs1 = bytes_of(H + "/.config/user-dirs.dirs");
+            check("closet: made -- ~/Closet + its Junk Drawer; Downloads land in the Closet, other lines kept",
+                  cr.ok && st1.closet && st1.junk && st1.redirected &&
+                  dirs1.find("XDG_MUSIC_DIR=\"$HOME/Music\"") != std::string::npos &&
+                  dirs1.find("XDG_DOWNLOAD_DIR=\"$HOME/Closet\"") != std::string::npos,
+                  cr.messages.empty() ? "" : cr.messages.front());
+            check("closet: once made, the plan has nothing left to do", td::closet_plan(H, true).actions.empty());
+            const auto cu = door.undo();
+            check("closet: undo -- the old user-dirs.dirs back byte for byte, the Closet gone (to the Trash, empty)",
+                  cu.ok && bytes_of(H + "/.config/user-dirs.dirs") == dirs0 && !fs::exists(home / "Closet") &&
+                  no_trash() == tree0, cu.messages.empty() ? "" : cu.messages.front());
+
+            // Short life -> the Closet, remembered with an expiry.
+            auto sp = td::plan(H, td::Verdict::Short, group(td::Verdict::Short));
+            std::set<std::string> tos;
+            for (const auto& a : sp.plan.actions) if (a.verb == dr::Verb::Move) tos.insert(a.to.substr(H.size() + 1));
+            check("tidy/act: short life -> the Closet by name, the Closet made first, 4 moves",
+                  sp.moves == 4 && sp.dropped.empty() && sp.plan.actions.size() == 6 &&
+                  sp.plan.actions[0].to == H + "/Closet" && sp.plan.actions[1].to == H + "/Closet/Junk Drawer" &&
+                  tos == std::set<std::string>{"Closet/setup-2.4.iso", "Closet/old.iso",
+                                               "Closet/Screenshot from 2024-01-02.png", "Closet/report (1).pdf"});
+            sp.plan.previewed = true;
+            const auto sr = door.run(sp.plan);
+            const std::size_t kept = td::remember(D, H, sp, NOW);
+            bool exp_ok = true;
+            std::size_t shorts = 0;
+            for (const auto& dc : ct::decisions(D))
+                if (dc.verdict == "short") { ++shorts; exp_ok &= td::expiry_of(dc.detail) == NOW + td::kShortAge; }
+            check("tidy/act: moved, and each remembered as short with an expiry 30 days on",
+                  sr.ok && kept == 4 && shorts == 4 && exp_ok && fs::exists(home / "Closet/old.iso") &&
+                  !fs::exists(home / "old.iso"), sr.messages.empty() ? "" : sr.messages.front());
+            {   // the next Look: the moves are seen, the decisions follow, the Closet isn't proposed again
+                core::scan::Progress p2;
+                std::vector<core::scan::Seen> m2;
+                core::scan::scan(H, H, p2, 0, &m2);
+                const auto d2 = ct::record(D, H, "", m2, {}, NOW);
+                const auto r2 = td::report(D, H, NOW);
+                const auto fol = ct::query(D, "SELECT count(*) FROM decisions d JOIN files f ON f.id = d.file_id "
+                                              "WHERE d.verdict = 'short' AND f.path GLOB 'Closet/*' AND f.gone IS NULL");
+                check("tidy/act: the next Look sees 4 moves; the decisions followed into the Closet; "
+                      "nothing in the Closet is proposed again",
+                      d2.ok && d2.moved == 4 && fol.ok && fol.rows.at(0).at(0) == "4" && r2.ok &&
+                      r2.groups.at(0).rows.empty(), std::to_string(d2.moved) + " moved");
+            }
+            const auto su = door.undo();
+            check("tidy/act: undo -- every file back where it was, exactly", su.ok && no_trash() == tree0,
+                  su.messages.empty() ? "" : su.messages.front());
+
+            // Undecided -> gathered; a name already taken in the Closet gets "(from <folder>)".
+            put(home, "Closet/note.txt", 10);
+            const std::string tree1 = no_trash();
+            auto up = td::plan(H, td::Verdict::Undecided, group(td::Verdict::Undecided));
+            std::set<std::string> utos;
+            for (const auto& a : up.plan.actions) if (a.verb == dr::Verb::Move) utos.insert(a.to.substr(H.size() + 1));
+            check("tidy/act: undecided gathered into the Closet; a taken name -> 'note (from Desktop).txt'",
+                  up.moves == 2 && utos == std::set<std::string>{"Closet/loose.txt", "Closet/note (from Desktop).txt"} &&
+                  up.shorts.empty(), [&] { std::string s; for (auto& t : utos) s += t + " "; return s; }());
+            up.plan.previewed = true;
+            const auto ur = door.run(up.plan);
+            const bool there = fs::exists(home / "Closet/note (from Desktop).txt") && fs::exists(home / "Closet/note.txt");
+            const auto uu = door.undo();
+            check("tidy/act: gather runs (the old note.txt untouched), undo puts both back", ur.ok && there &&
+                  uu.ok && no_trash() == tree1, (ur.messages.empty() ? "" : ur.messages.front()) + " / " +
+                  (uu.messages.empty() ? "" : uu.messages.front()));
+            fs::remove_all(home / "Closet", ec);
+
+            // Dormant -> the Archive's place; anything changed since the Look is left out.
+            const fs::path letter = home / "Documents/old letter.odt";
+            struct stat lst{};
+            ::lstat(letter.c_str(), &lst);
+            struct timespec bump[2] = {{0, UTIME_OMIT}, {lst.st_mtim.tv_sec + 5, 0}};
+            ::utimensat(AT_FDCWD, letter.c_str(), bump, AT_SYMLINK_NOFOLLOW);
+            const auto changed = td::plan(H, td::Verdict::Dormant, group(td::Verdict::Dormant));
+            check("tidy/act: a file changed since the Look is left out, and said",
+                  changed.moves == 0 && changed.plan.actions.empty() && changed.dropped.size() == 1 &&
+                  changed.dropped[0].find("changed since the Look") != std::string::npos);
+            struct timespec back[2] = {{0, UTIME_OMIT}, lst.st_mtim};
+            ::utimensat(AT_FDCWD, letter.c_str(), back, AT_SYMLINK_NOFOLLOW);
+            auto dp = td::plan(H, td::Verdict::Dormant, group(td::Verdict::Dormant));
+            std::tm tmv{};
+            const std::time_t lt = lst.st_mtim.tv_sec;
+            ::localtime_r(&lt, &tmv);
+            const std::string want = "Archive/" + std::to_string(tmv.tm_year + 1900) + "/Documents/old letter.odt";
+            dp.plan.previewed = true;
+            const auto drn = door.run(dp.plan);
+            check("tidy/act: dormant -> ~/Archive/<year>/Documents/..., its folders made; no Closet made",
+                  dp.moves == 1 && drn.ok && fs::exists(home / want) && !fs::exists(letter) && !fs::exists(home / "Closet"),
+                  want);
+            const auto du2 = door.undo();
+            check("tidy/act: undo -- the letter back, the archive's new folders gone", du2.ok && fs::exists(letter) &&
+                  !fs::exists(home / want) && no_trash() == tree0);
+            // A row that isn't the file the Look saw.
+            auto rows = group(td::Verdict::Undecided);
+            rows[0].ino += 1;
+            const auto other = td::plan(H, td::Verdict::Undecided, rows);
+            check("tidy/act: a different file at the path (inode) is left out", other.moves == 1 && other.dropped.size() == 1 &&
+                  other.dropped[0].find("different file") != std::string::npos);
+        }
+
+        // -- s016a2: hands off ------------------------------------------------------
+        {
+            core::scan::Progress p3;
+            std::vector<core::scan::Seen> m3;
+            core::scan::scan(H, H, p3, 0, &m3);
+            const auto d3 = ct::record(D, H, "", m3, {}, NOW);   // the catalog as the disk is now
+            const auto has_shot = [](const td::Report& rr) {
+                for (const auto& row : rr.groups.at(0).rows) if (row.query == "screenshots") return true;
+                return false;
+            };
+            const auto before = td::report(D, H, NOW);
+            check("hands-off: under() / touches() -- the folder, inside it, a folder holding it; not a sibling with a longer or shorter name",
+                  ct::under({"Pictures/Screenshots"}, "Pictures/Screenshots") &&
+                  ct::under({"Pictures/Screenshots"}, "Pictures/Screenshots/a.png") &&
+                  !ct::under({"Pictures/Screenshots"}, "Pictures/Screenshots2/a.png") && !ct::under({}, "x") &&
+                  ct::touches({"Documents/Scrivener"}, "Documents") && ct::touches({"Documents/Scrivener"}, "Documents/Scrivener/a") &&
+                  !ct::touches({"Documents/Scrivener"}, "Documents/Scriv") && !ct::touches({"Documents/Scrivener"}, "Pictures"));
+            const bool marked = ct::decide(D, "Pictures/Screenshots", "hands-off", "", NOW);
+            const auto off = td::report(D, H, NOW);
+            check("hands-off: marked -> nothing under it proposed; counted as left alone, not active; listed",
+                  d3.ok && before.ok && has_shot(before) && marked && off.ok && !has_shot(off) && off.left_alone == 1 &&
+                  off.active == before.active && off.hands_off == std::vector<std::string>{"Pictures/Screenshots"},
+                  std::to_string(off.left_alone) + " left alone");
+            check("hands-off: every verdict query still read-only with the clause", [&] {
+                for (const auto& q : td::queries())
+                    if (!ct::query(D, q.sql, {{":now", NOW}, {":short", 1}, {":dormant", 1}}).ok) return false;
+                return true;
+            }());
+            const bool forgot = ct::decide(D, "Pictures/Screenshots", "hands-on", "", NOW);
+            const auto on = td::report(D, H, NOW);
+            check("hands-off: Forget (hands-on) -> proposed again; the list empty", forgot && on.ok && has_shot(on) &&
+                  on.left_alone == 0 && on.hands_off.empty() && ct::hands_off(D).empty());
+            ct::decide(D, "Pictures", "hands-off", "", NOW);
+            check("hands-off: a parent folder covers everything below it", !has_shot(td::report(D, H, NOW)));
+            ct::decide(D, "Pictures", "hands-on", "", NOW);
+        }
 
         // Preflight's "Last opened" row (s015c).
         namespace pf = core::preflight;

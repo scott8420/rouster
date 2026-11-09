@@ -37,7 +37,8 @@ void Shell::on_nav(const std::string& page) {  // handler: a sidebar row was cho
     add_css_class("page-" + page);   // the window's gradient follows the module (rouster.css)
     m_stack.set_visible_child(page);
     if (page == "system" && m_sy_states.get_visible_child_name() == "results") { paint_preflight(); system_gate(); }
-    if (page == "preflight" || page == "sweep" || page == "dev" || page == "dups" || page == "archive") paint_preflight();   // fresh gate on arrival
+    if (page == "preflight" || page == "sweep" || page == "dev" || page == "dups" || page == "archive") paint_preflight();
+    if (page == "tidy") { paint_preflight(); tidy_gate(); }   // fresh gate on arrival
     if (page == "projects" && m_pj_states.get_visible_child_name() == "home") paint_projects();
     if (page == "rules" && m_rl_states.get_visible_child_name() == "list") paint_rules();   // folders may have appeared   // templates may have been edited in Files
     if (page == "activity") paint_activity();
@@ -118,6 +119,10 @@ void Shell::on_undo() {  // handler: undo the last batch, through the door
     if (m_dv_states.get_visible_child_name() == "done") {
         m_dv_sub.set_text("Undone -- the build output is back where it was. Look again to see it.");
         m_dv_states.set_visible_child("start");
+    }
+    if (m_td_states.get_visible_child_name() == "done") {
+        m_td_sub.set_text("Undone -- everything is back where it was. Look again to see it.");
+        m_td_states.set_visible_child("start");
     }
 }
 
@@ -267,6 +272,17 @@ void Shell::on_dups_found() {  // handler: the worker finished (Dispatcher -> UI
     {
         std::lock_guard lk(m_du_mx);
         m_du_shown = m_du_found;
+    }
+    {   // s016a2: a group touching a hands-off folder isn't offered at all
+        const auto off = core::catalog::hands_off(data_dir());
+        auto& g = m_du_shown.groups;
+        const auto before = g.size();
+        g.erase(std::remove_if(g.begin(), g.end(), [&](const core::dups::Group& grp) {
+            for (const auto& m : grp.members) if (core::catalog::touches(off, m.rel)) return true;
+            return false;
+        }), g.end());
+        if (auto lg = log::get(log::Area::Dups); lg && g.size() != before)
+            lg->info("hands off: {} groups left out", before - g.size());
     }
     if (!m_du_shown.refused.empty()) {
         m_du_sub.set_text("Not looked: " + m_du_shown.refused);
@@ -947,8 +963,132 @@ void Shell::on_tidy_found() {  // handler: the report is ready (Dispatcher -> UI
         m_td_states.set_visible_child("start");
         return;
     }
+    // s016: short life and undecided go to the Closet -- pre-checked (nothing leaves home, Undo is one click);
+    // dormant is a guess about the future, like Archive's -- not pre-checked.
+    m_td_said.clear();
+    m_td_checked.clear();
+    for (const auto& g : m_td_shown.groups)
+        if (g.verdict != core::tidy::Verdict::Dormant)
+            for (std::size_t i = 0; i < g.rows.size() && i < kTidyShown; ++i) m_td_checked.insert(g.rows[i].rel);
+    paint_preflight();
     paint_tidy();
     m_td_states.set_visible_child("results");
+}
+
+void Shell::on_tidy_act(core::tidy::Verdict v) {  // handler: s016 -- a card's checked rows -> one door step
+    namespace td = core::tidy;
+    if (!m_door || door_busy() || m_td_worker.joinable()) return;
+    if (m_td_states.get_visible_child_name() != "results") return;   // preview first: only from the list
+    paint_preflight();
+    if (m_pf_red) { tidy_gate(); return; }
+    std::vector<td::Row> rows;
+    for (const auto& row : m_td_shown.groups.at(static_cast<std::size_t>(v)).rows)
+        if (m_td_checked.count(row.rel) && m_td_painted.count(row.rel)) rows.push_back(row);
+    td::Act act = td::plan(m_home, v, rows);
+    if (auto lg = log::get(log::Area::Tidy)) {
+        lg->info("act '{}': {} moves, {} actions", act.plan.label, act.moves, act.plan.actions.size());
+        for (const auto& d : act.dropped) lg->info("  left out: {}", d);
+    }
+    if (!act.moves) {
+        if (auto* g = m_td_gates[static_cast<std::size_t>(v)])
+            g->set_text(act.dropped.empty() ? std::string("Nothing to do.") : act.dropped.front() + " -- Look again.");
+        return;
+    }
+    act.plan.previewed = true;   // the card on screen was the preview
+    const auto now = static_cast<std::int64_t>(std::time(nullptr));
+    const auto r = m_door->run(act.plan);
+    const std::size_t remembered = td::remember(data_dir(), m_home, act, now);
+    if (auto lg = log::get(log::Area::Tidy)) {
+        lg->info("act: {} done, {} failed; {} remembered as short life", r.done, r.failed, remembered);
+        for (const auto& m : r.messages) lg->warn("  {}", m);
+    }
+    const std::string n = std::to_string(act.moves) + (act.moves == 1 ? " file" : " files");
+    const std::string left = act.dropped.empty() ? "" : " " + std::to_string(act.dropped.size()) +
+                             " left out (changed since the Look) -- see the log.";
+    if (r.ok) {
+        const std::string cap =
+            v == td::Verdict::Short ? n + " in ~/Closet now, each with 30 days to live -- then offered to the Trash at a "
+                                          "review, never deleted unasked."
+          : v == td::Verdict::Undecided ? n + " gathered into ~/Closet, to be sorted."
+                                        : n + " in ~/Archive now, each under the year it was last changed, with its folders "
+                                              "kept. Put back on the Archive page works any time.";
+        tidy_done(core::scan::human_bytes(act.bytes), cap + " Undo takes the step back." + left);
+    } else if (r.done == 0) {
+        tidy_done("Nothing moved", r.messages.empty() ? std::string("The door refused the plan.") : r.messages.front());
+    } else {
+        tidy_done(std::to_string(r.done) + " of " + std::to_string(act.plan.actions.size()),
+                  "steps done; " + std::to_string(r.failed) + " could not: " +
+                  (r.messages.empty() ? std::string("see Activity") : r.messages.front()) + ". Undo puts back what moved.");
+    }
+}
+
+void Shell::on_tidy_hands_off() {  // handler: s016a2 -- folder chooser -> leave it alone
+    auto dialog = Gtk::FileDialog::create();
+    dialog->set_title("Leave a folder alone");
+    dialog->set_initial_folder(Gio::File::create_for_path(m_home));
+    dialog->select_folder(*this, [this, dialog](const Glib::RefPtr<Gio::AsyncResult>& result) {
+        std::string path;
+        try {
+            auto dir = dialog->select_folder_finish(result);
+            if (dir) path = dir->get_path();
+        } catch (const Glib::Error& e) {
+            if (auto lg = log::get(log::Area::Tidy)) lg->info("hands off: dialog dismissed ({})", e.what());
+            return;
+        }
+        if (path.size() <= m_home.size() + 1 || path.compare(0, m_home.size() + 1, m_home + "/") != 0) {
+            tidy_rereport("Not marked: pick a folder inside your home (not home itself).");
+            return;
+        }
+        const std::string rel = path.substr(m_home.size() + 1);
+        std::string why;
+        const bool ok = core::catalog::decide(data_dir(), rel, "hands-off", "", static_cast<std::int64_t>(std::time(nullptr)), &why);
+        if (auto lg = log::get(log::Area::Tidy)) lg->info("hands off '{}': {}", rel, ok ? "marked" : why);
+        tidy_rereport(ok ? "~/" + rel + " is hands off: nothing in it will be proposed." : "Not marked: " + why);
+    });
+}
+
+void Shell::on_tidy_forget(const std::string& rel) {  // handler: s016a2 -- a hands-off folder's Forget
+    std::string why;
+    const bool ok = core::catalog::decide(data_dir(), rel, "hands-on", "", static_cast<std::int64_t>(std::time(nullptr)), &why);
+    if (auto lg = log::get(log::Area::Tidy)) lg->info("hands on '{}': {}", rel, ok ? "forgotten" : why);
+    tidy_rereport(ok ? "~/" + rel + " is no longer hands off." : "Not changed: " + why);
+}
+
+void Shell::tidy_rereport(const std::string& said) {  // helper: s016a2 -- the report again from the catalog (no walk)
+    if (m_td_worker.joinable() || m_td_states.get_visible_child_name() != "results") return;
+    auto rep = core::tidy::report(data_dir(), m_home, static_cast<std::int64_t>(std::time(nullptr)));
+    if (!rep.ok) return;
+    std::set<std::string> was = m_td_checked;   // keep your checks where the row is still proposed
+    m_td_shown = std::move(rep);
+    m_td_checked.clear();
+    for (const auto& g : m_td_shown.groups)
+        for (std::size_t i = 0; i < g.rows.size() && i < kTidyShown; ++i)
+            if (was.count(g.rows[i].rel)) m_td_checked.insert(g.rows[i].rel);
+    m_td_said = said;
+    paint_tidy();
+}
+
+void Shell::on_tidy_closet() {  // handler: s016 -- make the Closet / point Downloads at it
+    if (!m_door || door_busy() || m_td_worker.joinable()) return;
+    if (m_td_states.get_visible_child_name() != "results") return;
+    paint_preflight();
+    if (m_pf_red) { tidy_gate(); return; }
+    auto plan = core::tidy::closet_plan(m_home, m_td_redirect);
+    if (plan.actions.empty()) return;
+    plan.previewed = true;   // the Closet card listed every step
+    const auto r = m_door->run(plan);
+    if (auto lg = log::get(log::Area::Tidy)) {
+        lg->info("closet '{}': {} actions, {} done, {} failed", plan.label, plan.actions.size(), r.done, r.failed);
+        for (const auto& m : r.messages) lg->warn("  {}", m);
+    }
+    const auto st = core::tidy::closet_state(m_home);
+    if (r.ok)
+        tidy_done("The Closet", std::string("~/Closet is ready, with its Junk Drawer.") +
+                  (st.redirected ? " Downloads land there now -- for apps started from here on (a running browser keeps "
+                                   "its old folder until it restarts)." : "") +
+                  " Undo takes the step back" + (st.redirected ? ", the old Downloads setting included." : "."));
+    else
+        tidy_done("Not done", r.messages.empty() ? std::string("The door refused the plan.") : r.messages.front());
 }
 
 void Shell::on_archive_found() {  // handler: the worker finished (Dispatcher -> UI thread)
@@ -960,6 +1100,19 @@ void Shell::on_archive_found() {  // handler: the worker finished (Dispatcher ->
     {
         std::lock_guard lk(m_ar_mx);
         m_ar_shown = m_ar_found;
+    }
+    {   // s016a2: nothing in (or holding) a hands-off folder is offered
+        const auto off = core::catalog::hands_off(data_dir());
+        auto& it = m_ar_shown.items;
+        const auto before = it.size();
+        it.erase(std::remove_if(it.begin(), it.end(), [&](const core::archive::Item& x) {
+            return core::catalog::touches(off, x.rel);
+        }), it.end());
+        if (it.size() != before) {
+            m_ar_shown.old_bytes = 0;
+            for (const auto& x : it) m_ar_shown.old_bytes += x.bytes;
+            if (auto lg = log::get(log::Area::Archive)) lg->info("hands off: {} items left out", before - it.size());
+        }
     }
     if (!m_ar_shown.refused.empty()) {
         m_ar_sub.set_text("Not looked: " + m_ar_shown.refused);
