@@ -71,6 +71,27 @@ struct Item {
     Kind          kind;
     std::uint64_t bytes = 0;
     std::uint64_t files = 0;
+    // s015b, packages only: the newest change (mtime, anything inside) and the
+    // newest READ (atime of the files inside -- never a folder's: our own
+    // readdir would be the reader). 0 = none.
+    std::int64_t  newest_change = 0;
+    std::int64_t  newest_read   = 0;
+};
+
+// s015b: one of YOUR files, as the catalog sees it -- lstat / statx only,
+// never opened. Collected only when asked (scan(..., &mine)). What counts:
+// regular files of kind Other, not hidden (no `.` component), not inside a
+// git repository (a folder holding .git -- Dev projects owns those) or
+// node_modules; a Mac package is ONE entry (package = true), sized whole,
+// its times the newest inside. Hard links: every name is listed.
+struct Seen {
+    std::string   rel;               // relative to home
+    std::uint64_t bytes   = 0;       // disk usage
+    std::int64_t  changed = 0;       // mtime (unix s)
+    std::int64_t  read    = 0;       // atime (unix s)
+    std::int64_t  born    = 0;       // statx birth time; 0 = the filesystem doesn't say
+    std::uint64_t dev = 0, ino = 0;  // identity across a rename
+    bool          package = false;
 };
 
 struct Report {
@@ -79,6 +100,7 @@ struct Report {
     std::vector<Item>        items;              // sorted by bytes, descending; Other not itemised
     std::vector<Item>        packages;           // s015a: Mac packages (.scriv ...), each ONE item, sized whole; biggest first
     std::vector<std::string> skipped;            // other-filesystem dirs, relative to home
+    std::vector<std::string> unwalked;           // s015b: dirs that couldn't be opened, relative to home
     std::uint64_t errors = 0;                    // unreadable dirs / failed lstat
     std::uint64_t dirs   = 0;
     bool          cancelled = false;
@@ -100,6 +122,12 @@ struct Progress {
 // threads = 0 -> hardware_concurrency, capped at 8.
 Report scan(const std::string& home, const std::string& root,
             Progress& progress, unsigned threads = 0);
+
+// s015b: the same walk, also listing your files for the catalog into *mine
+// (cleared first; unchanged when null). Directories are opened O_NOATIME
+// where allowed, so the walk itself doesn't count as a read.
+Report scan(const std::string& home, const std::string& root,
+            Progress& progress, unsigned threads, std::vector<Seen>* mine);
 
 // "1.2 GB", "340 MB", "12 KB", "0 B" -- decimal units, like GNOME Files.
 std::string human_bytes(std::uint64_t b);

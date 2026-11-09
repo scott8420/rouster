@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Rouster build.
-#   Fedora: sudo dnf install gtkmm4.0-devel spdlog-devel cmake gcc-c++ ninja-build
-#   Ubuntu: sudo apt install libgtkmm-4.0-dev libspdlog-dev cmake g++ ninja-build
+#   Fedora: sudo dnf install gtkmm4.0-devel spdlog-devel sqlite-devel cmake gcc-c++ ninja-build
+#   Ubuntu: sudo apt install libgtkmm-4.0-dev libspdlog-dev libsqlite3-dev cmake g++ ninja-build
 # Ninja is used when installed and the build dir is fresh; ccache / mold are
 # picked up by CMake if present.
 set -e

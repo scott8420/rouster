@@ -30,7 +30,7 @@ a btrfs snapshot is taken before cleanup, and the app runs unprivileged.
 ./uninstall.sh                # removes exactly what install wrote (--purge for settings)
 ```
 
-Fedora: `sudo dnf install gtkmm4.0-devel spdlog-devel cmake gcc-c++ ninja-build`
-Ubuntu: `sudo apt install libgtkmm-4.0-dev libspdlog-dev cmake g++ ninja-build`
+Fedora: `sudo dnf install gtkmm4.0-devel spdlog-devel sqlite-devel cmake gcc-c++ ninja-build`
+Ubuntu: `sudo apt install libgtkmm-4.0-dev libspdlog-dev libsqlite3-dev cmake g++ ninja-build`
 
 Built on the Cairn starter. gtkmm 4, C++23. MIT license.

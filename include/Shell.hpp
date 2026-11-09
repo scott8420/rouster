@@ -1,6 +1,7 @@
 #pragma once
 #include "widgets/Widgets.hpp"
 #include "core/Scan.hpp"     // s002: the read-only walker
+#include "core/Catalog.hpp"  // s015b: the catalog, recorded after each Look
 #include "core/Door.hpp"     // s004: the one door
 #include "core/Sweep.hpp"    // s006: the first module that acts
 #include "core/Dev.hpp"      // s007: dev projects
@@ -277,6 +278,8 @@ private:
     std::thread                           m_worker;
     std::mutex                            m_report_mx;
     core::scan::Report                    m_report;     // written by the worker, read after done
+    core::catalog::Delta                  m_cat;        // s015b: what the Look did to the catalog (with m_report)
+    core::catalog::Delta                  m_cat_shown;  // UI thread only
     sigc::connection                      m_tick;
     std::string                           m_home;
 

@@ -17,6 +17,7 @@
 #include <gtkmm/image.h>
 #include <gtkmm/flowboxchild.h>
 #include <glibmm/main.h>
+#include <ctime>
 #include <glibmm/markup.h>
 #include <giomm/menuitem.h>
 #include <glibmm/miscutils.h>
@@ -65,9 +66,10 @@ void Shell::start_scan(const std::string& root) {  // helper: spawn the worker
     set_scanning(true);
     if (auto lg = log::get(log::Area::Scan)) lg->info("scan '{}' (home '{}')", root, m_home);
 
-    m_worker = std::thread([this, prog = m_progress, home = m_home, root] {
+    m_worker = std::thread([this, prog = m_progress, home = m_home, root, data = data_dir()] {
         const auto t0 = std::chrono::steady_clock::now();
-        scan::Report r = scan::scan(home, root, *prog);
+        std::vector<scan::Seen> mine;   // s015b: your files, for the catalog
+        scan::Report r = scan::scan(home, root, *prog, 0, &mine);
         const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                             std::chrono::steady_clock::now() - t0).count();
         if (auto lg = log::get(log::Area::Scan))
@@ -77,9 +79,32 @@ void Shell::start_scan(const std::string& root) {  // helper: spawn the worker
         if (auto lg = log::get(log::Area::Scan))   // s015a
             for (const auto& pk : r.packages)
                 lg->info("package (kept whole): {} -- {}, {} files", pk.rel, scan::human_bytes(pk.bytes), pk.files);
+        // s015b: the catalog remembers the Look -- only a whole, uncancelled one.
+        core::catalog::Delta cat;
+        if (r.refused.empty() && !r.cancelled) {
+            const auto c0 = std::chrono::steady_clock::now();
+            std::string root_rel = std::filesystem::path(r.root).lexically_relative(r.home).string();
+            if (root_rel == ".") root_rel.clear();
+            std::vector<std::string> not_walked = r.unwalked;
+            not_walked.insert(not_walked.end(), r.skipped.begin(), r.skipped.end());
+            cat = core::catalog::record(data, r.home, root_rel, mine, not_walked,
+                                        static_cast<std::int64_t>(std::time(nullptr)));
+            const auto cms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::steady_clock::now() - c0).count();
+            if (auto lg = log::get(log::Area::Catalog)) {
+                if (!cat.set_aside.empty()) lg->warn("set aside: {}", cat.set_aside);
+                if (cat.ok)
+                    lg->info("look {} '{}': {} files ({} packages), {} new, {} changed, {} read, {} moved, {} gone, "
+                             "{} returned; {} rows; atime {}; {} ms", cat.look, root_rel.empty() ? "~" : root_rel,
+                             cat.files, cat.packages, cat.fresh, cat.changed, cat.read, cat.moved, cat.gone,
+                             cat.returned, cat.rows, cat.atime_mode.empty() ? "?" : cat.atime_mode, cms);
+                else lg->warn("not recorded: {}", cat.error);
+            }
+        }
         {
             std::lock_guard lk(m_report_mx);
             m_report = std::move(r);
+            m_cat = std::move(cat);
         }
         m_scan_finished.emit();
     });
@@ -138,6 +163,7 @@ void Shell::paint_report() {  // helper: headline + one card per kind
     {
         std::lock_guard lk(m_report_mx);
         m_shown = m_report;
+        m_cat_shown = m_cat;
     }
     const scan::Report& r = m_shown;
     if (!r.refused.empty()) {
@@ -167,6 +193,32 @@ void Shell::paint_report() {  // helper: headline + one card per kind
         if (r.skipped.size() > 6) where += ", …";
     }
     where += ".  Nothing was changed.";
+    // s015b: what the catalog learned. Its own file, so "nothing was changed" still holds for yours.
+    const auto& c = m_cat_shown;
+    if (c.ok) {
+        if (c.began) where += "\nCatalog started: " + with_commas(c.files) + " of your files remembered";
+        else {
+            where += "\nCatalog: " + with_commas(c.files) + " of your files";
+            std::vector<std::string> bits;
+            if (c.fresh)    bits.push_back(with_commas(c.fresh) + " new");
+            if (c.changed)  bits.push_back(with_commas(c.changed) + " changed");
+            if (c.read)     bits.push_back(with_commas(c.read) + " opened");
+            if (c.moved)    bits.push_back(with_commas(c.moved) + " moved");
+            if (c.gone)     bits.push_back(with_commas(c.gone) + " gone");
+            if (c.returned) bits.push_back(with_commas(c.returned) + " back");
+            if (bits.empty()) where += " -- nothing new since the last Look";
+            else {
+                where += " -- since the last Look: ";
+                for (std::size_t i = 0; i < bits.size(); ++i) where += (i ? ", " : "") + bits[i];
+            }
+        }
+        where += ".";
+        if (c.atime_mode == "noatime")
+            where += "  Home is mounted noatime: \u201clast opened\u201d can't be known here; Tidy will go by last change.";
+        if (!c.set_aside.empty()) where += "  The old catalog wouldn't open and was set aside: " + c.set_aside + ".";
+    } else if (!c.error.empty()) {
+        where += "\nCatalog not updated: " + c.error + ".";
+    }
     m_res_where.set_text(where);
 
     while (auto* c = m_cards.get_first_child()) m_cards.remove(*c);

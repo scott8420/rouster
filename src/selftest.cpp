@@ -35,6 +35,9 @@
 #include "core/Help.hpp"
 #include "core/About.hpp"
 #include "core/System.hpp"
+#include "core/Catalog.hpp"
+
+#include <sqlite3.h>
 
 #include <algorithm>
 #include <array>
@@ -3376,6 +3379,219 @@ int main(int argc, char** argv) {
         fs::remove_all(home, ec);
     }
 
+    // -- The catalog (s015b): Rouster's memory of your files -------------------
+    {
+        std::cout << "\n-- catalog --\n";
+        namespace ct = core::catalog;
+        const fs::path home = fs::temp_directory_path() / ("rouster_catalog_" + std::to_string(::getpid()));
+        std::error_code ec;
+        fs::remove_all(home, ec);
+        const std::string H = home.string(), D = H + "/.local/share/rouster";
+        const auto when = [&](const std::string& rel, std::int64_t atime, std::int64_t mtime) {
+            struct timespec ts[2] = {{static_cast<time_t>(atime), 0}, {static_cast<time_t>(mtime), 0}};
+            ::utimensat(AT_FDCWD, (home / rel).c_str(), ts, AT_SYMLINK_NOFOLLOW);
+        };
+        const std::int64_t T0 = 1700000000;   // fixed times: the test reads back exactly what it set
+        bool made = put(home, "Documents/a.txt", 3000) && put(home, "Documents/b.odt", 5000) &&
+                    put(home, "Pictures/p.JPG", 7000) && put(home, ".bashrc", 100) &&
+                    put(home, ".mozilla/prefs.js", 100) && put(home, "Develop/proj/.git/HEAD", 40) &&
+                    put(home, "Develop/proj/src/main.cpp", 400) && put(home, "Web/node_modules/x/index.js", 100) &&
+                    put(home, "Documents/.secret-note", 10) && put(home, ".cache/thing/blob", 900) &&
+                    put(home, "Novels/Tapper.scriv/Files/Data/x.rtf", 2000) &&
+                    put(home, "Novels/Tapper.scriv/.hidden", 10);
+        fs::create_hard_link(home / "Documents/a.txt", home / "Documents/a-link.txt", ec);
+        made &= !ec;
+        for (const char* r : {"Documents/a.txt", "Documents/b.odt", "Pictures/p.JPG", "Novels/Tapper.scriv/.hidden"})
+            when(r, T0 + 100, T0);
+        when("Novels/Tapper.scriv/Files/Data/x.rtf", T0 + 500, T0 + 50);
+        check("catalog: fixture made", made);
+
+        // The collector: exactly your files, a package as ONE entry.
+        core::scan::Progress p1, p2;
+        std::vector<core::scan::Seen> mine;
+        struct stat dst0{}, fst0{};
+        when("Documents", T0 + 10, T0 + 20);   // a folder whose atime a plain readdir would bump (relatime: atime <= mtime)
+        ::lstat((home / "Documents").c_str(), &dst0);
+        ::lstat((home / "Documents/b.odt").c_str(), &fst0);
+        const auto rep = core::scan::scan(H, H, p1, 0, &mine);
+        const auto rep0 = core::scan::scan(H, H, p2);
+        std::set<std::string> got;
+        const core::scan::Seen* pk = nullptr;
+        const core::scan::Seen* a = nullptr;
+        for (const auto& s : mine) {
+            got.insert(s.rel);
+            if (s.package) pk = &s;
+            if (s.rel == "Documents/a.txt") a = &s;
+        }
+        const std::set<std::string> want = {"Documents/a.txt", "Documents/a-link.txt", "Documents/b.odt",
+                                            "Pictures/p.JPG", "Novels/Tapper.scriv"};
+        std::string gs;
+        for (const auto& g : got) gs += g + " ";
+        check("catalog/scan: exactly your files -- not hidden, not in a repo or node_modules, not caches; "
+              "both names of a hard link; the package once", got == want && mine.size() == want.size(), gs);
+        check("catalog/scan: the package is one entry, sized whole, its times the newest inside",
+              pk && pk->rel == "Novels/Tapper.scriv" && pk->bytes >= 2000 && pk->changed >= T0 + 50 &&
+              pk->read == T0 + 500 && !rep.packages.empty() && rep.packages.front().newest_read == T0 + 500);
+        check("catalog/scan: a file's times are lstat's (read = atime, changed = mtime), identity kept",
+              a && a->changed == T0 && a->read == T0 + 100 && a->ino != 0 && a->bytes > 0);
+        check("catalog/scan: collecting changes nothing in the report",
+              rep.total_bytes() == rep0.total_bytes() && rep.by_kind[6].files == rep0.by_kind[6].files &&
+              rep.packages.size() == rep0.packages.size() && rep.unwalked.empty());
+        struct stat dst1{}, fst1{};
+        ::lstat((home / "Documents").c_str(), &dst1);
+        ::lstat((home / "Documents/b.odt").c_str(), &fst1);
+        check("catalog/scan: the walk is not a read -- a folder's atime and a file's atime unchanged (O_NOATIME)",
+              dst1.st_atim.tv_sec == dst0.st_atim.tv_sec && fst1.st_atim.tv_sec == fst0.st_atim.tv_sec,
+              std::to_string(dst0.st_atim.tv_sec) + " -> " + std::to_string(dst1.st_atim.tv_sec));
+
+        // Before any Look: no catalog.
+        check("catalog: before the first Look there is none (summary, find, decide all say so)",
+              !ct::summary(D).ok && !ct::find(D, "Documents/a.txt") && !ct::decide(D, "Documents/a.txt", "short", "", T0));
+
+        fs::create_directories(D, ec);   // the app's data folder (the door makes it at start)
+        const std::string before = files_snapshot(home);
+        const std::int64_t N1 = T0 + 86400;
+        const auto d1 = ct::record(D, H, "", mine, {}, N1);
+        check("catalog: the first Look starts it -- 5 files, 1 package, all new", d1.ok && d1.began &&
+              d1.files == 5 && d1.packages == 1 && d1.fresh == 5 && d1.gone == 0 && d1.rows == 5, d1.error);
+        check("catalog: recording changes none of your files", files_snapshot(home) == before);
+        struct stat dbst{};
+        check("catalog: it lives at <data>/catalog.db, a plain file", ::lstat((D + "/catalog.db").c_str(), &dbst) == 0 &&
+              S_ISREG(dbst.st_mode));
+        const auto fa = ct::find(D, "Documents/a.txt");
+        const auto fp = ct::find(D, "Pictures/p.JPG");
+        const auto fk = ct::find(D, "Novels/Tapper.scriv");
+        check("catalog: a row -- first seen = the Look, times, extension lowercased, birth time kept where known",
+              fa && fa->first_seen == N1 && fa->changed == T0 && fa->read == T0 + 100 && fa->ext == "txt" && !fa->package &&
+              fa->gone == 0 && fp && fp->ext == "jpg" && fk && fk->package && fk->ext == "scriv");
+
+        // Look 2: nothing happened.
+        const std::int64_t N2 = N1 + 3600;
+        auto rescan = [&] { core::scan::Progress q; mine.clear(); core::scan::scan(H, H, q, 0, &mine); };
+        rescan();
+        const auto d2 = ct::record(D, H, "", mine, {}, N2);
+        check("catalog: a second Look with nothing different -- nothing new, first seen stays",
+              d2.ok && !d2.began && d2.fresh == 0 && d2.changed == 0 && d2.read == 0 && d2.moved == 0 && d2.gone == 0 &&
+              ct::find(D, "Documents/a.txt")->first_seen == N1);
+
+        // Look 3: a.txt edited; b.odt opened (atime only).
+        put(home, "Documents/a.txt", 3500);
+        when("Documents/a.txt", T0 + 2000, T0 + 2000);
+        when("Documents/b.odt", T0 + 3000, T0);
+        rescan();
+        const auto d3 = ct::record(D, H, "", mine, {}, N2 + 60);
+        const auto ha = ct::history(D, "Documents/a.txt");
+        const auto hb = ct::history(D, "Documents/b.odt");
+        check("catalog: an edit is 'changed', an open is 'opened' -- each one history row more",
+              d3.ok && d3.changed >= 1 && d3.read == 1 && ha.size() == 2 && ha.back().changed == T0 + 2000 &&
+              hb.size() == 2 && hb.back().read == T0 + 3000 && hb.back().changed == T0,
+              std::to_string(d3.changed) + " changed, " + std::to_string(d3.read) + " read");
+
+        // A decision, then the file moves: the same file, its past follows it.
+        std::string why;
+        check("catalog: a decision is recorded", ct::decide(D, "Pictures/p.JPG", "keep-here", "my cover art", N2, &why), why);
+        fs::create_directories(home / "Pictures/2026", ec);
+        fs::rename(home / "Pictures/p.JPG", home / "Pictures/2026/p.JPG", ec);
+        rescan();
+        const std::int64_t N4 = N2 + 7200;
+        const auto d4 = ct::record(D, H, "", mine, {}, N4);
+        const auto moved = ct::find(D, "Pictures/2026/p.JPG");
+        const auto mvs = ct::moves(D, "Pictures/2026/p.JPG");
+        const auto decs = ct::decisions(D);
+        check("catalog: a rename is a MOVE -- not new + gone; first seen and history follow",
+              d4.ok && d4.moved == 1 && d4.fresh == 0 && d4.gone == 0 && moved && moved->first_seen == N1 &&
+              !ct::find(D, "Pictures/p.JPG") && ct::history(D, "Pictures/2026/p.JPG").size() == 1,
+              std::to_string(d4.moved) + " moved, " + std::to_string(d4.fresh) + " new, " + std::to_string(d4.gone) + " gone");
+        check("catalog: the move is remembered (from -> to), and the decision went with it",
+              mvs.size() == 1 && mvs[0].from == "Pictures/p.JPG" && mvs[0].to == "Pictures/2026/p.JPG" && mvs[0].at == N4 &&
+              decs.size() == 1 && decs[0].rel == "Pictures/2026/p.JPG" && decs[0].verdict == "keep-here" &&
+              decs[0].detail == "my cover art");
+
+        // Gone, and back.
+        fs::rename(home / "Documents/b.odt", home / "b.odt.away", ec);   // out of the catalog's sight: hidden? no -- a new name
+        fs::remove(home / "b.odt.away", ec);
+        rescan();
+        const auto d5 = ct::record(D, H, "", mine, {}, N4 + 60);
+        const auto gb = ct::find(D, "Documents/b.odt");
+        const auto s5 = ct::summary(D);
+        check("catalog: a file no longer there is 'gone' -- its row and history kept, marked when",
+              d5.ok && d5.gone == 1 && gb && gb->gone == N4 + 60 && ct::history(D, "Documents/b.odt").size() == 2 &&
+              s5.ok && s5.gone == 1 && s5.files == 4 && s5.packages == 1 && s5.looks == 5 && s5.began == N1 &&
+              s5.decisions == 1);
+        put(home, "Documents/b.odt", 5000);
+        rescan();
+        const auto d6 = ct::record(D, H, "", mine, {}, N4 + 120);
+        check("catalog: back again -> 'returned', first seen as before",
+              d6.ok && d6.returned == 1 && d6.fresh == 0 && ct::find(D, "Documents/b.odt")->gone == 0 &&
+              ct::find(D, "Documents/b.odt")->first_seen == N1);
+
+        // Scope: a Look at one folder can't miss what's outside it; a folder nobody could read misses nothing.
+        std::vector<core::scan::Seen> docs;
+        for (const auto& s : mine) if (s.rel.rfind("Documents/", 0) == 0) docs.push_back(s);
+        const auto d7 = ct::record(D, H, "Documents", docs, {}, N4 + 180);
+        std::vector<core::scan::Seen> no_pics;
+        for (const auto& s : mine) if (s.rel.rfind("Pictures/", 0) != 0) no_pics.push_back(s);
+        const auto d8 = ct::record(D, H, "", no_pics, {"Pictures/2026"}, N4 + 240);
+        check("catalog: a Look at ~/Documents misses nothing outside it; an unreadable folder misses nothing inside it",
+              d7.ok && d7.gone == 0 && d7.files == docs.size() && d8.ok && d8.gone == 0 &&
+              ct::find(D, "Pictures/2026/p.JPG")->gone == 0);
+
+        // Decisions are held to a shape.
+        check("catalog: verdicts -- short lowercase words only",
+              ct::valid_verdict("keep-here") && ct::valid_verdict("short") && !ct::valid_verdict("") &&
+              !ct::valid_verdict("Short") && !ct::valid_verdict("drop table") && !ct::valid_verdict("x;") &&
+              !ct::valid_verdict("-x") && !ct::valid_verdict(std::string(33, 'a')));
+        check("catalog: decide refuses a bad verdict, an absolute path, a '..' path",
+              !ct::decide(D, "Documents/a.txt", "DROP", "", N4) && !ct::decide(D, "/etc/passwd", "short", "", N4) &&
+              !ct::decide(D, "Documents/../../x", "short", "", N4) && ct::decisions(D).size() == 1);
+        check("catalog: a path with a quote or a percent is just a name (bound, never spliced)",
+              ct::decide(D, "Documents/it's 100%.txt", "short", "x'); DROP TABLE files; --", N4) &&
+              ct::summary(D).ok && ct::summary(D).files == 5 && ct::decisions(D).front().rel == "Documents/it's 100%.txt");
+
+        // Rebuildable: a catalog that won't open is set aside (never deleted) and a fresh one begins.
+        const auto bytes_of = [](const std::string& f) {
+            std::ifstream in(f, std::ios::binary);
+            return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        };
+        { std::ofstream o(D + "/catalog.db", std::ios::binary | std::ios::trunc); o << "this is not a database at all, not even close......."; }
+        const auto d9 = ct::record(D, H, "", mine, {}, N4 + 300);
+        bool aside = false;
+        for (const auto& e : fs::directory_iterator(D))
+            if (e.path().filename().string().rfind("catalog.db.broken-", 0) == 0 &&
+                bytes_of(e.path().string()).rfind("this is not a database", 0) == 0) aside = true;
+        check("catalog: a broken catalog is set aside (kept, renamed) and a fresh one begins",
+              d9.ok && d9.began && !d9.set_aside.empty() && aside && d9.fresh == mine.size() &&
+              ct::summary(D).looks == 1, d9.set_aside);
+
+        // A database that isn't Rouster's: set aside too. One from a newer Rouster: left alone.
+        {
+            sqlite3* db = nullptr;
+            fs::remove(D + "/catalog.db", ec);
+            sqlite3_open_v2((D + "/catalog.db").c_str(), &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr);
+            sqlite3_exec(db, "CREATE TABLE notes(x); INSERT INTO notes VALUES ('someone else''s');", nullptr, nullptr, nullptr);
+            sqlite3_close(db);
+        }
+        const auto d10 = ct::record(D, H, "", mine, {}, N4 + 360);
+        check("catalog: someone else's database at that name is set aside, not used",
+              d10.ok && d10.began && d10.set_aside.find("not Rouster's") != std::string::npos, d10.set_aside);
+        {
+            sqlite3* db = nullptr;
+            sqlite3_open_v2((D + "/catalog.db").c_str(), &db, SQLITE_OPEN_READWRITE, nullptr);
+            sqlite3_exec(db, "PRAGMA user_version = 99;", nullptr, nullptr, nullptr);
+            sqlite3_close(db);
+        }
+        const std::string newer = bytes_of(D + "/catalog.db");
+        const auto d11 = ct::record(D, H, "", mine, {}, N4 + 420);
+        check("catalog: a catalog from a newer Rouster is left alone, byte for byte, and said",
+              !d11.ok && d11.error.find("newer") != std::string::npos && bytes_of(D + "/catalog.db") == newer &&
+              !ct::summary(D).ok, d11.error);
+
+        check("catalog: atime_mode reads the mount ('relatime', 'noatime' or 'strictatime')",
+              !ct::atime_mode(H).empty() && !ct::atime_mode("/").empty(), ct::atime_mode(H));
+        check("catalog: no data folder -> refused, nothing written",
+              !ct::record("", H, "", mine, {}, N4).ok && !ct::record("relative/dir", H, "", mine, {}, N4).ok);
+        fs::remove_all(home, ec);
+    }
     // -- The source gate: no write call outside the door (s004) --------------
     // RULES: "every write goes through it, and the selftest fails on a write
     // that does not." Allowlisted, each for a reason:
@@ -3392,19 +3608,21 @@ int main(int argc, char** argv) {
     //                    rename and touch no disk (goes when a real model
     //                    adopts Undo.hpp);
     //   Registry.*    -- the widget address book; its remove() is a map erase.
+    //   Catalog.cpp   -- s015b: Rouster's own catalog.db (SQLite) in its data dir; sets a broken
+    //                    one aside by rename. `sqlite3_open` is a gate token: only it opens a database.
     {
         std::cout << "\n-- source gate --\n";
         const fs::path root = ROUSTER_SOURCE_DIR;
         const std::set<std::string> allowed = {"src/core/Door.cpp", "src/core/Recents.cpp", "src/selftest.cpp",
             "src/core/Stones.cpp", "include/core/Stones.hpp", "src/core/Known.cpp", "src/core/Settings.cpp", "src/core/Pipe.cpp", "src/Registry.cpp", "include/Registry.hpp",
-            "src/helper/main.cpp"};
+            "src/helper/main.cpp", "src/core/Catalog.cpp"};
         const std::vector<std::string> calls = {"rename", "renameat", "renameat2", "unlink", "unlinkat", "rmdir",
             "remove", "remove_all", "copy_file", "copy", "create_directory", "create_directories", "create_symlink",
             "create_hard_link", "resize_file", "truncate", "write", "fopen", "mkdir", "symlink", "link", "chmod",
             "permissions", "last_write_time"};
         const std::vector<std::string> tokens = {"ofstream", "O_WRONLY", "O_RDWR", "O_CREAT", "std::fstream",
                                                  "FIDEDUPERANGE", "FICLONE",
-                                                 "/usr/bin/pkexec", "BTRFS_IOC_SNAP"};
+                                                 "/usr/bin/pkexec", "BTRFS_IOC_SNAP", "sqlite3_open"};
         // One line -> the write calls in it. Comments are dropped; a member
         // call (x.remove(...)) or another namespace's function (registry::
         // remove) is not a filesystem write; ::, std::, fs:: and bare are.
@@ -3516,6 +3734,27 @@ int main(int argc, char** argv) {
             if (e.is_regular_file() && !vendored.count(e.path().filename().string())) missing.push_back(e.path().filename().string());
         check("about: every file in third_party/ is credited under Built with", missing.empty(),
               missing.empty() ? std::to_string(vendored.size()) + " vendored" : missing.front());
+        // s015b: every library CMake asks pkg-config for is credited too (sqlite3 came with the catalog).
+        std::vector<std::string> uncredited;
+        {
+            const std::map<std::string, std::string> credit_of = {{"gtkmm-4.0", "gtkmm"}, {"sqlite3", "SQLite"}};
+            std::ifstream cm(fs::path(ROUSTER_SOURCE_DIR) / "CMakeLists.txt");
+            std::string line;
+            while (std::getline(cm, line)) {
+                const auto at = line.find("pkg_check_modules(");
+                if (at == std::string::npos || line.find('#') < at) continue;
+                const std::string mod = line.substr(line.find_last_of(' ') + 1, line.find(')') - line.find_last_of(' ') - 1);
+                const auto c = credit_of.find(mod);
+                bool found = false;
+                if (c != credit_of.end())
+                    for (const auto& g : ab::credits())
+                        if (g.heading == "Built with")
+                            for (const auto& it : g.items) if (it.name.find(c->second) != std::string::npos) found = true;
+                if (!found) uncredited.push_back(mod);
+            }
+        }
+        check("about: every pkg-config library in CMakeLists is credited under Built with", uncredited.empty(),
+              uncredited.empty() ? "" : uncredited.front() + " (credit it, and map it here)");
         check("about: no empty group or credit; the tagline and description say something",
               full && std::string(ab::tagline()).size() > 20 && std::string(ab::description()).size() > 40);
     }

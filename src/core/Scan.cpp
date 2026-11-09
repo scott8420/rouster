@@ -11,6 +11,8 @@
 #include <thread>
 #include <utility>
 
+#include <cerrno>
+
 #include <dirent.h>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -151,13 +153,19 @@ struct Task {
     std::string item;       // the Item its direct files are charged to ("" = none)
     bool        expand;     // its children become separate items
     std::string pkg;        // s015a: the package it is (or is inside), "" = none
+    bool        cat = true; // s015b: its files go in the catalog (your files, not hidden / a repo / node_modules)
 };
+
+struct Newest { std::int64_t change = 0, read = 0; };
 
 struct Local {               // one worker's tallies, merged at the end
     std::array<Bucket, kKindCount>   by_kind{};
     std::map<std::string, Item>      items;
     std::map<std::string, Item>      pkgs;      // s015a: each package, whole
+    std::map<std::string, Newest>    pkg_new;   // s015b: each package's newest change / read
+    std::vector<scan::Seen>          mine;      // s015b: your files, for the catalog
     std::vector<std::string>         skipped;
+    std::vector<std::string>         unwalked;
     std::uint64_t errors = 0, dirs = 0;
 
     void charge(Kind k, const std::string& item, std::uint64_t bytes, bool is_file) {
@@ -175,7 +183,29 @@ struct Local {               // one worker's tallies, merged at the end
         it->second.bytes += bytes;
         if (is_file) ++it->second.files;
     }
+    void newest_pkg(const std::string& p, std::int64_t change, std::int64_t read) {
+        if (p.empty()) return;
+        auto& n = pkg_new[p];
+        n.change = std::max(n.change, change);
+        n.read   = std::max(n.read, read);
+    }
 };
+
+std::int64_t birth(int dfd, const char* name) {   // statx btime; 0 = unknown
+    struct statx sx{};
+    if (::statx(dfd, name, AT_SYMLINK_NOFOLLOW | AT_STATX_DONT_SYNC, STATX_BTIME, &sx) == 0 &&
+        (sx.stx_mask & STATX_BTIME))
+        return static_cast<std::int64_t>(sx.stx_btime.tv_sec);
+    return 0;
+}
+
+// Opened for reading its entries -- O_NOATIME where the kernel allows it
+// (files you own), so Rouster's own look doesn't bump the folder's atime.
+int open_dir(const char* abs) {
+    int fd = ::open(abs, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC | O_NOATIME);
+    if (fd < 0 && errno == EPERM) fd = ::open(abs, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    return fd;
+}
 
 std::string join(const std::string& rel, const char* name) {
     return rel.empty() ? std::string(name) : rel + "/" + name;
@@ -192,8 +222,11 @@ bool has_marker(int dfd, const char* name) {
 
 Task child_task(const Task& parent, const std::string& rel, bool build) {
     const DirClass dc = classify_dir(rel, parent.kind, build);
-    Task t{rel, dc.kind, parent.item, false, parent.pkg};
+    Task t{rel, dc.kind, parent.item, false, parent.pkg, parent.cat};
     if (t.pkg.empty() && dc.kind == Kind::Other && pkg::is_package_name(basename_of(rel))) t.pkg = rel;
+    const std::string leaf = basename_of(rel);
+    if (dc.kind != Kind::Other || !t.pkg.empty() || leaf.empty() || leaf[0] == '.' || leaf == "node_modules")
+        t.cat = false;
     if (dc.rooted)          { t.item = rel; t.expand = dc.expand; }
     else if (parent.expand) { t.item = rel; }
     if (t.kind == Kind::Other) t.item.clear();
@@ -202,7 +235,8 @@ Task child_task(const Task& parent, const std::string& rel, bool build) {
 
 class Walker {
 public:
-    Walker(std::string home, dev_t dev, Progress& p) : m_home(std::move(home)), m_dev(dev), m_p(p) {}
+    Walker(std::string home, dev_t dev, Progress& p, bool collect)
+        : m_home(std::move(home)), m_dev(dev), m_p(p), m_collect(collect) {}
 
     void push(Task t) {
         std::lock_guard lk(m_mx);
@@ -235,12 +269,17 @@ private:
         return m_links.emplace(d, i).second;
     }
 
-    void visit(const Task& t, Local& out) {
-        const std::string abs = t.rel.empty() ? m_home : m_home + "/" + t.rel;
-        const int dfd = ::open(abs.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-        if (dfd < 0) { ++out.errors; return; }
+    void visit(const Task& t0, Local& out) {
+        const std::string abs = t0.rel.empty() ? m_home : m_home + "/" + t0.rel;
+        const int dfd = open_dir(abs.c_str());
+        if (dfd < 0) { ++out.errors; out.unwalked.push_back(t0.rel); return; }
         DIR* d = ::fdopendir(dfd);
-        if (!d) { ::close(dfd); ++out.errors; return; }
+        if (!d) { ::close(dfd); ++out.errors; out.unwalked.push_back(t0.rel); return; }
+        Task t = t0;
+        if (t.cat) {   // a git repository is Dev projects' -- none of it goes in the catalog
+            struct stat g{};
+            if (::fstatat(dfd, ".git", &g, AT_SYMLINK_NOFOLLOW) == 0) t.cat = false;
+        }
         ++out.dirs;
         m_p.dirs.fetch_add(1, std::memory_order_relaxed);
 
@@ -259,12 +298,20 @@ private:
                 Task c = child_task(t, rel, build);
                 out.charge(c.kind, c.item, bytes, false);   // the directory's own blocks
                 out.charge_pkg(c.pkg, bytes, false);
+                out.newest_pkg(c.pkg, st.st_mtim.tv_sec, 0);   // a folder's atime is our own readdir: never used
+                if (m_collect && t.cat && t.pkg.empty() && c.pkg == rel)   // a package: ONE entry, filled in after
+                    out.mine.push_back({rel, 0, 0, 0, birth(dfd, n), static_cast<std::uint64_t>(st.st_dev),
+                                        static_cast<std::uint64_t>(st.st_ino), true});
                 m_p.bytes.fetch_add(bytes, std::memory_order_relaxed);
                 push(std::move(c));
                 continue;
             }
-            if (st.st_nlink > 1 && !first_link(st.st_dev, st.st_ino)) continue;
             const Kind k = classify_file(rel, t.kind);
+            out.newest_pkg(t.pkg, st.st_mtim.tv_sec, st.st_atim.tv_sec);
+            if (m_collect && t.cat && k == Kind::Other && S_ISREG(st.st_mode) && n[0] != '.')
+                out.mine.push_back({rel, bytes, st.st_mtim.tv_sec, st.st_atim.tv_sec, birth(dfd, n),
+                                    static_cast<std::uint64_t>(st.st_dev), static_cast<std::uint64_t>(st.st_ino), false});
+            if (st.st_nlink > 1 && !first_link(st.st_dev, st.st_ino)) continue;
             out.charge(k, k == t.kind ? t.item : rel, bytes, true);
             out.charge_pkg(t.pkg, bytes, true);
             m_p.files.fetch_add(1, std::memory_order_relaxed);
@@ -276,6 +323,7 @@ private:
     std::string m_home;
     dev_t       m_dev;
     Progress&   m_p;
+    bool        m_collect;
 
     std::mutex              m_mx;
     std::condition_variable m_cv;
@@ -289,8 +337,13 @@ private:
 // The root's own task: classify each component from home down, as a full scan
 // would have on its way there.
 Task root_task(const std::string& home, const std::string& rel) {
-    Task t{"", Kind::Other, "", false, ""};
+    Task t{"", Kind::Other, "", false, "", true};
     if (rel.empty()) return t;
+    const auto repo = [](const std::string& dir) {
+        struct stat g{};
+        return ::lstat((dir + "/.git").c_str(), &g) == 0;
+    };
+    if (repo(home)) t.cat = false;
     std::string cur;
     std::size_t pos = 0;
     while (pos <= rel.size()) {
@@ -304,6 +357,7 @@ Task root_task(const std::string& home, const std::string& rel) {
         }
         cur = cur.empty() ? part : cur + "/" + part;
         t = child_task(t, cur, build);
+        if (t.cat && repo(home + "/" + cur)) t.cat = false;
         if (s == std::string::npos) break;
         pos = s + 1;
     }
@@ -312,8 +366,13 @@ Task root_task(const std::string& home, const std::string& rel) {
 
 }  // namespace
 
+Report scan(const std::string& home, const std::string& root, Progress& p, unsigned threads) {
+    return scan(home, root, p, threads, nullptr);
+}
+
 Report scan(const std::string& home_in, const std::string& root_in,
-            Progress& p, unsigned threads) {
+            Progress& p, unsigned threads, std::vector<Seen>* mine) {
+    if (mine) mine->clear();
     namespace fs = std::filesystem;
     Report r;
     std::error_code ec;
@@ -337,7 +396,7 @@ Report scan(const std::string& home_in, const std::string& root_in,
     if (::stat(r.root.c_str(), &st) != 0) return refuse("cannot read " + r.root);
 
     if (threads == 0) threads = std::min(8u, std::max(1u, std::thread::hardware_concurrency()));
-    Walker w(r.home, st.st_dev, p);
+    Walker w(r.home, st.st_dev, p, mine != nullptr);
     Task first = root_task(r.home, rel);
     Local root_local;
     root_local.charge(first.kind, first.item, static_cast<std::uint64_t>(st.st_blocks) * 512u, false);
@@ -351,7 +410,15 @@ Report scan(const std::string& home_in, const std::string& root_in,
     locals.push_back(std::move(root_local));
 
     std::map<std::string, Item> items, pkgs;
+    std::map<std::string, Newest> pkg_new;
     for (auto& l : locals) {
+        for (auto& [key, nw] : l.pkg_new) {
+            auto& d = pkg_new[key];
+            d.change = std::max(d.change, nw.change);
+            d.read   = std::max(d.read, nw.read);
+        }
+        if (mine) for (auto& sn : l.mine) mine->push_back(std::move(sn));
+        r.unwalked.insert(r.unwalked.end(), l.unwalked.begin(), l.unwalked.end());
         for (auto& [key, it] : l.pkgs) {
             auto [dst, fresh] = pkgs.try_emplace(key, Item{key, Kind::Other, 0, 0});
             dst->second.bytes += it.bytes;
@@ -374,7 +441,27 @@ Report scan(const std::string& home_in, const std::string& root_in,
     std::sort(r.items.begin(), r.items.end(), [](const Item& a, const Item& b) {
         return a.bytes != b.bytes ? a.bytes > b.bytes : a.rel < b.rel;
     });
-    for (auto& [key, it] : pkgs) r.packages.push_back(std::move(it));
+    for (auto& [key, it] : pkgs) {
+        if (auto n = pkg_new.find(key); n != pkg_new.end()) {
+            it.newest_change = n->second.change;
+            it.newest_read   = n->second.read;
+        }
+        r.packages.push_back(std::move(it));
+    }
+    if (mine) {
+        std::map<std::string, const Item*> by;
+        for (const auto& it : r.packages) by[it.rel] = &it;
+        for (auto& sn : *mine) {
+            if (!sn.package) continue;
+            if (auto b = by.find(sn.rel); b != by.end()) {
+                sn.bytes   = b->second->bytes;
+                sn.changed = b->second->newest_change;
+                sn.read    = b->second->newest_read ? b->second->newest_read : b->second->newest_change;
+            }
+        }
+        std::sort(mine->begin(), mine->end(), [](const Seen& a, const Seen& b) { return a.rel < b.rel; });
+    }
+    std::sort(r.unwalked.begin(), r.unwalked.end());
     std::sort(r.packages.begin(), r.packages.end(), [](const Item& a, const Item& b) {
         return a.bytes != b.bytes ? a.bytes > b.bytes : a.rel < b.rel;
     });

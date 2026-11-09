@@ -297,6 +297,9 @@ std::vector<Topic> build() {
         {
             {"", {
                 "- ~/.local/share/rouster -- the Activity record (manifest.jsonl), saved settings for Undo, rules, known names.",
+                "- ~/.local/share/rouster/catalog.db -- the catalog: Rouster's memory of your files (names, sizes, "
+                "when each was first seen, last opened, last changed, moved, gone). Never their contents. "
+                "Delete it and the next Smart Scan of home starts it again -- only the history and your decisions are lost.",
                 "- ~/.config/rouster/templates -- project templates.",
                 "- ~/Archive -- archived files and profile backups.",
                 "- ~/.local/share/Trash -- what Rouster (and you) sent to the Trash.",

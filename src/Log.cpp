@@ -8,7 +8,7 @@
 namespace rouster::log {
 
 namespace {
-constexpr int kAreaCount = 16;
+constexpr int kAreaCount = 17;
 
 const char* area_name(Area a) {
     switch (a) {
@@ -28,6 +28,7 @@ const char* area_name(Area a) {
         case Area::Rules:    return "rules";
         case Area::Profile:  return "profile";
         case Area::System:   return "system";
+        case Area::Catalog:  return "catalog";
     }
     return "?";
 }
