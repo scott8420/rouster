@@ -1,4 +1,5 @@
 #include "core/Dups.hpp"
+#include "core/Package.hpp"
 #include "core/Scan.hpp"   // classify_dir: Protected / Regenerable are the scan's policy
 
 #define XXH_INLINE_ALL
@@ -259,6 +260,10 @@ Found find(const std::string& home_in, const std::string& root_in, Progress& pro
             }
         }
         if (k == scan::Kind::Protected) { out.refused = "protected (never touched): ~/" + r.rel; return done(); }
+        if (const auto p = pkg::package_of(r.rel, true); !p.empty()) {
+            out.refused = "a package is kept whole, never looked inside: ~/" + p;
+            return done();
+        }
         r.kind = k;
         r.dev = rs.st_dev; r.ino = rs.st_ino; r.mtime_ns = mt(rs);
         D.push_back(r);
@@ -289,6 +294,11 @@ Found find(const std::string& home_in, const std::string& root_in, Progress& pro
             if (::lstat(abs.c_str(), &st) != 0) { ++out.errors; D[di].clean = false; continue; }
             if (S_ISDIR(st.st_mode)) {
                 if (st.st_dev != rs.st_dev || n == "node_modules") { D[di].clean = false; continue; }
+                if (pkg::is_package_name(n)) {   // s015a: kept whole -- never entered, never paired
+                    out.packages.push_back(rel);
+                    D[di].clean = false;
+                    continue;
+                }
                 const scan::Kind k = scan::classify_dir(rel, D[di].kind, looks_like_build(abs)).kind;
                 if (k == scan::Kind::Protected || k == scan::Kind::Regenerable || k == scan::Kind::Trash) {
                     D[di].clean = false;

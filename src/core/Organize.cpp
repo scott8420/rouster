@@ -1,4 +1,5 @@
 #include "core/Organize.hpp"
+#include "core/Package.hpp"
 
 #include "json.hpp"
 
@@ -479,11 +480,20 @@ std::vector<Incoming> propose(const std::string& home, const Project& p, const s
         in.ino = st.st_ino;
         in.mtime_ns = static_cast<std::int64_t>(st.st_mtim.tv_sec) * 1'000'000'000 + st.st_mtim.tv_nsec;
         const auto no = [&](std::string why) { in.note = std::move(why); in.checked = false; out.push_back(in); };
-        if (S_ISDIR(st.st_mode)) { no("a folder -- only files are filed"); continue; }
+        if (S_ISDIR(st.st_mode)) {
+            no(pkg::is_package_name(fs::path(in.from).filename().string())
+                   ? "a package -- kept whole; only files are filed"
+                   : "a folder -- only files are filed");
+            continue;
+        }
         if (!S_ISREG(st.st_mode)) { no("not a plain file"); continue; }
         if (in.from.rfind(home + "/", 0) != 0) { no("outside your home folder -- Rouster moves only inside it"); continue; }
         const std::string name = fs::path(in.from).filename().string();
         if (!name.empty() && name[0] == '.') { no("a hidden file"); continue; }
+        if (const auto pk = pkg::enclosing(in.from.substr(home.size() + 1)); !pk.empty()) {   // s015a
+            no("inside a package (~/" + pk + ") -- kept whole, never split");
+            continue;
+        }
         const std::string ext = ext_of(name);
         const std::string folder = route(p, ext);
         const std::string dir = folder.empty() ? p.path : p.path + "/" + folder;

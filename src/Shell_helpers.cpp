@@ -74,6 +74,9 @@ void Shell::start_scan(const std::string& root) {  // helper: spawn the worker
             lg->info("done '{}': {} files, {} dirs, {} in {} ms{}{}", root, prog->files.load(),
                      r.dirs, scan::human_bytes(r.total_bytes()), ms,
                      r.cancelled ? " (cancelled)" : "", r.refused.empty() ? "" : " REFUSED: " + r.refused);
+        if (auto lg = log::get(log::Area::Scan))   // s015a
+            for (const auto& pk : r.packages)
+                lg->info("package (kept whole): {} -- {}, {} files", pk.rel, scan::human_bytes(pk.bytes), pk.files);
         {
             std::lock_guard lk(m_report_mx);
             m_report = std::move(r);
@@ -155,6 +158,9 @@ void Shell::paint_report() {  // helper: headline + one card per kind
                         with_commas(files) + " files";
     if (r.cancelled) where += " · stopped early, partial";
     if (r.errors) where += " · " + with_commas(r.errors) + " unreadable";
+    if (!r.packages.empty())
+        where += " · " + with_commas(r.packages.size()) + (r.packages.size() == 1 ? " package" : " packages") +
+                 " kept whole";
     if (!r.skipped.empty()) {
         where += " · not entered (other filesystems): ";
         for (std::size_t i = 0; i < r.skipped.size() && i < 6; ++i) where += (i ? ", ~/" : "~/") + r.skipped[i];
@@ -223,8 +229,42 @@ void Shell::paint_detail() {  // helper: the selected card's biggest folders
         line->append(*path);
         m_detail.append(*line);
     }
-    if (k == scan::Kind::Other)
+    if (k == scan::Kind::Other) {
         m_detail.append(*text("Your own files are totalled, not listed -- they are yours to organize.", "dim"));
+        // s015a: Mac packages, each one thing -- never looked inside or split.
+        if (!m_shown.packages.empty()) {
+            std::uint64_t pb = 0;
+            for (const auto& pk : m_shown.packages) pb += pk.bytes;
+            auto ph = text("Packages, kept whole · " + with_commas(m_shown.packages.size()) + " · " +
+                               scan::human_bytes(pb), "card-title");
+            ph->set_margin_top(10);
+            m_detail.append(*ph);
+            auto pw = text("Scrivener projects and other Mac packages are folders here, but each is one thing to "
+                           "Rouster: never looked inside, never split, never swept or paired -- only ever moved whole.",
+                           "dim");
+            pw->set_wrap(true);
+            pw->set_margin_bottom(6);
+            m_detail.append(*pw);
+            std::size_t pshown = 0;
+            for (const auto& pk : m_shown.packages) {
+                if (pshown++ == kTop) {
+                    m_detail.append(*text("… and " + with_commas(m_shown.packages.size() - kTop) + " more", "dim"));
+                    break;
+                }
+                auto line = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 14);
+                auto sz = text(scan::human_bytes(pk.bytes), "detail-size", 1.0f);
+                sz->set_width_chars(9);
+                auto path = text("~/" + pk.rel, "detail-path");
+                path->set_hexpand(true);
+                path->set_ellipsize(Pango::EllipsizeMode::MIDDLE);
+                path->set_tooltip_text(m_shown.home + "/" + pk.rel + "  —  one package, " + with_commas(pk.files) +
+                                       " files inside");
+                line->append(*sz);
+                line->append(*path);
+                m_detail.append(*line);
+            }
+        }
+    }
     else if (shown == 0)
         m_detail.append(*text("Nothing of this kind here.", "dim"));
     if (more)
@@ -479,6 +519,13 @@ void Shell::paint_sweep() {  // helper: groups, rows with checks, the Trash line
     std::string foot;
     if (m_sw_shown.cancelled) foot += "Stopped early -- the list is partial. ";
     if (m_sw_shown.errors) foot += with_commas(m_sw_shown.errors) + " folders could not be read. ";
+    if (const auto& kw = m_sw_shown.kept_whole; !kw.empty()) {   // s015a
+        foot += with_commas(kw.size()) + (kw.size() == 1 ? " package" : " packages") +
+                " kept whole -- never swept, and no folder holding one is offered: ";
+        for (std::size_t i = 0; i < kw.size() && i < 4; ++i) foot += (i ? ", ~/" : "~/") + kw[i];
+        if (kw.size() > 4) foot += ", …";
+        foot += ". ";
+    }
     if (!foot.empty()) m_sw_list.append(*text(foot, "dim"));
     sweep_gate();
 }
@@ -724,6 +771,13 @@ void Shell::paint_dups() {  // helper: mode switch, one card per group, rows wit
         foot += with_commas(m_du_shown.groups.size() - kDupsShown) + " smaller groups aren't shown, and stay unchecked. ";
     if (m_du_shown.cancelled) foot += "Stopped early -- the list is partial. ";
     if (m_du_shown.errors) foot += with_commas(m_du_shown.errors) + " things could not be read. ";
+    if (const auto& pk = m_du_shown.packages; !pk.empty()) {   // s015a
+        foot += with_commas(pk.size()) + (pk.size() == 1 ? " package" : " packages") +
+                " kept whole -- never looked inside or paired: ";
+        for (std::size_t i = 0; i < pk.size() && i < 4; ++i) foot += (i ? ", ~/" : "~/") + pk[i];
+        if (pk.size() > 4) foot += ", …";
+        foot += ". ";
+    }
     auto f = text(foot, "dim");
     f->set_wrap(true);
     m_du_list.append(*f);
@@ -884,6 +938,7 @@ void Shell::paint_archive() {  // helper: view switch, cards per top folder / th
                 path->set_tooltip_text(m_home + "/" + it.rel + "\n-> " + m_home + "/" + ar::destination(it.rel, it.year) +
                                        (it.folder ? "\n" + with_commas(it.files) + " files, all untouched since " + month(it.newest) : ""));
                 row->append(*path);
+                if (it.package) row->append(*text("package · moved whole", "dim", 1.0f));   // s015a
                 if (it.folder) row->append(*text(with_commas(it.files) + " files", "dim", 1.0f));
                 row->append(*text("last changed " + month(it.newest), "dim", 1.0f));
                 card->append(*row);
@@ -904,6 +959,10 @@ void Shell::paint_archive() {  // helper: view switch, cards per top folder / th
             foot += with_commas(items.size() - m_ar_painted) + " more items aren't shown, and stay unchecked. ";
         if (m_ar_shown.cancelled) foot += "Stopped early -- the list is partial. ";
         if (m_ar_shown.errors) foot += with_commas(m_ar_shown.errors) + " things could not be read. ";
+        if (m_ar_shown.packages)   // s015a
+            foot += with_commas(m_ar_shown.packages) + (m_ar_shown.packages == 1 ? " package" : " packages") +
+                    " (Scrivener projects and the like) kept whole: offered only when all of it is untouched, "
+                    "and then moved as one. ";
         auto f = text(foot, "dim");
         f->set_wrap(true);
         m_ar_list.append(*f);

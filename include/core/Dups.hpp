@@ -13,7 +13,7 @@
 //
 // Detect: size -> head/tail hash -> full hash (xxHash XXH3-128, vendored).
 //   1. walk home (one filesystem, no symlinks, no hidden entries, nothing
-//      Protected, no build trees); hard links are one file, not duplicates;
+//      Protected, no build trees, no Mac packages -- s015a); hard links are one file, not duplicates;
 //   2. files of the same size are candidates; 3. the first and last kEdge
 //      bytes are hashed; 4. what still matches is hashed whole.
 // Folders: a folder is a copy of another when every entry matches by name and
@@ -61,6 +61,7 @@ struct Found {
     std::uint64_t files = 0;        // files looked at
     std::uint64_t hashed = 0;       // bytes read to hash
     std::uint64_t errors = 0;
+    std::vector<std::string> packages;   // s015a: Mac packages met, never entered or paired (a folder holding one isn't a folder copy)
     bool          reflink = false;  // home's filesystem can share blocks (btrfs) -> Share is the default
     bool          cancelled = false;
     std::string   refused;

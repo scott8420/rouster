@@ -26,6 +26,7 @@
 #include "core/Known.hpp"
 #include "core/Dups.hpp"
 #include "core/Archive.hpp"
+#include "core/Package.hpp"
 #include "core/Organize.hpp"
 #include "core/Rules.hpp"
 #include "core/Settings.hpp"
@@ -3156,6 +3157,222 @@ int main(int argc, char** argv) {
             auto u = door.undo();
             check("secrets: undo -> the bundle goes to the Trash", u.ok && !fs::exists(B));
         }
+        fs::remove_all(home, ec);
+    }
+
+    // -- Packages are one thing (s015a, docs/TIDY.md): .scriv etc. never split -----
+    {
+        std::cout << "\n-- packages --\n";
+        namespace pk = core::pkg;
+        namespace dr = core::door;
+        const fs::path home = fs::temp_directory_path() / "rouster_selftest_packages";
+        std::error_code ec;
+        fs::remove_all(home, ec);
+        for (const char* d : {".local/share/Trash/files", ".local/share/Trash/info", ".local/share/rouster"})
+            fs::create_directories(home / d, ec);
+        const std::string H = home.string();
+        const std::int64_t now = 2000000000, old = 1830000000;
+        const auto age = [&](const std::string& rel, std::int64_t t) {
+            struct timespec ts[2] = {{t, 0}, {t, 0}};
+            ::utimensat(AT_FDCWD, (home / rel).c_str(), ts, AT_SYMLINK_NOFOLLOW);
+        };
+        // Same-size, same-byte files everywhere: if anything looked inside a
+        // package, Duplicates would pair them at once.
+        const std::vector<std::string> olds = {
+            "Documents/Novels/Tapper.scriv/Tapper.scrivx", "Documents/Novels/Tapper.scriv/Files/Data/a.rtf",
+            "Documents/Novels/Tapper.scriv/Files/Data/b.rtf", "Documents/Novels/Tapper.scriv/.hidden",
+            "Documents/Novels/Copy of Tapper.scriv/Tapper.scrivx", "Documents/Novels/Copy of Tapper.scriv/Files/Data/a.rtf",
+            "Documents/Novels/Fresh.scriv/Files/old.rtf", "Top.SCRIV/x.rtf", "Documents/report.key",
+            ".cache/someapp/Proj.scriv/x.rtf", ".cache/other/blob", ".local/share/app/Book.scriv/logs/old.log",
+            ".local/share/app/plain.log"};
+        for (const auto& r : olds) { put(home, r, 5000); age(r, old); }
+        put(home, "Documents/Novels/Fresh.scriv/Files/new.rtf", 5000);
+        age("Documents/Novels/Fresh.scriv/Files/new.rtf", now - 86400);
+        const std::string twin = noise(9000, 7);
+        put_bytes(home, "Documents/a.bin", twin);
+        put_bytes(home, "Documents/b.bin", twin);
+        const auto inside_any = [](const std::string& rel) { return !pk::enclosing(rel).empty(); };
+
+        check("packages: names -- .scriv any case, the Mac kinds; not a bare extension, not a plain name",
+              pk::is_package_name("Tapper.scriv") && pk::is_package_name("TAPPER.SCRIV") && pk::is_package_name("x.pages") &&
+              pk::is_package_name("Deck.key") && pk::is_package_name("a.rtfd") && pk::is_package_name("Lib.photoslibrary") &&
+              !pk::is_package_name(".scriv") && !pk::is_package_name("scriv") && !pk::is_package_name("notes.txt") &&
+              !pk::is_package_name("a.scrivx"));
+        check("packages: enclosing -- the outermost package a path is inside; the package itself is not inside one",
+              pk::enclosing("Novels/Tapper.scriv/Files/Data/x.rtf") == "Novels/Tapper.scriv" &&
+              pk::enclosing("/h/A.scriv/B.scriv/c") == "/h/A.scriv" && pk::enclosing("Novels/Tapper.scriv").empty() &&
+              pk::package_of("Novels/Tapper.scriv", true) == "Novels/Tapper.scriv" && pk::enclosing("a/b/c").empty());
+        const pk::Measure m = pk::measure(H + "/Documents/Novels/Tapper.scriv");
+        check("packages: measure -- every file inside, hidden too, the newest mtime", m.files == 4 && m.bytes > 0 &&
+              m.newest >= old && m.errors == 0, std::to_string(m.files));
+
+        const std::string before = files_snapshot(home);
+
+        // Smart Scan
+        core::scan::Progress sp;
+        const auto rep = core::scan::scan(H, H, sp);
+        std::set<std::string> pkgs;
+        for (const auto& it : rep.packages) pkgs.insert(it.rel);
+        check("packages/scan: each package is ONE item, the outermost, sized whole",
+              pkgs == std::set<std::string>{"Documents/Novels/Tapper.scriv", "Documents/Novels/Copy of Tapper.scriv",
+                                            "Documents/Novels/Fresh.scriv", "Top.SCRIV", ".cache/someapp/Proj.scriv",
+                                            ".local/share/app/Book.scriv"} &&
+              std::any_of(rep.packages.begin(), rep.packages.end(), [](auto& i) {
+                  return i.rel == "Documents/Novels/Tapper.scriv" && i.files == 4 && i.bytes >= 4 * 4096; }),
+              std::to_string(rep.packages.size()));
+        check("packages/scan: a package in a cache or app data is your files, never Regenerable",
+              core::scan::classify_dir(".cache/someapp/Proj.scriv", core::scan::Kind::Regenerable, false).kind == core::scan::Kind::Other &&
+              core::scan::classify_dir(".cache/someapp/Proj.scriv/build", core::scan::Kind::Other, true).kind == core::scan::Kind::Other &&
+              core::scan::classify_dir(".ssh/x.scriv", core::scan::Kind::Protected, false).kind == core::scan::Kind::Protected);
+
+        // Sweep
+        core::scan::Progress wp;
+        const auto sw = core::sweep::find(H, wp, now);
+        const auto offered = [&](const std::string& rel) {
+            return std::any_of(sw.items.begin(), sw.items.end(), [&](auto& c) { return c.rel == rel; });
+        };
+        check("packages/sweep: a cache folder holding a package is left out whole; the plain cache is still offered",
+              !offered(".cache/someapp") && offered(".cache/other"));
+        check("packages/sweep: no old log inside a package; a plain old log still offered",
+              !offered(".local/share/app/Book.scriv/logs/old.log") && offered(".local/share/app/plain.log") &&
+              std::none_of(sw.items.begin(), sw.items.end(), [&](auto& c) { return inside_any(c.rel); }));
+        check("packages/sweep: both packages are named as kept whole",
+              std::count(sw.kept_whole.begin(), sw.kept_whole.end(), ".cache/someapp/Proj.scriv") == 1 &&
+              std::count(sw.kept_whole.begin(), sw.kept_whole.end(), ".local/share/app/Book.scriv") == 1);
+
+        // Duplicates
+        core::dups::Progress dp;
+        const auto du = core::dups::find(H, H, dp);
+        bool none_inside = true, twins = false, key_alone = true;
+        for (const auto& g : du.groups) {
+            std::set<std::string> rels;
+            for (const auto& mm : g.members) {
+                none_inside = none_inside && !inside_any(mm.rel) && !pk::is_package_name(fs::path(mm.rel).filename().string());
+                rels.insert(mm.rel);
+                if (mm.rel == "Documents/report.key") key_alone = false;
+            }
+            twins = twins || rels == std::set<std::string>{"Documents/a.bin", "Documents/b.bin"};
+        }
+        check("packages/dups: nothing inside a package is paired, and no package is paired with its copy",
+              none_inside && du.refused.empty(), std::to_string(du.groups.size()) + " groups");
+        check("packages/dups: plain twins still found; a FILE named .key is an ordinary file (its twins are all inside packages)",
+              twins && key_alone);
+        check("packages/dups: the packages met are named", du.packages.size() == 4, std::to_string(du.packages.size()));
+        core::dups::Progress dp2;
+        check("packages/dups: a look inside a package is refused",
+              !core::dups::find(H, H + "/Documents/Novels/Tapper.scriv/Files", dp2).refused.empty());
+
+        // Archive
+        core::scan::Progress ap;
+        auto af = core::archive::find(H, now, 12, ap);
+        const auto aitem = [&](const std::string& rel) -> core::archive::Item* {
+            for (auto& it : af.items) if (it.rel == rel) return &it;
+            return nullptr;
+        };
+        check("packages/archive: an all-old package is ONE item, all 4 files (hidden too) -- top of home too",
+              aitem("Documents/Novels/Tapper.scriv") && aitem("Documents/Novels/Tapper.scriv")->package &&
+              aitem("Documents/Novels/Tapper.scriv")->files == 4 && aitem("Top.SCRIV") && aitem("Top.SCRIV")->package);
+        check("packages/archive: a package with one new file is not offered at all -- never its old files alone",
+              !aitem("Documents/Novels/Fresh.scriv") &&
+              std::none_of(af.items.begin(), af.items.end(), [&](auto& it) { return inside_any(it.rel); }));
+        check("packages/archive: a FILE named .key is an ordinary old file", aitem("Documents/report.key") &&
+              !aitem("Documents/report.key")->package);
+        check("packages/archive: Look changed nothing", files_snapshot(home) == before);
+
+        dr::Door door(H, H + "/.local/share/rouster");
+        door.load();
+        aitem("Documents/Novels/Tapper.scriv")->checked = true;
+        std::vector<std::string> dropped;
+        dr::Plan ap1 = core::archive::plan(H, af.items, dropped);
+        ap1.previewed = true;
+        auto r1 = door.run(ap1);
+        std::tm tm{};
+        std::time_t ot = old;
+        ::localtime_r(&ot, &tm);
+        const std::string Y = std::to_string(tm.tm_year + 1900);
+        check("packages/archive: moved whole -- every file inside, hidden too, under ~/Archive/<year>/",
+              r1.ok && !fs::exists(home / "Documents/Novels/Tapper.scriv") &&
+              fs::exists(home / ("Archive/" + Y + "/Documents/Novels/Tapper.scriv/Files/Data/b.rtf")) &&
+              fs::exists(home / ("Archive/" + Y + "/Documents/Novels/Tapper.scriv/.hidden")),
+              r1.messages.empty() ? "" : r1.messages.front());
+        const auto outside_trash = [](const std::string& snap) {
+            std::istringstream in(snap);
+            std::string o;
+            for (std::string l; std::getline(in, l);)
+                if (l.find("/.local/share/Trash/") == std::string::npos) o += l + "\n";
+            return o;
+        };
+        auto u1 = door.undo();
+        check("packages/archive: undo -> exactly back", u1.ok && outside_trash(files_snapshot(home)) == outside_trash(before));
+
+        // Rules
+        core::rules::Rule rr; rr.name = "x"; rr.exts = {"rtf"}; rr.act = core::rules::Do::Trash;
+        rr.folder = "Documents/Novels/Tapper.scriv/Files/Data";
+        const std::string w1 = core::rules::problem(rr, H);
+        rr.folder = "Documents/Novels/Tapper.scriv";
+        const std::string w2 = core::rules::problem(rr, H);
+        rr.folder = "Documents"; rr.act = core::rules::Do::Move; rr.dest = "Documents/Novels/Fresh.scriv/Files";
+        const std::string w3 = core::rules::problem(rr, H);
+        rr.dest = "Documents/Novels/Elsewhere";
+        const std::string w4 = core::rules::problem(rr, H);
+        check("packages/rules: never watch a package or inside one, never move into one; an ordinary rule still runs",
+              w1.find("package") != std::string::npos && w2.find("package") != std::string::npos &&
+              w3.find("package") != std::string::npos && w4.empty(), w1 + " | " + w3 + " | " + w4);
+
+        // File into a project
+        core::organize::Project proj;
+        proj.path = H + "/Documents/Job";
+        const auto inc = core::organize::propose(H, proj, {H + "/Documents/Novels/Fresh.scriv/Files/old.rtf",
+                                                           H + "/Documents/Novels/Tapper.scriv"});
+        check("packages/organize: a file inside a package, or a package, is not filed -- and says why",
+              inc.size() == 2 && !inc[0].checked && inc[0].note.find("package") != std::string::npos &&
+              !inc[1].checked && inc[1].note.find("package") != std::string::npos,
+              inc.size() == 2 ? inc[0].note + " | " + inc[1].note : "");
+
+        // The door: the backstop, whatever a page asks for.
+        const auto one = [&](dr::Action a) {
+            dr::Plan p;
+            p.label = "pkg";
+            p.previewed = true;
+            p.actions.push_back(std::move(a));
+            return door.run(p);
+        };
+        const auto said = [](const dr::Result& r, const char* what) {
+            return !r.ok && std::any_of(r.messages.begin(), r.messages.end(),
+                                        [&](auto& s) { return s.find(what) != std::string::npos; });
+        };
+        const std::string P = H + "/Documents/Novels/Fresh.scriv";
+        dr::Action t; t.verb = dr::Verb::Trash; t.from = P + "/Files/new.rtf";
+        dr::Action mo; mo.verb = dr::Verb::Move; mo.from = P + "/Files/old.rtf"; mo.to = H + "/Documents/old.rtf";
+        dr::Action mi; mi.verb = dr::Verb::Move; mi.from = H + "/Documents/a.bin"; mi.to = P + "/a.bin";
+        dr::Action wr; wr.verb = dr::Verb::Write; wr.to = P + "/note.txt"; wr.content = "x";
+        dr::Action md; md.verb = dr::Verb::MakeDir; md.to = P + "/More";
+        dr::Action cp; cp.verb = dr::Verb::Copy; cp.from = P + "/Files/old.rtf"; cp.to = H + "/Documents/c.rtf";
+        dr::Action dd; dd.verb = dr::Verb::Dedupe; dd.from = H + "/Documents/Novels/Copy of Tapper.scriv/Files/Data/a.rtf";
+        dd.to = H + "/Documents/Novels/Tapper.scriv/Files/Data/a.rtf";
+        bool all = true;
+        std::string which;
+        for (const auto* a : {&t, &mo, &mi, &wr, &md, &cp, &dd}) {
+            const bool ok = said(one(*a), "inside a package");
+            if (!ok) which += std::string(dr::verb_name(a->verb)) + " ";
+            all = all && ok;
+        }
+        check("packages/door: trash, move out, move in, write, mkdir, copy, dedupe inside a package -- each refused",
+              all && outside_trash(files_snapshot(home)) == outside_trash(before), which);
+        dr::Action tp; tp.verb = dr::Verb::Trash; tp.from = P;
+        check("packages/door: a package itself is never trashed", said(one(tp), "never trashed") &&
+              outside_trash(files_snapshot(home)) == outside_trash(before));
+        dr::Action mw; mw.verb = dr::Verb::Move; mw.from = P; mw.to = H + "/Documents/Fresh.scriv";
+        auto rw = one(mw);
+        check("packages/door: ...but moved whole, it goes", rw.ok && fs::exists(home / "Documents/Fresh.scriv/Files/new.rtf"),
+              rw.messages.empty() ? "" : rw.messages.front());
+        auto uw = door.undo();
+        check("packages/door: undo -> back exactly", uw.ok && outside_trash(files_snapshot(home)) == outside_trash(before));
+        dr::Action tk; tk.verb = dr::Verb::Trash; tk.from = H + "/Documents/report.key";
+        auto rk = one(tk);
+        check("packages/door: a FILE named .key trashes like any file", rk.ok, rk.messages.empty() ? "" : rk.messages.front());
+        door.undo();
+        check("packages/door: and comes back", outside_trash(files_snapshot(home)) == outside_trash(before));
         fs::remove_all(home, ec);
     }
 

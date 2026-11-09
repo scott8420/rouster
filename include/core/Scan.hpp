@@ -77,6 +77,7 @@ struct Report {
     std::string home, root;                      // what was scanned
     std::array<Bucket, kKindCount> by_kind{};
     std::vector<Item>        items;              // sorted by bytes, descending; Other not itemised
+    std::vector<Item>        packages;           // s015a: Mac packages (.scriv ...), each ONE item, sized whole; biggest first
     std::vector<std::string> skipped;            // other-filesystem dirs, relative to home
     std::uint64_t errors = 0;                    // unreadable dirs / failed lstat
     std::uint64_t dirs   = 0;

@@ -24,6 +24,10 @@
 // (~/Documents is not archived whole). Other old files are offered one by one.
 // Nothing is pre-checked (§1.6: "old" is a guess).
 //
+// s015a: a Mac package (.scriv ...) is ONE item wherever it sits, even at the
+// top of home: old only when everything in it is old (hidden files too), and
+// then moved whole. Never split -- no file inside one is offered on its own.
+//
 // Put back reads the door's manifest: every Move into ~/Archive that is still
 // there (same inode) can go back to where it came from -- not only the last
 // batch (§4.6: "the manifest makes every file restorable").
@@ -39,6 +43,7 @@ inline constexpr const char* kRoot = "Archive";   // relative to home
 struct Item {
     std::string   rel;               // relative to home
     bool          folder = false;
+    bool          package = false;   // s015a: a Mac package (.scriv ...) -- one item, moved whole
     std::uint64_t bytes = 0, files = 1;   // disk usage
     std::int64_t  newest = 0;        // unix seconds: the newest file's mtime
     int           year = 0;          // -> ~/Archive/<year>/<rel>
@@ -51,6 +56,7 @@ struct Found {
     std::vector<Item> items;         // by top folder, then biggest first
     std::uint64_t files = 0;         // files looked at
     std::uint64_t old_bytes = 0;     // the total of items
+    std::uint64_t packages = 0;      // s015a: packages met (kept whole: offered only when ALL of it is old)
     std::uint64_t errors = 0;
     bool          cancelled = false;
     std::string   refused;

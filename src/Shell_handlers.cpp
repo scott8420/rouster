@@ -142,6 +142,8 @@ void Shell::on_sweep_find() {  // handler: look for junk (worker)
             lg->info("found {} items, Trash {} in {} files, {} unreadable, {} ms{}{}", f.items.size(),
                      core::scan::human_bytes(f.trash_bytes), f.trash_files, f.errors, ms,
                      f.cancelled ? " (cancelled)" : "", f.refused.empty() ? "" : " REFUSED: " + f.refused);
+        if (auto lg = log::get(log::Area::Sweep); lg && !f.kept_whole.empty())   // s015a
+            for (const auto& pk : f.kept_whole) lg->info("kept whole (package): {}", pk);
         {
             std::lock_guard lk(m_sw_mx);
             m_sw_found = std::move(f);
@@ -239,6 +241,8 @@ void Shell::on_dups_find() {  // handler: look for duplicates (worker)
                      f.reflink ? "yes" : "no", ms, f.cancelled ? " (cancelled)" : "",
                      f.refused.empty() ? "" : " REFUSED: " + f.refused);
         }
+        if (auto lg = log::get(log::Area::Dups); lg && !f.packages.empty())   // s015a
+            for (const auto& pk : f.packages) lg->info("kept whole (package, not entered): {}", pk);
         {
             std::lock_guard lk(m_du_mx);
             m_du_found = std::move(f);
@@ -836,6 +840,11 @@ void Shell::on_archive_find() {  // handler: look for old files (worker)
             lg->info("found {} items ({}) in {} files, {} unreadable, {} ms{}{}", f.items.size(),
                      core::scan::human_bytes(f.old_bytes), f.files, f.errors, ms, f.cancelled ? " (cancelled)" : "",
                      f.refused.empty() ? "" : " REFUSED: " + f.refused);
+        if (auto lg = log::get(log::Area::Archive); lg && f.packages) {   // s015a
+            std::size_t offered = 0;
+            for (const auto& it : f.items) offered += it.package;
+            lg->info("packages: {} met, {} offered whole (all of it untouched)", f.packages, offered);
+        }
         {
             std::lock_guard lk(m_ar_mx);
             m_ar_found = std::move(f);

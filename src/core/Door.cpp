@@ -1,4 +1,5 @@
 #include "core/Door.hpp"
+#include "core/Package.hpp"
 #include "core/Scan.hpp"   // never_touch / classify_dir: the policy is the scan's policy
 #include "core/Git.hpp"    // the Clone verb
 #include "core/Helper.hpp" // the Root verb: what a request is, where the helper lives
@@ -307,6 +308,9 @@ std::string Door::refusal(const Action& a, const std::vector<std::string>& made,
             const bool last = s == std::string::npos;
             kind = scan::classify_dir(cur, kind, false).kind;
             if (kind == scan::Kind::Protected) return "protected (never touched): ~/" + cur;
+            // s015a: nothing inside a Mac package -- it is kept whole (moved whole, at most).
+            if (!last && pkg::is_package_name(rel.substr(pos, s - pos)))
+                return "inside a package (kept whole, never split): ~/" + cur;
             struct stat st{};
             const std::string abs = m_home + "/" + cur;
             if (::lstat(abs.c_str(), &st) != 0) {
@@ -372,6 +376,9 @@ std::string Door::refusal(const Action& a, const std::vector<std::string>& made,
     }
     if (a.verb == Verb::Trash) {
         if (inside(a.from, m_trash) || inside(m_trash, a.from)) return "already in the Trash: " + a.from;
+        if (struct stat ps{}; ::lstat(a.from.c_str(), &ps) == 0 && S_ISDIR(ps.st_mode) &&
+                              pkg::is_package_name(fs::path(a.from).filename().string()))
+            return "a package is only ever moved whole, never trashed by Rouster: " + a.from;   // s015a
         return {};
     }
     // Move.

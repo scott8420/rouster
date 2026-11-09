@@ -1,6 +1,7 @@
 #include "core/Rules.hpp"
 #include "core/Archive.hpp"    // destination(): the Archive page's layout
 #include "core/Organize.hpp"   // File into a project: its pattern and routes
+#include "core/Package.hpp"    // s015a: packages are kept whole
 
 #include "json.hpp"
 
@@ -231,10 +232,14 @@ std::string problem(const Rule& r, const std::string& home) {
     if (r.name.empty()) return "it needs a name";
     if (!clean_rel(r.folder)) return "the watched folder must be a folder under home";
     if (!is_dir(home + "/" + r.folder)) return "~/" + r.folder + " isn't there";
+    if (const auto pk = pkg::package_of(r.folder, true); !pk.empty())
+        return "~/" + pk + " is a package -- kept whole, never looked inside";
     if (r.glob.empty() && r.exts.empty() && r.older_days <= 0) return "give it a name, a kind or an age to match -- never everything";
     if (r.act == Do::Move || r.act == Do::File) {
         if (!clean_rel(r.dest)) return "the destination must be a folder under home";
         if (r.dest == r.folder) return "the destination is the watched folder itself";
+        if (const auto pk = pkg::package_of(r.dest, true); !pk.empty())
+            return "~/" + pk + " is a package -- nothing is put inside one";
     }
     if (r.act == Do::Move && r.rename.find('{') != std::string::npos && r.rename.find("{stem}") == std::string::npos &&
         r.rename.find("{yyyymmdd-hhmm}") == std::string::npos)

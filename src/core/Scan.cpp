@@ -1,4 +1,5 @@
 #include "core/Scan.hpp"
+#include "core/Package.hpp"
 
 #include <algorithm>
 #include <condition_variable>
@@ -87,6 +88,10 @@ DirClass classify_dir(const std::string& rel, Kind parent, bool looks_like_build
     if (parent == Kind::Protected) return {Kind::Protected, false, false};
     if (parent == Kind::Trash)     return {Kind::Trash, false, false};
 
+    // s015a: a Mac package (and all of it) is your files, wherever it sits --
+    // never a cache, a build tree or app data to be swept.
+    if (!pkg::package_of(rel, true).empty()) return {Kind::Other, false, false};
+
     if (rel == ".local/share/Trash") return {Kind::Trash, true, false};
     if (rel == ".cache")             return {Kind::Regenerable, true, true};
     if (rel == ".config")            return {Kind::Settings, true, true};
@@ -145,11 +150,13 @@ struct Task {
     Kind        kind;
     std::string item;       // the Item its direct files are charged to ("" = none)
     bool        expand;     // its children become separate items
+    std::string pkg;        // s015a: the package it is (or is inside), "" = none
 };
 
 struct Local {               // one worker's tallies, merged at the end
     std::array<Bucket, kKindCount>   by_kind{};
     std::map<std::string, Item>      items;
+    std::map<std::string, Item>      pkgs;      // s015a: each package, whole
     std::vector<std::string>         skipped;
     std::uint64_t errors = 0, dirs = 0;
 
@@ -159,6 +166,12 @@ struct Local {               // one worker's tallies, merged at the end
         if (is_file) ++b.files;
         if (item.empty() || k == Kind::Other) return;
         auto [it, fresh] = items.try_emplace(item, Item{item, k, 0, 0});
+        it->second.bytes += bytes;
+        if (is_file) ++it->second.files;
+    }
+    void charge_pkg(const std::string& p, std::uint64_t bytes, bool is_file) {
+        if (p.empty()) return;
+        auto [it, fresh] = pkgs.try_emplace(p, Item{p, Kind::Other, 0, 0});
         it->second.bytes += bytes;
         if (is_file) ++it->second.files;
     }
@@ -179,7 +192,8 @@ bool has_marker(int dfd, const char* name) {
 
 Task child_task(const Task& parent, const std::string& rel, bool build) {
     const DirClass dc = classify_dir(rel, parent.kind, build);
-    Task t{rel, dc.kind, parent.item, false};
+    Task t{rel, dc.kind, parent.item, false, parent.pkg};
+    if (t.pkg.empty() && dc.kind == Kind::Other && pkg::is_package_name(basename_of(rel))) t.pkg = rel;
     if (dc.rooted)          { t.item = rel; t.expand = dc.expand; }
     else if (parent.expand) { t.item = rel; }
     if (t.kind == Kind::Other) t.item.clear();
@@ -244,6 +258,7 @@ private:
                 const bool build = std::string_view(n) == "build" && has_marker(dfd, n);
                 Task c = child_task(t, rel, build);
                 out.charge(c.kind, c.item, bytes, false);   // the directory's own blocks
+                out.charge_pkg(c.pkg, bytes, false);
                 m_p.bytes.fetch_add(bytes, std::memory_order_relaxed);
                 push(std::move(c));
                 continue;
@@ -251,6 +266,7 @@ private:
             if (st.st_nlink > 1 && !first_link(st.st_dev, st.st_ino)) continue;
             const Kind k = classify_file(rel, t.kind);
             out.charge(k, k == t.kind ? t.item : rel, bytes, true);
+            out.charge_pkg(t.pkg, bytes, true);
             m_p.files.fetch_add(1, std::memory_order_relaxed);
             m_p.bytes.fetch_add(bytes, std::memory_order_relaxed);
         }
@@ -273,7 +289,7 @@ private:
 // The root's own task: classify each component from home down, as a full scan
 // would have on its way there.
 Task root_task(const std::string& home, const std::string& rel) {
-    Task t{"", Kind::Other, "", false};
+    Task t{"", Kind::Other, "", false, ""};
     if (rel.empty()) return t;
     std::string cur;
     std::size_t pos = 0;
@@ -325,6 +341,7 @@ Report scan(const std::string& home_in, const std::string& root_in,
     Task first = root_task(r.home, rel);
     Local root_local;
     root_local.charge(first.kind, first.item, static_cast<std::uint64_t>(st.st_blocks) * 512u, false);
+    if (first.pkg == rel) root_local.charge_pkg(first.pkg, static_cast<std::uint64_t>(st.st_blocks) * 512u, false);
     w.push(std::move(first));
 
     std::vector<Local> locals(threads);
@@ -333,8 +350,13 @@ Report scan(const std::string& home_in, const std::string& root_in,
     for (auto& th : pool) th.join();
     locals.push_back(std::move(root_local));
 
-    std::map<std::string, Item> items;
+    std::map<std::string, Item> items, pkgs;
     for (auto& l : locals) {
+        for (auto& [key, it] : l.pkgs) {
+            auto [dst, fresh] = pkgs.try_emplace(key, Item{key, Kind::Other, 0, 0});
+            dst->second.bytes += it.bytes;
+            dst->second.files += it.files;
+        }
         for (int k = 0; k < kKindCount; ++k) {
             r.by_kind[k].bytes += l.by_kind[k].bytes;
             r.by_kind[k].files += l.by_kind[k].files;
@@ -350,6 +372,10 @@ Report scan(const std::string& home_in, const std::string& root_in,
     }
     for (auto& [key, it] : items) r.items.push_back(std::move(it));
     std::sort(r.items.begin(), r.items.end(), [](const Item& a, const Item& b) {
+        return a.bytes != b.bytes ? a.bytes > b.bytes : a.rel < b.rel;
+    });
+    for (auto& [key, it] : pkgs) r.packages.push_back(std::move(it));
+    std::sort(r.packages.begin(), r.packages.end(), [](const Item& a, const Item& b) {
         return a.bytes != b.bytes ? a.bytes > b.bytes : a.rel < b.rel;
     });
     std::sort(r.skipped.begin(), r.skipped.end());

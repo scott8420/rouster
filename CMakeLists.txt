@@ -19,6 +19,7 @@ find_package(spdlog REQUIRED)
 add_library(rouster_core STATIC
     src/core/Recents.cpp
     src/core/Scan.cpp
+    src/core/Package.cpp
     src/core/Preflight.cpp
     # THE ONE DOOR (s004): the only file that changes a user's files. The
     # selftest's source gate fails if any other file makes a write call.

@@ -50,6 +50,11 @@ std::vector<Topic> build() {
                 "- any folder named fixes, anywhere",
                 "- anything outside your home folder, anything reached through a symlink, anything on another drive",
                 "- Rouster's own records"}},
+            {"Packages are one thing", {
+                "A Scrivener project (.scriv) -- and Pages, Numbers, Keynote, .rtfd, .app, a Photos library -- is a "
+                "folder on Linux but one thing to Rouster. It is never looked inside, never split, never swept, "
+                "paired or trashed piece by piece. The only thing Rouster ever does with one is move it whole "
+                "(Archive does, when all of it is untouched), and Undo moves it back."}},
             {"Never overwrites, never copies-and-deletes", {
                 "A move never lands on a file that's already there. A move to another drive is refused rather "
                 "than copied and deleted."}},

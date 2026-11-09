@@ -47,6 +47,7 @@ struct Candidate {
 struct Found {
     std::vector<Candidate> items;   // groups in enum order, biggest first within a group
     std::uint64_t trash_bytes = 0, trash_files = 0;
+    std::vector<std::string> kept_whole;   // s015a: packages (.scriv ...) met -- a cache holding one is left out, never entered
     std::uint64_t errors = 0;
     bool          cancelled = false;
     std::string   refused;          // the scan refused home (see scan::scan)

@@ -1,4 +1,5 @@
 #include "core/Sweep.hpp"
+#include "core/Package.hpp"
 
 #include <dirent.h>
 #include <sys/stat.h>
@@ -72,9 +73,10 @@ bool protected_rel(const std::string& rel) {
 std::uint64_t usage(const struct stat& st) { return static_cast<std::uint64_t>(st.st_blocks) * 512u; }
 
 // lstat-only walk: one filesystem, no symlink followed, depth-capped.
+// `pkgs` non-null: a package folder is not entered, its path is noted there (s015a).
 template <class F>
 void walk(const std::string& home, const std::string& rel, dev_t dev, int depth,
-          scan::Progress& prog, std::uint64_t& errors, F&& on_file) {
+          scan::Progress& prog, std::uint64_t& errors, std::vector<std::string>* pkgs, F&& on_file) {
     if (depth > 16 || prog.cancel.load(std::memory_order_relaxed)) return;
     const std::string abs = home + "/" + rel;
     DIR* d = ::opendir(abs.c_str());
@@ -86,8 +88,9 @@ void walk(const std::string& home, const std::string& rel, dev_t dev, int depth,
         if (::lstat((home + "/" + crel).c_str(), &st) != 0) { ++errors; continue; }
         if (S_ISDIR(st.st_mode)) {
             if (st.st_dev != dev) continue;   // another filesystem: not entered
+            if (pkgs && pkg::is_package_name(e->d_name)) { pkgs->push_back(crel); continue; }   // kept whole
             prog.dirs.fetch_add(1, std::memory_order_relaxed);
-            walk(home, crel, dev, depth + 1, prog, errors, on_file);
+            walk(home, crel, dev, depth + 1, prog, errors, pkgs, on_file);
         } else if (S_ISREG(st.st_mode)) {
             prog.files.fetch_add(1, std::memory_order_relaxed);
             on_file(crel, e->d_name, st);
@@ -112,8 +115,14 @@ Found find(const std::string& home, scan::Progress& prog, std::int64_t now) {
     const auto take = [&](const scan::Report& r) {
         f.errors += r.errors;
         if (r.cancelled) f.cancelled = true;
+        for (const auto& pk : r.packages) f.kept_whole.push_back(pk.rel);
         for (const auto& it : r.items) {
             if (it.kind != scan::Kind::Regenerable) continue;
+            // s015a: a cache folder with a package anywhere inside is left out whole
+            // (trashing the folder would trash the package with it).
+            if (std::any_of(r.packages.begin(), r.packages.end(),
+                            [&](const scan::Item& pk) { return starts_dir(pk.rel, it.rel); }))
+                continue;
             Candidate c{it.rel, Group::Caches, it.bytes, it.files, true, ""};
             if (starts_dir(it.rel, ".cache")) {
                 if (it.rel == ".cache") continue;                 // loose files in ~/.cache: the folder itself stays
@@ -146,7 +155,7 @@ Found find(const std::string& home, scan::Progress& prog, std::int64_t now) {
         if (prog.cancel.load()) break;
         struct stat st{};
         if (::lstat((home + "/" + sub).c_str(), &st) != 0 || !S_ISDIR(st.st_mode) || st.st_dev != hs.st_dev) continue;
-        walk(home, sub, hs.st_dev, 0, prog, f.errors,
+        walk(home, sub, hs.st_dev, 0, prog, f.errors, &f.kept_whole,
              [&](const std::string& rel, const char* name, const struct stat& fs) {
                  if (!is_log_name(name) || fs.st_mtim.tv_sec > cutoff) return;
                  if (protected_rel(rel) || starts_dir(rel, ".local/share/Trash") ||
@@ -161,7 +170,7 @@ Found find(const std::string& home, scan::Progress& prog, std::int64_t now) {
         const std::string t = ".local/share/Trash/files";
         struct stat st{};
         if (::lstat((home + "/" + t).c_str(), &st) == 0 && S_ISDIR(st.st_mode) && st.st_dev == hs.st_dev && !prog.cancel.load())
-            walk(home, t, hs.st_dev, 0, prog, f.errors,
+            walk(home, t, hs.st_dev, 0, prog, f.errors, nullptr,
                  [&](const std::string&, const char*, const struct stat& fs) {
                      f.trash_bytes += usage(fs);
                      ++f.trash_files;
@@ -169,6 +178,8 @@ Found find(const std::string& home, scan::Progress& prog, std::int64_t now) {
     }
 
     if (prog.cancel.load()) f.cancelled = true;
+    std::sort(f.kept_whole.begin(), f.kept_whole.end());
+    f.kept_whole.erase(std::unique(f.kept_whole.begin(), f.kept_whole.end()), f.kept_whole.end());
     std::stable_sort(f.items.begin(), f.items.end(), [](const Candidate& a, const Candidate& b) {
         if (a.group != b.group) return static_cast<int>(a.group) < static_cast<int>(b.group);
         return a.bytes > b.bytes;

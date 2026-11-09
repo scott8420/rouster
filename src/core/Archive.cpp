@@ -1,4 +1,5 @@
 #include "core/Archive.hpp"
+#include "core/Package.hpp"
 
 #include <algorithm>
 #include <ctime>
@@ -54,6 +55,35 @@ struct Walk {
         std::int64_t newest = 0;
     };
 
+    // s015a: a package, measured whole (lstat only). Offered as one item when
+    // all of it is old. Returns its sum for the folder around it.
+    Sum package(const std::string& rel, const struct stat& st) {
+        Sum sum;
+        const pkg::Measure m = pkg::measure(home + "/" + rel);
+        ++out->packages;
+        ++prog->dirs;
+        prog->files += m.files;
+        prog->bytes += m.bytes;
+        sum.bytes = m.bytes;
+        sum.files = m.files ? m.files : 1;
+        sum.newest = m.newest;
+        sum.clean = m.errors == 0;
+        sum.all_old = m.newest < cutoff;
+        if (sum.clean && sum.all_old) {
+            Item it;
+            it.rel = rel;
+            it.folder = true;
+            it.package = true;
+            it.bytes = m.bytes;
+            it.files = m.files;
+            it.newest = m.newest;
+            it.year = year_of(m.newest);
+            it.dev = st.st_dev; it.ino = st.st_ino;
+            out->items.push_back(it);
+        }
+        return sum;
+    }
+
     // Walks `rel` (a folder at depth >= 1). Old files / old folders go into
     // out->items; returns whether the folder as a whole could be one item.
     Sum dir(const std::string& rel, scan::Kind parent, int depth) {
@@ -79,6 +109,15 @@ struct Walk {
             if (::lstat(cabs.c_str(), &st) != 0) { ++out->errors; sum.clean = false; continue; }
             if (S_ISDIR(st.st_mode)) {
                 if (st.st_dev != dev || n == "node_modules" || has(cabs, ".git")) { sum.clean = false; continue; }
+                if (pkg::is_package_name(n)) {
+                    const Sum c = package(crel, st);
+                    sum.clean = sum.clean && c.clean;
+                    sum.all_old = sum.all_old && c.all_old;
+                    sum.bytes += c.bytes;
+                    sum.files += c.files;
+                    sum.newest = std::max(sum.newest, c.newest);
+                    continue;
+                }
                 const bool build = has(cabs, "CMakeCache.txt") || has(cabs, "build.ninja") || has(cabs, "meson-info");
                 const scan::Kind k = scan::classify_dir(crel, parent, build).kind;
                 if (k != scan::Kind::Other) { sum.clean = false; continue; }   // Protected, caches, builds, ...
@@ -192,6 +231,7 @@ Found find(const std::string& home_in, std::int64_t now, int months, scan::Progr
         if (::lstat(abs.c_str(), &st) != 0) { ++out.errors; continue; }
         if (S_ISDIR(st.st_mode)) {
             if (st.st_dev != hs.st_dev || has(abs, ".git")) continue;
+            if (pkg::is_package_name(n)) { w.package(n, st); continue; }   // s015a: ~/Novel.scriv is one item too
             const scan::Kind k = scan::classify_dir(n, scan::Kind::Other, false).kind;
             if (k != scan::Kind::Other) continue;
             w.dir(n, k, 1);
