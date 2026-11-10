@@ -26,6 +26,7 @@
 #include <glibmm/dispatcher.h>
 
 #include <gtkmm/dropdown.h>
+#include <gtkmm/searchentry.h>
 #include <gtkmm/textview.h>
 #include <gtkmm/passwordentry.h>
 #include <gtkmm/checkbutton.h>
@@ -166,6 +167,9 @@ private:
     void on_archive_cancel();                    // category: handler: stop looking
     void on_archive_found();                     // category: handler: the worker finished (Dispatcher, UI thread)
     void on_archive_view(bool stored);           // category: handler: Old files / In the archive
+    void on_archive_search_open();               // category: handler: s018 -- Search the archive (from the start page)
+    void archive_reindex();                      // category: helper: s018 -- ~/Archive walked + the catalog + the records
+    void paint_archive_hits();                   // category: helper: s018 -- the stored list, or what the search found
     void on_archive_months(int months);          // category: handler: the "untouched for" choice -> look again
     void on_archive_run();
     void on_profile_find();                      // category: handler: gather the set-up (worker: dconf, dnf, flatpak)
@@ -439,6 +443,13 @@ private:
     core::archive::Found m_ar_shown;                 // checks live here (UI thread only)
     std::vector<core::archive::Stored> m_ar_stored;  // from the manifest (UI thread only)
     bool             m_ar_view_stored = false;
+    Gtk::Box         m_ar_search_bar{Gtk::Orientation::HORIZONTAL, 8};   // s018: the search row (kept across repaints)
+    Gtk::SearchEntry m_ar_search;
+    Gtk::DropDown    m_ar_kind, m_ar_year;
+    Gtk::Box         m_ar_hits{Gtk::Orientation::VERTICAL, 10};          // ...and what's under it (rebuilt per keystroke)
+    core::archive::Index m_ar_index;
+    std::vector<int> m_ar_year_list;             // the year dropdown's years (index 0 = any)
+    bool             m_ar_dd_quiet = false;
     int              m_ar_months = core::archive::kDefaultMonths;
     static constexpr std::size_t kTidyShown = 2000;     // s016a3: rows painted per Tidy card (in a scroller); unpainted rows are never checked
     static constexpr std::size_t kArchiveShown = 300;   // rows painted; unpainted rows are never checked

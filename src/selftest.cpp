@@ -4435,6 +4435,105 @@ int main(int argc, char** argv) {
         }
         fs::remove_all(home, ec);
     }
+    // -- s018: search the archive -- name, kind, where it came from, when ----------
+    {
+        std::cout << "\n-- archive search --\n";
+        namespace ar = core::archive;
+        namespace dr = core::door;
+        const fs::path home = fs::temp_directory_path() / ("rouster_arsearch_" + std::to_string(::getpid()));
+        std::error_code ec;
+        fs::remove_all(home, ec);
+        fs::create_directories(home / ".local/share/Trash/files", ec);
+        fs::create_directories(home / ".local/share/Trash/info", ec);
+        fs::create_directories(home / ".local/share/rouster", ec);
+        const std::string H = home.string(), D = H + "/.local/share/rouster";
+        {
+            const auto none = ar::index(H, D, {});
+            check("archive search: no ~/Archive yet -- nothing found, no error", none.ok && none.entries.empty());
+        }
+        const std::int64_t now = 2000000000, old = 1830000000;
+        const std::vector<std::string> olds = {"Documents/Taxes/w2.pdf", "Documents/Taxes/1099.pdf", "Pictures/beach.jpg",
+                                               "Music/song.mp3", "Documents/taxes notes.txt", "Novels/Tapper.scriv/Files/a.rtf"};
+        for (const auto& r : olds) put(home, r, 5000);
+        for (const auto& r : olds) {
+            struct timespec ts[2] = {{old, 0}, {old, 0}};
+            ::utimensat(AT_FDCWD, (home / r).c_str(), ts, AT_SYMLINK_NOFOLLOW);
+        }
+        std::tm tm{};
+        std::time_t ot = old;
+        ::localtime_r(&ot, &tm);
+        const int Y = tm.tm_year + 1900;
+        core::scan::Progress prog;
+        ar::Found f = ar::find(H, now, 12, prog);
+        for (auto& it : f.items) it.checked = true;
+        dr::Door door(H, D);
+        door.load();
+        std::vector<std::string> dropped;
+        dr::Plan p = ar::plan(H, f.items, dropped);
+        p.previewed = true;
+        const auto r = door.run(p);
+        put(home, "Archive/2020/Loose/by hand.txt", 100);   // put there by hand: found, not Rouster's to put back
+        put(home, "Archive/2020/.hidden", 100);
+        const std::vector<ar::Stored> st = ar::stored(door, H);
+        const std::string before = files_snapshot(home);
+        const ar::Index ix = ar::index(H, D, st);
+        check("archive search: the index changes nothing on disk", files_snapshot(home) == before);
+        const auto entry = [&](const std::string& name) -> const ar::Entry* {
+            for (const auto& e : ix.entries) if (e.name == name) return &e;
+            return nullptr;
+        };
+        const auto* w2 = entry("w2.pdf");
+        const auto* beach = entry("beach.jpg");
+        const auto* hand = entry("by hand.txt");
+        const auto* book = entry("Tapper.scriv");
+        check("archive search: walked -- every file, a package as ONE entry, hidden names not",
+              r.ok && ix.ok && ix.entries.size() == 7 && book && book->package && !entry("a.rtf") && !entry(".hidden"),
+              std::to_string(ix.entries.size()) + " entries");
+        check("archive search: where it came from -- a file inside an archived folder comes back WITH it",
+              w2 && w2->recorded && w2->inside && w2->from == "Documents/Taxes/w2.pdf" && w2->stored != ar::kNoStored &&
+              st[w2->stored].back == "Documents/Taxes" && w2->year == Y && w2->archived > 0);
+        check("archive search: a file archived alone is its own item; one put there by hand is found, its 'from' read "
+              "off the layout, nothing to put it back",
+              beach && beach->recorded && !beach->inside && beach->from == "Pictures/beach.jpg" && hand && !hand->recorded &&
+              hand->from == "Loose/by hand.txt" && hand->stored == ar::kNoStored && hand->year == 2020);
+        check("archive search: kinds -- pdf, jpg, mp3, txt, a .scriv",
+              w2 && w2->kind == "Documents" && beach && beach->kind == "Pictures" && entry("song.mp3") &&
+              entry("song.mp3")->kind == "Music" && hand && hand->kind == "Text & code" && book && book->kind == "Documents" &&
+              ar::search_kind("bin", "image/png") == "Pictures" && ar::search_kind("odt", "application/zip") == "Documents" &&
+              ar::search_kind("xyz", "") == "Other");
+        check("archive search: years present, newest first", ix.years.size() == 2 && ix.years[0] == std::max(Y, 2020));
+        const auto names = [&](const ar::Query& q) {
+            std::string out;
+            for (auto i : ar::match(ix, q, 50)) out += ix.entries[i].name + "|";
+            return out;
+        };
+        const std::string t1 = names({"w2", "", 0}), t2 = names({"TAXES", "", 0}), t3 = names({"taxes w2", "", 0}),
+                          t4 = names({"", "Pictures", 0}), t5 = names({"", "", 2020}), t6 = names({"pdf documents", "", 0}),
+                          t7 = names({"nothing like it", "", 0});
+        check("archive search: by name / by where it came from / every word must be there / a name match first",
+              t1 == "w2.pdf|" && t3 == "w2.pdf|" && t2.rfind("taxes notes.txt|", 0) == 0 && t2.size() > 17 &&
+              t2.find("w2.pdf") != std::string::npos && t2.find("1099.pdf") != std::string::npos && t7.empty(),
+              t2);
+        check("archive search: by kind, by year, words across name and path",
+              t4 == "beach.jpg|" && t5 == "by hand.txt|" && t6.find("w2.pdf") != std::string::npos &&
+              t6.find("1099.pdf") != std::string::npos && t6.find("beach") == std::string::npos, t4 + " / " + t5 + " / " + t6);
+        std::size_t total = 0;
+        const auto lim = ar::match(ix, {"", "", 0}, 3, &total);
+        check("archive search: a limit, and the total said", lim.size() == 3 && total == 7 && ar::Query{}.empty() &&
+              !ar::Query{"x", "", 0}.empty());
+        // Put back from a hit: the folder it came in with goes home whole.
+        std::vector<ar::Stored> pick = st;
+        for (auto& s : pick) s.checked = false;
+        if (w2) pick[w2->stored].checked = true;
+        dropped.clear();
+        dr::Plan pb = ar::put_back(H, pick, dropped);
+        pb.previewed = true;
+        const auto rb = door.run(pb);
+        check("archive search: Put back from a hit inside a folder -> the whole folder is home again",
+              rb.ok && fs::exists(home / "Documents/Taxes/w2.pdf") && fs::exists(home / "Documents/Taxes/1099.pdf") &&
+              ar::index(H, D, ar::stored(door, H)).entries.size() == 5);
+        fs::remove_all(home, ec);
+    }
     // -- s017b: compare -- kinds, texts out of txt / ODT / DOCX / FODT, the line diff --
     {
         std::cout << "\n-- compare --\n";

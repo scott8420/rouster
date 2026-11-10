@@ -1293,6 +1293,7 @@ void Shell::on_archive_found() {  // handler: the worker finished (Dispatcher ->
         return;
     }
     m_ar_stored = m_door ? core::archive::stored(*m_door, m_home) : std::vector<core::archive::Stored>{};
+    archive_reindex();   // s018
     m_ar_view_stored = false;
     paint_archive();
     m_ar_states.set_visible_child("results");
@@ -1301,8 +1302,21 @@ void Shell::on_archive_found() {  // handler: the worker finished (Dispatcher ->
 void Shell::on_archive_view(bool stored) {  // handler: Old files / In the archive
     if (stored == m_ar_view_stored) return;
     m_ar_view_stored = stored;
-    if (stored && m_door) m_ar_stored = core::archive::stored(*m_door, m_home);   // fresh, from the manifest
+    if (stored && m_door) {
+        m_ar_stored = core::archive::stored(*m_door, m_home);   // fresh, from the manifest
+        archive_reindex();                                       // s018
+    }
     paint_archive();
+}
+
+void Shell::on_archive_search_open() {  // handler: s018 -- Search the archive (from the start page)
+    if (m_ar_worker.joinable()) return;
+    m_ar_stored = m_door ? core::archive::stored(*m_door, m_home) : std::vector<core::archive::Stored>{};
+    archive_reindex();
+    m_ar_view_stored = true;
+    paint_archive();
+    m_ar_states.set_visible_child("results");
+    m_ar_search.grab_focus();
 }
 
 void Shell::on_archive_months(int months) {  // handler: the "untouched for" choice -> look again

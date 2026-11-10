@@ -11,6 +11,9 @@
 #include <gtkmm/switch.h>
 #include <gtkmm/togglebutton.h>
 #include <gtkmm/dropdown.h>
+#include <set>
+#include <glibmm/convert.h>
+#include <giomm/appinfo.h>
 #include <gtkmm/stringlist.h>
 #include <gtkmm/listboxrow.h>
 #include <gtkmm/expander.h>
@@ -1537,6 +1540,58 @@ void Shell::paint_archive() {  // helper: view switch, cards per top folder / th
         f->set_wrap(true);
         m_ar_list.append(*f);
     } else {
+        m_ar_list.append(m_ar_search_bar);   // s018: kept across repaints -- typing never loses focus
+        m_ar_list.append(m_ar_hits);
+        paint_archive_hits();
+        return;
+    }
+    archive_gate();
+}
+
+void Shell::archive_reindex() {  // helper: s018 -- ~/Archive walked + the catalog + the records
+    const auto t0 = std::chrono::steady_clock::now();
+    m_ar_index = core::archive::index(m_home, data_dir(), m_ar_stored);
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+    if (auto lg = log::get(log::Area::Archive))
+        lg->info("search: index {} entries, {} years, {}{} ms{}", m_ar_index.entries.size(), m_ar_index.years.size(),
+                 m_ar_index.ok ? "" : "FAILED (" + m_ar_index.error + ") ", ms, m_ar_index.truncated ? " -- truncated" : "");
+    // The year list follows what's there; keep the chosen year if it still is.
+    const int was = m_ar_year.get_selected() > 0 && m_ar_year.get_selected() <= m_ar_year_list.size()
+                        ? m_ar_year_list[m_ar_year.get_selected() - 1] : 0;
+    m_ar_year_list = m_ar_index.years;
+    std::vector<Glib::ustring> years = {"Any year"};
+    guint sel = 0;
+    for (std::size_t i = 0; i < m_ar_year_list.size(); ++i) {
+        years.push_back(std::to_string(m_ar_year_list[i]));
+        if (m_ar_year_list[i] == was) sel = static_cast<guint>(i + 1);
+    }
+    m_ar_dd_quiet = true;
+    m_ar_year.set_model(Gtk::StringList::create(years));
+    m_ar_year.set_selected(sel);
+    m_ar_dd_quiet = false;
+}
+
+void Shell::paint_archive_hits() {  // helper: s018 -- the stored list, or what the search found
+    namespace ar = core::archive;
+    while (auto* c = m_ar_hits.get_first_child()) m_ar_hits.remove(*c);
+    if (!m_ar_view_stored) return;
+    const auto month = [](std::int64_t t) {
+        if (t <= 0) return std::string("?");
+        std::time_t tt = static_cast<std::time_t>(t);
+        std::tm tm{};
+        ::localtime_r(&tt, &tm);
+        char b[16];
+        std::strftime(b, sizeof b, "%Y-%m", &tm);
+        return std::string(b);
+    };
+    ar::Query q;
+    q.text = m_ar_search.get_text();
+    const guint ks = m_ar_kind.get_selected();
+    if (ks > 0 && ks <= ar::search_kinds().size()) q.kind = ar::search_kinds()[ks - 1];
+    const guint ys = m_ar_year.get_selected();
+    if (ys > 0 && ys <= m_ar_year_list.size()) q.year = m_ar_year_list[ys - 1];
+    m_ar_painted = 0;
+    if (q.empty()) {
         auto card = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 4);
         card->add_css_class("card");
         for (std::size_t k = 0; k < m_ar_stored.size() && m_ar_painted < kArchiveShown; ++k, ++m_ar_painted) {
@@ -1565,12 +1620,113 @@ void Shell::paint_archive() {  // helper: view switch, cards per top folder / th
         for (std::size_t k = m_ar_painted; k < m_ar_stored.size(); ++k) m_ar_stored[k].checked = false;
         if (m_ar_stored.empty())
             card->append(*text("Nothing in the archive yet -- or only what Rouster didn't put there.", "dim"));
-        m_ar_list.append(*card);
+        m_ar_hits.append(*card);
         auto f = text("Read from Rouster's records: everything it moved into ~/Archive that is still there. "
                       "Each goes back to the path it came from; a folder that's gone is made again.", "dim");
         f->set_wrap(true);
-        m_ar_list.append(*f);
+        m_ar_hits.append(*f);
+    
+        archive_gate();
+        return;
     }
+
+    // ── what the search found ──
+    std::size_t total = 0;
+    const auto hits = ar::match(m_ar_index, q, kArchiveShown, &total);
+    if (auto lg = log::get(log::Area::Archive))
+        lg->info("search: '{}' kind '{}' year {} -> {} found", q.text, q.kind, q.year, total);
+    auto card = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 4);
+    card->add_css_class("card");
+    card->append(*text(total == 0 ? std::string("Nothing in the archive matches.")
+                                  : with_commas(total) + (total == 1 ? " found" : " found") +
+                                        (total > hits.size() ? " -- the first " + with_commas(hits.size()) + " shown" : ""),
+                       "card-title"));
+    std::set<std::size_t> shown;   // stored items a painted hit can check
+    for (const auto i : hits) {
+        const ar::Entry& e = m_ar_index.entries[i];
+        auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 12);
+        row->add_css_class("sweep-row");
+        const bool can = e.stored != ar::kNoStored && e.stored < m_ar_stored.size();
+        const bool blocked = can && m_ar_stored[e.stored].blocked;
+        auto cb = Gtk::make_managed<Gtk::CheckButton>();
+        cb->set_valign(Gtk::Align::CENTER);
+        if (can) {
+            shown.insert(e.stored);
+            cb->set_active(m_ar_stored[e.stored].checked && !blocked);
+            cb->set_sensitive(!blocked);
+            const std::size_t k = e.stored;
+            cb->set_tooltip_text(e.inside ? "Put back brings the whole folder home: ~/" + m_ar_stored[k].back + "/"
+                                          : "Put back brings it to ~/" + m_ar_stored[k].back);
+            cb->signal_toggled().connect([this, cb, k] {
+                if (k >= m_ar_stored.size() || m_ar_stored[k].checked == cb->get_active()) return;
+                m_ar_stored[k].checked = cb->get_active();
+                // other hits from the same folder share the check
+                Glib::signal_idle().connect_once([this] { paint_archive_hits(); });
+            });
+        } else {
+            cb->set_sensitive(false);
+            cb->set_tooltip_text("Not put there by Rouster -- nothing to put it back with. Open shows it.");
+        }
+        row->append(*cb);
+        auto sz = text(scan::human_bytes(e.bytes), "detail-size", 1.0f);
+        sz->set_width_chars(9);
+        sz->set_valign(Gtk::Align::CENTER);
+        row->append(*sz);
+        auto words = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 1);
+        words->set_hexpand(true);
+        auto n = text(e.name + (e.package ? "  (whole)" : ""), "detail-path");
+        n->set_ellipsize(Pango::EllipsizeMode::MIDDLE);
+        n->set_tooltip_text("now at " + m_home + "/" + e.rel);
+        words->append(*n);
+        std::string from = e.from.empty() ? "now at ~/" + e.rel
+                         : "from ~/" + e.from + (e.recorded ? "" : "  (by its place in the Archive)");
+        auto fl = text(from, "dim");
+        fl->set_ellipsize(Pango::EllipsizeMode::MIDDLE);
+        words->append(*fl);
+        if (e.inside && can) {
+            auto wl = text("comes back with its folder, ~/" + m_ar_stored[e.stored].back + "/", "dim");
+            wl->set_ellipsize(Pango::EllipsizeMode::MIDDLE);
+            words->append(*wl);
+        }
+        row->append(*words);
+        auto kind = text(e.kind, "td-query", 0.5f);
+        kind->set_valign(Gtk::Align::CENTER);
+        row->append(*kind);
+        auto when = text("changed " + month(e.changed) +
+                             (blocked ? "  ·  something is there now"
+                              : e.archived ? "  ·  archived " + month(e.archived) : std::string("  ·  not Rouster's")),
+                         "dim", 1.0f);
+        when->set_valign(Gtk::Align::CENTER);
+        row->append(*when);
+        auto open = Gtk::make_managed<Gtk::Button>("Open");
+        open->add_css_class("ghost");
+        open->add_css_class("small");
+        open->set_valign(Gtk::Align::CENTER);
+        open->set_tooltip_text("Open it where it is, in the app that opens this kind of file. Nothing moves.");
+        const std::string abs = m_home + "/" + e.rel;
+        open->signal_clicked().connect([abs] {
+            try {
+                Gio::AppInfo::launch_default_for_uri(Glib::filename_to_uri(abs));
+            } catch (const Glib::Error& err) {
+                if (auto lg = log::get(log::Area::Archive)) lg->info("search: open '{}': {}", abs, err.what());
+            }
+        });
+        row->append(*open);
+        card->append(*row);
+        ++m_ar_painted;
+    }
+    m_ar_hits.append(*card);
+    // A stored item no painted hit stands for is never checked (the rule: nothing unseen).
+    for (std::size_t k = 0; k < m_ar_stored.size(); ++k)
+        if (!shown.count(k)) m_ar_stored[k].checked = false;
+    std::string foot = "Searched " + with_commas(m_ar_index.entries.size()) + " things in ~/Archive (" +
+                       scan::human_bytes(m_ar_index.bytes) + ") by name and by where each came from. "
+                       "Checking a file inside an archived folder puts the whole folder back.";
+    if (m_ar_index.truncated) foot += " The archive is bigger than " + with_commas(ar::kIndexCap) + " things -- the rest isn't searched.";
+    if (!m_ar_index.ok) foot += " Couldn't read the archive: " + m_ar_index.error + ".";
+    auto f = text(foot, "dim");
+    f->set_wrap(true);
+    m_ar_hits.append(*f);
     archive_gate();
 }
 

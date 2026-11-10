@@ -271,6 +271,13 @@ std::vector<Topic> build() {
             {"Getting things back", {
                 "In the archive lists what Rouster put there; Put back sends any of it home -- at any time, not only "
                 "through Undo."}},
+            {"Searching the archive", {
+                "Search the archive (on the start page, or In the archive) finds anything in ~/Archive by its name "
+                "or by where it came from -- every word you type must be in one or the other. Narrow it by kind "
+                "(Documents, Pictures, Music, Video, Text & code, Archives, Other) and by year.",
+                "Check a hit and press Put back: a file that went in inside a folder comes back with its folder. "
+                "Open shows it where it is; nothing moves. Something you put in ~/Archive by hand is found too, "
+                "but only what Rouster put there can be put back."}},
             {"Good to know", {
                 "Age is the last change (mtime). Dev projects, repos, hidden files and fixes/ are never archived."}},
         }});

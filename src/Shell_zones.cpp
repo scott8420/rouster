@@ -803,6 +803,33 @@ void Shell::build_archive_page() {  // zone: Archive
     m_ar_find.set_margin_top(18);
     m_ar_find.set_action_name("win.archive-find");
     start->append(m_ar_find);
+    // s018: what's already in the archive can be searched without a Look.
+    auto search = Gtk::make_managed<Gtk::Button>("Search the archive");
+    search->add_css_class("ghost");
+    search->set_halign(Gtk::Align::CENTER);
+    search->signal_clicked().connect(sigc::mem_fun(*this, &Shell::on_archive_search_open));
+    start->append(*search);
+    // s018: the search row -- words, a kind, a year.
+    m_ar_search.set_placeholder_text("Search the archive -- a name, a folder it came from, a word");
+    m_ar_search.set_hexpand(true);
+    m_ar_search.signal_search_changed().connect(sigc::mem_fun(*this, &Shell::paint_archive_hits));
+    {
+        std::vector<Glib::ustring> kinds = {"Any kind"};
+        for (const auto& k : core::archive::search_kinds()) kinds.push_back(k);
+        m_ar_kind.set_model(Gtk::StringList::create(kinds));
+        m_ar_kind.set_selected(0);
+        m_ar_year.set_model(Gtk::StringList::create({"Any year"}));
+        m_ar_year.set_selected(0);
+    }
+    for (auto* dd : {&m_ar_kind, &m_ar_year}) {
+        dd->set_valign(Gtk::Align::CENTER);
+        dd->property_selected().signal_changed().connect([this] {
+            if (!m_ar_dd_quiet) Glib::signal_idle().connect_once([this] { paint_archive_hits(); });
+        });
+    }
+    m_ar_search_bar.append(m_ar_search);
+    m_ar_search_bar.append(m_ar_kind);
+    m_ar_search_bar.append(m_ar_year);
     m_ar_states.add(*start, "start");
 
     // running
@@ -896,8 +923,12 @@ void Shell::build_archive_page() {  // zone: Archive
     auto more = Gtk::make_managed<Gtk::Button>("Look again");
     more->add_css_class("ghost");
     more->set_action_name("win.archive-find");
+    auto srch = Gtk::make_managed<Gtk::Button>("Search the archive");   // s018
+    srch->add_css_class("ghost");
+    srch->signal_clicked().connect(sigc::mem_fun(*this, &Shell::on_archive_search_open));
     btns->append(*undo);
     btns->append(*act);
+    btns->append(*srch);
     btns->append(*more);
     done->append(*btns);
     m_ar_states.add(*done, "done");

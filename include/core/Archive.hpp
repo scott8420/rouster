@@ -93,4 +93,57 @@ std::vector<Stored> stored(const door::Door& door, const std::string& home);
 // folders, then Move). A blocked one is left out and named.
 door::Plan put_back(const std::string& home, const std::vector<Stored>& items, std::vector<std::string>& dropped);
 
+// ── s018: search the archive (TIDY "The catalog": by name, kind, where it came
+// from, when). READ-ONLY. The disk is the truth: ~/Archive is walked (lstat,
+// no symlinks, one filesystem, hidden names skipped, a package one entry);
+// the catalog adds what only it knows (the content type a Look gave it, the
+// last read); Rouster's records (stored()) say where each came from and which
+// Put back brings it home -- a file inside an archived folder comes back with
+// its folder. Something in ~/Archive Rouster didn't put there is still found;
+// its "from" is read off the Archive's own layout (Archive/<year>/<path>),
+// and nothing offers to put it back.
+const std::vector<std::string>& search_kinds();   // "Documents", "Pictures", "Music", "Video", "Text & code", "Archives", "Other"
+// By content type first ("image/png" -> Pictures; "application/pdf" ->
+// Documents), else by extension.
+std::string search_kind(const std::string& ext, const std::string& content_type);
+
+inline constexpr std::size_t kNoStored = static_cast<std::size_t>(-1);
+inline constexpr std::size_t kIndexCap = 200000;   // entries walked at most
+
+struct Entry {
+    std::string   rel;               // "Archive/2019/Documents/Taxes/w2.pdf"
+    std::string   name;              // "w2.pdf"
+    std::string   from;              // "Documents/Taxes/w2.pdf" ("" = can't say)
+    bool          recorded = false;  // `from` is from Rouster's records, not guessed from the layout
+    std::size_t   stored = kNoStored;   // the Stored item (by index) whose Put back brings it home
+    bool          inside = false;    // ...as part of an archived folder (the whole folder goes back)
+    bool          package = false;
+    std::string   ext, kind;         // kind: one of search_kinds()
+    std::uint64_t bytes = 0;         // disk usage (a package: all of it)
+    std::int64_t  changed = 0;       // mtime (a package: its newest inside)
+    std::int64_t  read = 0;          // last read, from the catalog (0 = it doesn't know)
+    std::int64_t  archived = 0;      // when it went in (the records; 0 = unknown)
+    int           year = 0;          // the Archive/<year>/ it sits under (0 = none)
+};
+struct Index {
+    bool               ok = false;
+    std::string        error;
+    std::vector<Entry> entries;      // by rel
+    std::vector<int>   years;        // present, newest first
+    std::uint64_t      bytes = 0;
+    bool               truncated = false;   // past kIndexCap
+    std::uint64_t      unread = 0;   // things that couldn't be read
+};
+Index index(const std::string& home, const std::string& data_dir, const std::vector<Stored>& stored);
+
+struct Query {
+    std::string text;                // words, any order, case-insensitive; each must be in the name or where it came from
+    std::string kind;                // "" = any
+    int         year = 0;            // 0 = any
+    bool empty() const;
+};
+// Indices into ix.entries, best first: every word in the NAME before words
+// only in the path, then the newest change. At most `limit`; `total` = all.
+std::vector<std::size_t> match(const Index& ix, const Query& q, std::size_t limit, std::size_t* total = nullptr);
+
 }  // namespace rouster::core::archive
