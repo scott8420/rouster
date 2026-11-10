@@ -15,6 +15,8 @@ namespace rouster::core::pkg {
 const std::vector<std::string>& kinds() {
     static const std::vector<std::string> v = {
         ".scriv", ".scrivtemplate", ".pages", ".numbers", ".key", ".rtfd", ".app", ".photoslibrary",
+        // s017: our own apps' bundles are folders too (read from their code): Curvz, Folio (v5), jot, Optik.
+        ".curvz", ".folio", ".jots", ".optik",
     };
     return v;
 }

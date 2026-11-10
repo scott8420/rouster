@@ -1007,6 +1007,58 @@ void Shell::paint_tidy() {  // helper: s015c -- the report's cards
         auto c = card(head, "Short-life files wait here 30 days, then come up for the Trash -- only when you check them. "
                             "The rest wait to be sorted, or go to the Junk Drawer: kept, no home yet, never ages out." +
                             std::string(v.junk ? " (" + with_commas(v.junk) + " in the Junk Drawer now.)" : ""));
+        // s016c: a Put away waiting for its yes -- the preview.
+        const td::ClosetItem* away = nullptr;
+        if (m_tc_away) for (const auto& it : v.items) if (it.rel == m_tc_away->first) away = &it;
+        if (!away) m_tc_away.reset();
+        if (away) {
+            const std::string dest = m_tc_away->second;
+            const auto pv = td::put_away_plan(m_home, *away, dest, m_td_shown.hands_off);
+            auto box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 6);
+            box->add_css_class("card");
+            box->set_margin_top(6);
+            box->append(*text("Put away", "card-title"));
+            line(box, "~/" + away->rel + (away->dir ? "/" : ""), "\u2192 ~/" + dest + "/" + away->rel.substr(away->rel.rfind('/') + 1),
+                 scan::human_bytes(away->bytes), "", "");
+            if (!pv.n) {
+                auto w = text("Can't: " + (pv.dropped.empty() ? std::string("nothing to do") : pv.dropped.front().substr(away->rel.size() + 2)), "pf-amber");
+                w->set_wrap(true);
+                box->append(*w);
+            } else {
+                std::string why;
+                const auto rule = td::home_rule(*away, dest, m_rl_book.rules, &why);
+                if (rule) {
+                    auto rc = Gtk::make_managed<Gtk::CheckButton>("Also make it a rule: *." + rule->exts.front() +
+                                                                  " landing in the Closet \u2192 ~/" + dest);
+                    rc->set_active(m_tc_away_rule);
+                    rc->signal_toggled().connect([this, rc] { m_tc_away_rule = rc->get_active(); });
+                    box->append(*rc);
+                    auto n = text("Added off -- on the Rules page its preview shows what it would move before you turn it on.", "dim");
+                    n->set_wrap(true);
+                    n->set_margin_start(28);
+                    box->append(*n);
+                } else {
+                    auto n = text("No rule offered: " + why + ".", "dim");
+                    n->set_wrap(true);
+                    box->append(*n);
+                }
+            }
+            auto bb = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 12);
+            bb->set_halign(Gtk::Align::END);
+            auto cancel = Gtk::make_managed<Gtk::Button>("Cancel");
+            cancel->add_css_class("ghost");
+            cancel->signal_clicked().connect([this] {
+                Glib::signal_idle().connect_once([this] { m_tc_away.reset(); m_tc_away_rule = false; paint_tidy(); });
+            });
+            bb->append(*cancel);
+            auto go = Gtk::make_managed<Gtk::Button>("Put it there");
+            go->add_css_class("act");
+            go->set_sensitive(pv.n > 0 && !m_pf_red && !door_busy() && !m_td_worker.joinable());
+            go->signal_clicked().connect(sigc::mem_fun(*this, &Shell::on_closet_put_go));
+            bb->append(*go);
+            box->append(*bb);
+            c->append(*box);
+        }
         if (v.items.empty()) {
             c->append(*text("Nothing waiting.", "dim"));
         } else {
@@ -1027,7 +1079,7 @@ void Shell::paint_tidy() {  // helper: s015c -- the report's cards
             auto rows_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 4);
             auto sc = Gtk::make_managed<Gtk::ScrolledWindow>();
             sc->set_policy(Gtk::PolicyType::NEVER, Gtk::PolicyType::AUTOMATIC);
-            sc->set_min_content_height(static_cast<int>(std::min<std::size_t>(v.items.size() * 25, 420)));
+            sc->set_min_content_height(static_cast<int>(std::min<std::size_t>(v.items.size() * 30, 420)));
             sc->set_max_content_height(420);
             sc->set_propagate_natural_height(true);
             rows_box->set_margin_end(14);
@@ -1057,6 +1109,15 @@ void Shell::paint_tidy() {  // helper: s015c -- the report's cards
                      ex ? "expired" : it.expires ? "short" : "to sort", ex ? "Past its 30 days: the Trash, if you check it"
                                                                  : "~/" + it.rel);
                 rw->append(*inner);
+                auto put = Gtk::make_managed<Gtk::Button>("Put away\u2026");
+                put->add_css_class("ghost");
+                put->add_css_class("small");
+                put->set_valign(Gtk::Align::CENTER);
+                put->set_tooltip_text("Choose its home -- a folder. You see the move before it happens.");
+                put->signal_clicked().connect([this, rel] {
+                    Glib::signal_idle().connect_once([this, rel] { on_closet_put_away(rel); });
+                });
+                rw->append(*put);
                 rows_box->append(*rw);
             }
         }
@@ -1198,6 +1259,8 @@ void Shell::paint_tidy() {  // helper: s015c -- the report's cards
         m_td_gates[vi] = gate;
     }
 
+    paint_versions();   // s017: version families + app history
+
     if (const auto kept = td::kept(data_dir()); !kept.empty()) {   // s016b
         auto c = card("Kept here \u00b7 " + with_commas(kept.size()),
                       "Files you said stay where they are -- never proposed again. Forget lets Tidy propose one again.");
@@ -1284,6 +1347,7 @@ void Shell::tidy_gate() {  // helper: s016 -- each card's act button: label + ma
                                         "Hover a row to see where it goes.");
     }
     closet_gate();
+    versions_gate();   // s017
 }
 
 void Shell::closet_gate() {  // helper: s016b -- the Closet card's buttons: counts, labels, may they act

@@ -1,7 +1,9 @@
 #pragma once
 #include "core/Door.hpp"
+#include "core/Rules.hpp"
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -190,5 +192,21 @@ Review junk_plan(const std::string& home, const std::vector<ClosetItem>& items);
 // again (the queries skip it). Forget records "keep-off"; the newest wins.
 // kept(): the files whose newest decision is keep-here and that are there now.
 std::vector<std::string> kept(const std::string& data_dir);
+
+// ── s016c: Put away -- a home for a Closet item; an accepted home -> a rule ─────
+// Q11 lean: a home is ACCEPTED when you put an item away from the Closet into
+// a folder you chose. The move is one door step (previewed on the card).
+// put_away_plan refuses (n = 0, said in `dropped`): an item not at the top of
+// the Closet; a destination that isn't an existing real folder under home, or
+// is the Closet / inside it (the Junk Drawer has its own button), or is under
+// a hands-off folder; a name already taken there; a changed or gone item.
+Review put_away_plan(const std::string& home, const ClosetItem& item, const std::string& dest_rel,
+                     const std::vector<std::string>& hands_off);
+// The rule that would keep it happening: "*.<ext> landing in the Closet ->
+// dest", OFF (the Rules page's preview comes before it runs). None for a
+// folder, a name without an extension, or when a rule already watches the
+// Closet for that extension (`why` says which).
+std::optional<rules::Rule> home_rule(const ClosetItem& item, const std::string& dest_rel,
+                                     const std::vector<rules::Rule>& existing, std::string* why = nullptr);
 
 }  // namespace rouster::core::tidy

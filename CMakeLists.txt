@@ -27,6 +27,8 @@ add_library(rouster_core STATIC
     src/core/Catalog.cpp
     # Tidy (s015c): the report -- verdicts as named queries over the catalog; read-only.
     src/core/Tidy.cpp
+    # Version families (s017): families by name, app history recognised; read-only.
+    src/core/Versions.cpp
     src/core/Preflight.cpp
     # THE ONE DOOR (s004): the only file that changes a user's files. The
     # selftest's source gate fails if any other file makes a write call.
@@ -131,6 +133,7 @@ add_executable(rouster
     src/Shell_bindings.cpp
     src/Shell_handlers.cpp
     src/Shell_helpers.cpp
+    src/Shell_versions.cpp
     src/AboutWindow.cpp
     src/HelpWindow.cpp
     src/ShortcutsDialog.cpp

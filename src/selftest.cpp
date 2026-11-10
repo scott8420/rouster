@@ -37,6 +37,7 @@
 #include "core/System.hpp"
 #include "core/Catalog.hpp"
 #include "core/Tidy.hpp"
+#include "core/Versions.hpp"
 
 #include <sqlite3.h>
 
@@ -436,6 +437,38 @@ bool make_profile_fixture(const fs::path& home) {
     return ok;
 }
 
+
+// s017: version families for an Xvfb drive -- a chapter saved six ways, two Curvz
+// bundles, a tidy family, and Folio's history moved into home by its preference.
+bool make_versions_fixture(const fs::path& home) {
+    const auto at = [&](const std::string& rel, const std::string& data, std::int64_t ago_s) {
+        if (!put_bytes(home, rel, data)) return false;
+        const auto t = static_cast<time_t>(std::time(nullptr) - ago_s);
+        struct timespec ts[2] = {{t, 0}, {t, 0}};
+        return ::utimensat(AT_FDCWD, (home / rel).c_str(), ts, AT_SYMLINK_NOFOLLOW) == 0;
+    };
+    const auto touch = [&](const std::string& rel, std::int64_t ago_s) {
+        const auto t = static_cast<time_t>(std::time(nullptr) - ago_s);
+        struct timespec ts[2] = {{t, 0}, {t, 0}};
+        return ::utimensat(AT_FDCWD, (home / rel).c_str(), ts, AT_SYMLINK_NOFOLLOW) == 0;
+    };
+    const std::int64_t D = 86400;
+    const std::string body(6000, 'a'), N = "Documents/Novels/";
+    return at(N + "ch3.odt", body + "one", 9 * D) && at(N + "ch3 draft.odt", body + "one", 8 * D) &&
+           at(N + "ch3 (1).odt", body + "two!", 7 * D) && at(N + "ch3 v2.odt", body + "three", 3 * D + 300) &&
+           at(N + "ch3 final.odt", body + "four", 3 * D) && at(N + "ch3 final2.odt", body + "five-five", D) &&
+           at(N + "Chapter 2.odt", body, D) && at(N + "Chapter 3.odt", body, D) &&
+           at("Documents/Tapper.odt", body + "new", D) && at("Documents/Tapper versions/Tapper old.odt", body + "old", 30 * D) &&
+           at("Pictures/Logo.curvz/project.json", "{}", 20 * D) && at("Pictures/Logo v2.curvz/project.json", "{ }", 2 * D) &&
+           touch("Pictures/Logo.curvz", 20 * D) && touch("Pictures/Logo v2.curvz", 2 * D) &&
+           at(".config/folio/preferences.ini", "[AutoSave]\nbackup-dir=~/FolioBackups\n", 0) &&
+           at("FolioBackups/Tapper/Tapper_2026-11-01T10-00.folio.gz", "gz1", 3 * D) &&
+           at("FolioBackups/Tapper/Tapper_2026-11-02T10-00.folio.gz", "gz2", 2 * D) &&
+           at(".local/share/jot/backups/home.jots/.source", (home / "Notes/home.jots").string() + "\n", 0) &&
+           at(".local/share/jot/backups/home.jots/2026-11-01/a.md", "x", 2 * D) &&
+           at(".local/share/jot/backups/home.jots/2026-11-02/a.md", "x", D);
+}
+
 int main(int argc, char** argv) {
     // `--make-fixture DIR`: build the fixture home for an Xvfb drive, then stop.
     if (argc == 3 && std::string(argv[1]) == "--make-fixture") {
@@ -444,7 +477,8 @@ int main(int argc, char** argv) {
                         make_dups_fixture(argv[2]) &&                                       // s008
                         make_archive_fixture(argv[2]) &&                                    // s009
                         make_organize_fixture(argv[2]) &&                                   // s010
-                        make_profile_fixture(argv[2]);                                      // s012
+                        make_profile_fixture(argv[2]) &&                                    // s012
+                        make_versions_fixture(argv[2]);                                     // s017
         // s012d: a few settings in the FIXTURE's own dconf (never the desktop's),
         // when dconf + dbus-run-session are here; skipped quietly when not.
         if (ok) {
@@ -3978,6 +4012,67 @@ int main(int argc, char** argv) {
             check("closet/review: an item outside the Closet is refused by both plans",
                   td::junk_plan(H, {outside}).n == 0 && td::review_plan(H, {outside}, NOW + 100 * DAY).n == 0);
 
+            // s016c: Put away -- a home you choose; the home may become a rule (added off).
+            {
+                fs::create_directories(home / "Documents/Taxes");
+                fs::create_directories(home / "Documents/Covers");
+                put(home, "Closet/w2.PDF", 3000);
+                put(home, "Documents/Taxes/dup.txt", 3);
+                put(home, "Closet/dup.txt", 3);
+                put(home, "Closet/README", 3);
+                const auto pv = td::closet(D, H, NOW);
+                const auto item = [&](const std::string& rel) {
+                    for (const auto& it : pv.items) if (it.rel == rel) return it;
+                    return td::ClosetItem{};
+                };
+                const std::string treeA = no_trash();
+                auto pa = td::put_away_plan(H, item("Closet/w2.PDF"), "Documents/Taxes", {});
+                check("put away: one move to the chosen folder, by name",
+                      pa.n == 1 && pa.plan.actions.size() == 1 && pa.plan.actions[0].verb == dr::Verb::Move &&
+                      pa.plan.actions[0].to == H + "/Documents/Taxes/w2.PDF" && pa.dropped.empty());
+                const auto refused = [&](const td::Review& rv, const std::string& word) {
+                    return rv.n == 0 && rv.plan.actions.empty() && rv.dropped.size() == 1 &&
+                           rv.dropped[0].find(word) != std::string::npos;
+                };
+                check("put away: refused -- the Closet / the Junk Drawer, a missing folder, '..', a hands-off folder, "
+                      "a name taken there, an item not in the Closet",
+                      refused(td::put_away_plan(H, item("Closet/w2.PDF"), "Closet", {}), "Closet") &&
+                      refused(td::put_away_plan(H, item("Closet/w2.PDF"), "Closet/Junk Drawer", {}), "Closet") &&
+                      refused(td::put_away_plan(H, item("Closet/w2.PDF"), "Documents/Nope", {}), "isn't a folder") &&
+                      refused(td::put_away_plan(H, item("Closet/w2.PDF"), "Documents/../..", {}), "under home") &&
+                      refused(td::put_away_plan(H, item("Closet/w2.PDF"), "Documents/Covers", {"Documents/Covers"}), "hands off") &&
+                      refused(td::put_away_plan(H, item("Closet/dup.txt"), "Documents/Taxes", {}), "already has") &&
+                      refused(td::put_away_plan(H, td::ClosetItem{"Documents/x"}, "Documents/Taxes", {}), "top of the Closet"));
+                pa.plan.previewed = true;
+                const auto pr = door.run(pa.plan);
+                check("put away: run -> in its home, gone from the Closet", pr.ok && fs::exists(home / "Documents/Taxes/w2.PDF") &&
+                      !fs::exists(home / "Closet/w2.PDF"), pr.messages.empty() ? "" : pr.messages.front());
+                const auto pu = door.undo();
+                check("put away: undo -> exact", pu.ok && no_trash() == treeA, pu.messages.empty() ? "" : pu.messages.front());
+
+                std::string why;
+                const auto rule = td::home_rule(item("Closet/w2.PDF"), "Documents/Taxes", {}, &why);
+                check("put away -> rule: '*.pdf in the Closet -> Documents/Taxes', a Move, OFF, and it can run",
+                      rule && rule->folder == "Closet" && rule->exts == std::vector<std::string>{"pdf"} &&
+                      rule->act == core::rules::Do::Move && rule->dest == "Documents/Taxes" && !rule->enabled &&
+                      core::rules::problem(*rule, H).empty(), rule ? core::rules::problem(*rule, H) : why);
+                bool matched = false;
+                if (rule)
+                    for (const auto& m : core::rules::matches(H, {*rule}, static_cast<std::int64_t>(std::time(nullptr)) + 3600, std::size_t{0}))
+                        if (m.from == H + "/Closet/w2.PDF" && m.to == H + "/Documents/Taxes/w2.PDF") matched = true;
+                check("put away -> rule: its preview (the Rules page) finds the next PDF landing in the Closet", matched);
+                check("put away -> rule: none for a folder, a name with no extension, or when one already sorts that extension",
+                      !td::home_rule(item("Closet/pack"), "Documents/Taxes", {}) &&
+                      !td::home_rule(item("Closet/README"), "Documents/Taxes", {}) &&
+                      rule && !td::home_rule(item("Closet/w2.PDF"), "Documents", {*rule}, &why) &&
+                      why.find("already sorts *.pdf") != std::string::npos, why);
+                fs::remove(home / "Closet/w2.PDF", ec);
+                fs::remove(home / "Closet/dup.txt", ec);
+                fs::remove(home / "Closet/README", ec);
+                fs::remove_all(home / "Documents/Taxes", ec);
+                fs::remove_all(home / "Documents/Covers", ec);
+            }
+
             // Keep here -- never proposed again; Forget (keep-off) brings it back.
             const auto rk = td::report(D, H, NOW);
             std::string prop;
@@ -4014,6 +4109,224 @@ int main(int argc, char** argv) {
         check("preflight: 'Last opened' -- relatime green, noatime amber (never red), unknown no row",
               rel && rel->status == pf::Status::Green && noa && noa->status == pf::Status::Amber && !unk &&
               pf::gather(H).atime_mode == ct::atime_mode(H));
+        fs::remove_all(home, ec);
+    }
+    // -- Version families (s017) ---------------------------------------------------
+    {
+        std::cout << "\n-- versions --\n";
+        namespace ct = core::catalog;
+        namespace vs = core::versions;
+        namespace dr = core::door;
+        const auto b = [](const std::string& s) { bool m = false, c = false; std::string r = vs::base_of(s, &m, &c); return r + (m ? "|m" : "") + (c ? "|c" : ""); };
+        check("versions: names -- marks come off the end, bare numbers and dates stay",
+              b("ch3") == "ch3" && b("ch3 final") == "ch3|m" && b("ch3 final2") == "ch3|m" && b("ch3 (1)") == "ch3|m|c" &&
+              b("Copy of ch3") == "ch3|m|c" && b("ch3_v2") == "ch3|m" && b("ch3 draft 3") == "ch3|m" &&
+              b("ch3 - Copy") == "ch3|m|c" && b("ch3 v1.2 final") == "ch3|m" && b("Tapper FINAL final") == "Tapper|m" &&
+              b("Chapter 2") == "Chapter 2" && b("Invoice 2026-02") == "Invoice 2026-02" && b("final") == "final" &&
+              b("dev2") == "dev2" && b("draft") == "draft",
+              b("ch3 v1.2 final") + " / " + b("Tapper FINAL final") + " / " + b("Chapter 2"));
+        std::string st, ex;
+        vs::split_name("Tapper_2026-11-01T10-00.folio.gz", st, ex);
+        const bool sp1 = st == "Tapper_2026-11-01T10-00" && ex == "folio.gz";
+        vs::split_name("README", st, ex);
+        check("versions: split -- .folio.gz is one extension; no dot, no extension; versions folders known",
+              sp1 && st == "README" && ex.empty() && vs::is_versions_folder("ch3 versions") &&
+              vs::is_versions_folder("versions") && !vs::is_versions_folder("conversions") &&
+              vs::versions_name("Tapper") == "Tapper versions");
+        check("versions: our apps' bundles are packages -- .curvz .folio .jots .optik (folders only)",
+              core::pkg::is_package_name("Logo.curvz") && core::pkg::is_package_name("Tapper.FOLIO") &&
+              core::pkg::is_package_name("home.jots") && core::pkg::is_package_name("Book.optik"));
+
+        const fs::path home = fs::temp_directory_path() / ("rouster_versions_" + std::to_string(::getpid()));
+        std::error_code ec;
+        fs::remove_all(home, ec);
+        const std::string H = home.string(), D = H + "/.local/share/rouster";
+        const std::int64_t NOW = 1790000000, DAY = 86400;
+        const auto when = [&](const std::string& rel, std::int64_t t) {
+            struct timespec ts[2] = {{static_cast<time_t>(t), 0}, {static_cast<time_t>(t), 0}};
+            return ::utimensat(AT_FDCWD, (home / rel).c_str(), ts, AT_SYMLINK_NOFOLLOW) == 0;
+        };
+        const auto at = [&](const std::string& rel, const std::string& data, std::int64_t t) {
+            return put_bytes(home, rel, data) && when(rel, t);
+        };
+        const std::string N = "Documents/Novels/";
+        const std::string body(6000, 'a');
+        bool made = at(N + "ch3.odt", body + "one", NOW - 9 * DAY) &&
+                    at(N + "ch3 draft.odt", body + "one", NOW - 8 * DAY) &&            // the same bytes as ch3.odt
+                    at(N + "ch3 (1).odt", body + "two!", NOW - 7 * DAY) &&           // a copy's name
+                    at(N + "ch3 v2.odt", body + "three", NOW - 3 * DAY - 300) &&     // 5 min before "final", ~ same size
+                    at(N + "ch3 final.odt", body + "four", NOW - 3 * DAY) &&
+                    at(N + "ch3 final2.odt", body + "five-five", NOW - DAY) &&        // the keeper
+                    at(N + "Chapter 2.odt", body, NOW - DAY) && at(N + "Chapter 3.odt", body, NOW - DAY) &&
+                    at("Documents/Invoice 2026-01.pdf", body, NOW - 40 * DAY) && at("Documents/Invoice 2026-02.pdf", body, NOW - 9 * DAY) &&
+                    at("Documents/Tapper.odt", body + "new", NOW - DAY) &&
+                    at("Documents/Tapper versions/Tapper old.odt", body + "old", NOW - 30 * DAY) &&
+                    at("Pictures/Logo.curvz/project.json", "{}", NOW - 20 * DAY) && when("Pictures/Logo.curvz", NOW - 20 * DAY) &&
+                    at("Pictures/Logo v2.curvz/project.json", "{ }", NOW - 2 * DAY) && when("Pictures/Logo v2.curvz", NOW - 2 * DAY) &&
+                    at("Develop/x/a.txt", body, NOW - DAY) && at("Develop/x/a (1).txt", body, NOW - 2 * DAY) &&
+                    at("Closet/b.txt", body, NOW - DAY) && at("Closet/b (1).txt", body, NOW - 2 * DAY) &&
+                    at("Documents/Jobs/J1/.rouster.json", "{\"kind\":\"project\"}", NOW) &&
+                    at("Documents/Jobs/J1/rep.txt", body, NOW - DAY) && at("Documents/Jobs/J1/rep v2.txt", body + "x", NOW) &&
+                    at("Pictures/cat.png", body + "c", NOW - 5 * DAY) && at("Pictures/cat copy.png", body + "c", NOW - 5 * DAY) &&
+                    at("Covers/c.png", body, NOW - DAY) && at("Covers/c final.png", body + "y", NOW) &&
+                    // Folio's history, moved into home by its preference; jot's and Trails' in their defaults.
+                    at(".config/folio/preferences.ini", "[General]\nx=1\n[AutoSave]\nbackup-dir=~/FolioBackups/\n", NOW) &&
+                    at("FolioBackups/Tapper/Tapper_2026-11-01T10-00.folio.gz", "gz1", NOW - 3 * DAY) &&
+                    at("FolioBackups/Tapper/Tapper_2026-11-02T10-00.folio.gz", "gz2", NOW - 2 * DAY) &&
+                    at("FolioBackups/Tapper/Tapper final.txt", "a", NOW - 2 * DAY) &&
+                    at("FolioBackups/Tapper/Tapper.txt", "b", NOW - 2 * DAY) &&
+                    at(".local/share/jot/backups/home.jots/.source", H + "/Notes/home.jots\n", NOW) &&
+                    at(".local/share/jot/backups/home.jots/2026-11-01/a.md", "x", NOW - 2 * DAY) &&
+                    at(".local/share/jot/backups/home.jots/2026-11-02/a.md", "x", NOW - DAY) &&
+                    at(".local/share/jot/backups/home.jots/last-ok", "1", NOW) &&
+                    at(".local/share/trails/recordings/2026-11-07_16-40-12.trail", "sqlite", NOW);
+        check("versions: fixture made", made);
+        fs::create_directories(D, ec);
+        core::scan::Progress p;
+        std::vector<core::scan::Seen> mine;
+        core::scan::scan(H, H, p, 0, &mine);
+        const auto rec = ct::record(D, H, "", mine, {}, NOW);
+        check("versions: catalog recorded; Covers hands off", rec.ok && ct::decide(D, "Covers", "hands-off", "", NOW));
+
+        const std::string DH = H + "/.local/share", CH = H + "/.config";
+        const auto hist = vs::app_history(H, DH, CH);
+        std::map<std::string, vs::History> hs;
+        for (const auto& h : hist) hs[h.app] = h;
+        check("versions: app history -- Folio's (moved into home by backup-dir), jot's days, Trails' recordings",
+              hist.size() == 3 && hs["Folio"].what == "Tapper" && hs["Folio"].count == 2 && hs["Folio"].in_home &&
+              hs["Folio"].path == H + "/FolioBackups/Tapper" && hs["jot"].what == "home.jots" && hs["jot"].count == 2 &&
+              !hs["jot"].in_home && hs["Trails"].count == 1 && hs["Folio"].newest == NOW - 2 * DAY,
+              std::to_string(hist.size()));
+
+        const std::string disk = files_snapshot(home);
+        auto r = vs::find(D, H, DH, CH);
+        std::map<std::string, const vs::Family*> fam;
+        for (const auto& f : r.families) fam[f.key()] = &f;
+        std::string keys;
+        for (const auto& [k, f] : fam) keys += k + " ";
+        check("versions: find reads -- changes nothing", r.ok && files_snapshot(home) == disk, r.error);
+        bool cat_ok = false;
+        if (const auto it = fam.find("Pictures/cat.png"); it != fam.end())
+            cat_ok = it->second->members[it->second->keeper].rel == "Pictures/cat.png" &&
+                     it->second->members[1].reflex == "a copy's name";
+        check("versions: saved in the same second -- the plain name is the keeper, not the copy", cat_ok);
+        fam.erase("Pictures/cat.png");
+        check("versions: three families -- ch3 (6), Logo.curvz (packages), Tapper (tidy); not Chapter 2/3, "
+              "not the invoices, not dev / Closet / a Project / hands off / Folio's history",
+              fam.size() == 3 && fam.count("Documents/Novels/ch3.odt") && fam.count("Pictures/logo.curvz") &&
+              fam.count("Documents/tapper.odt"), keys);
+        if (fam.size() == 3 && fam.count("Documents/Novels/ch3.odt") && fam.count("Documents/tapper.odt") &&
+            fam.count("Pictures/logo.curvz")) {
+            const vs::Family& c3 = *fam["Documents/Novels/ch3.odt"];
+            const vs::Family& tp = *fam["Documents/tapper.odt"];
+            const vs::Family& lg = *fam["Pictures/logo.curvz"];
+            std::map<std::string, std::string> rf;
+            for (const auto& m : c3.members) rf[m.rel.substr(N.size())] = m.reflex;
+            check("versions: ch3 -- six, newest first, the keeper is the newest, five loose, vdir beside it",
+                  c3.members.size() == 6 && c3.members[c3.keeper].rel == N + "ch3 final2.odt" && c3.keeper_why == "the newest" &&
+                  c3.loose == 5 && c3.vdir == "Documents/Novels/ch3 versions" && c3.base == "ch3" && c3.members[0].changed == NOW - DAY);
+            check("versions: reflex saves -- a copy's name, the same bytes, minutes apart at ~ the same size; not the others",
+                  rf["ch3 (1).odt"] == "a copy's name" && rf["ch3 draft.odt"] == "the same bytes as ch3.odt" &&
+                  rf["ch3 v2.odt"].find("5 min before ch3 final.odt") != std::string::npos && rf["ch3 final.odt"].empty() && rf["ch3.odt"].empty() &&
+                  rf["ch3 final2.odt"].empty(),
+                  rf["ch3 v2.odt"] + " / " + rf["ch3 draft.odt"]);
+            check("versions: Tapper -- tidy (its one outside is the keeper), the old one in 'Tapper versions'",
+                  tp.loose == 0 && tp.members.size() == 2 && tp.members[tp.keeper].rel == "Documents/Tapper.odt" &&
+                  tp.keeper_why == "the only one outside its versions folder" && tp.vdir == "Documents/Tapper versions");
+            check("versions: Logo.curvz -- two packages, the newer is the keeper; tidy families sort last",
+                  lg.members.size() == 2 && lg.members[lg.keeper].rel == "Pictures/Logo v2.curvz" && lg.members[0].package &&
+                  lg.loose == 1 && r.families.back().key() == "Documents/tapper.odt" && r.loose == 7);
+
+            dr::Door door(H, D);
+            door.load();
+            const auto no_trash = [&] {
+                std::istringstream in(files_snapshot(home));
+                std::string l, out;
+                while (std::getline(in, l)) if (l.find("/.local/share/Trash") == std::string::npos) out += l + "\n";
+                return out;
+            };
+            const std::string tree0 = no_trash();
+            auto s1 = vs::plan(H, c3, c3.keeper);
+            check("versions: the step -- make the versions folder, five moves into it, the keeper stays",
+                  s1.moves == 5 && s1.plan.actions.size() == 6 && s1.plan.actions[0].verb == dr::Verb::MakeDir &&
+                  s1.plan.actions[0].to == H + "/" + N + "ch3 versions" && !s1.plan.previewed && s1.dropped.empty());
+            check("versions: the door refuses it unpreviewed", !door.run(s1.plan).ok && no_trash() == tree0);
+            s1.plan.previewed = true;
+            const auto r1 = door.run(s1.plan);
+            check("versions: run -> five in 'ch3 versions', the keeper where it was",
+                  r1.ok && fs::exists(home / (N + "ch3 versions/ch3 (1).odt")) && fs::exists(home / (N + "ch3 versions/ch3.odt")) &&
+                  fs::exists(home / (N + "ch3 final2.odt")) && !fs::exists(home / (N + "ch3 final.odt")),
+                  r1.messages.empty() ? "" : r1.messages.front());
+            const auto u1 = door.undo();
+            check("versions: undo -> exact", u1.ok && no_trash() == tree0, u1.messages.empty() ? "" : u1.messages.front());
+
+            // Keep this one instead: an older keeper; then a keeper that sits in the versions folder comes out.
+            std::size_t first = 0;
+            for (std::size_t x = 0; x < c3.members.size(); ++x) if (c3.members[x].rel == N + "ch3.odt") first = x;
+            const auto s2 = vs::plan(H, c3, first);
+            bool newest_in = false, first_stays = true;
+            for (const auto& a : s2.plan.actions) {
+                if (a.from == H + "/" + N + "ch3 final2.odt" && a.to == H + "/" + N + "ch3 versions/ch3 final2.odt") newest_in = true;
+                if (a.from == H + "/" + N + "ch3.odt") first_stays = false;
+            }
+            check("versions: keep this one instead -- the newest goes in, the chosen one stays", s2.moves == 5 && newest_in && first_stays);
+            std::size_t old = 0;
+            for (std::size_t x = 0; x < tp.members.size(); ++x) if (tp.members[x].in_versions) old = x;
+            auto s3 = vs::plan(H, tp, old);
+            s3.plan.previewed = true;
+            const auto r3 = door.run(s3.plan);
+            check("versions: a keeper in the versions folder comes out; the other goes in -- one step, undone exact",
+                  s3.moves == 1 && s3.plan.actions.size() == 2 && r3.ok && fs::exists(home / "Documents/Tapper old.odt") &&
+                  fs::exists(home / "Documents/Tapper versions/Tapper.odt") && door.undo().ok && no_trash() == tree0);
+
+            // Looked at again: changed since the Look; a name already taken in the versions folder.
+            at(N + "ch3 final.odt", body + "four, edited", NOW);
+            at(N + "ch3 versions/ch3 (1).odt", "someone else", NOW);
+            const auto s4 = vs::plan(H, c3, c3.keeper);
+            std::string dropped;
+            for (const auto& d : s4.dropped) dropped += d + " | ";
+            check("versions: changed since the Look and a taken name -- left out, said; the folder there, not made again",
+                  s4.moves == 3 && s4.dropped.size() == 2 && dropped.find("ch3 final.odt: changed since the Look") != std::string::npos &&
+                  dropped.find("ch3 (1).odt: its name is taken") != std::string::npos &&
+                  s4.plan.actions.front().verb == dr::Verb::Move, dropped);
+            fs::remove_all(home / (N + "ch3 versions"), ec);
+
+            // Two families, one step, one Undo.
+            const auto r5 = vs::find(D, H, DH, CH);
+            std::vector<vs::Family> two;
+            for (const auto& f : r5.families) if (f.loose && f.key() != "Pictures/cat.png") two.push_back(f);
+            auto s5 = vs::plan_all(H, two, {});
+            s5.plan.previewed = true;
+            const std::string tree5 = no_trash();
+            const auto rr5 = door.run(s5.plan);
+            check("versions: two families in one step (5 moves -- the edited one left out -- and 2 folders) -- one Undo takes both back",
+                  two.size() == 2 && s5.moves == 5 && rr5.ok && fs::exists(home / "Pictures/Logo versions/Logo.curvz/project.json") &&
+                  door.undo().ok && no_trash() == tree5, std::to_string(s5.moves));
+
+            // Decisions: not a family -> never proposed again; Keep this one instead -> "you chose".
+            const auto r6 = vs::find(D, H, DH, CH);
+            const vs::Family* lg6 = nullptr;
+            const vs::Family* c36 = nullptr;
+            for (const auto& f : r6.families) {
+                if (f.key() == "Pictures/logo.curvz") lg6 = &f;
+                if (f.key() == "Documents/Novels/ch3.odt") c36 = &f;
+            }
+            bool chose = false;
+            if (lg6 && c36) {
+                std::size_t k = 0;
+                for (std::size_t x = 0; x < c36->members.size(); ++x) if (c36->members[x].rel == N + "ch3 final.odt") k = x;
+                chose = vs::not_a_family(D, *lg6, NOW + 1) && vs::choose_keeper(D, *c36, k, NOW + 1);
+            }
+            const auto r7 = vs::find(D, H, DH, CH);
+            bool logo_gone = true, you_chose = false;
+            for (const auto& f : r7.families) {
+                if (f.key() == "Pictures/logo.curvz") logo_gone = false;
+                if (f.key() == "Documents/Novels/ch3.odt")
+                    you_chose = f.keeper_why == "you chose" && f.members[f.keeper].rel == N + "ch3 final.odt";
+            }
+            check("versions: 'not a family' -> left out next time; 'keep this one' -> the keeper, 'you chose'",
+                  chose && logo_gone && you_chose);
+        }
         fs::remove_all(home, ec);
     }
     // -- The source gate: no write call outside the door (s004) --------------

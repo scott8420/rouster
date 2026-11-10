@@ -24,7 +24,9 @@
 namespace rouster::core::pkg {
 
 // ".scriv", ".scrivtemplate", ".pages", ".numbers", ".key", ".rtfd", ".app",
-// ".photoslibrary" -- the list is code, like the never-touch list.
+// ".photoslibrary" -- the list is code, like the never-touch list. s017 adds our
+// own apps' bundles, folders too (read from their code): ".curvz", ".folio"
+// (Folio v5), ".jots", ".optik".
 const std::vector<std::string>& kinds();
 
 // The name alone (no lstat): "Tapper.scriv", "TAPPER.SCRIV" -> true;

@@ -889,12 +889,14 @@ void Shell::on_tidy_look() {  // handler: Look at home, record, report (worker)
     m_td_spinner.start();
     m_td_states.set_visible_child("running");
     if (auto lg = log::get(log::Area::Tidy)) lg->info("look '{}'", m_home);
-    m_td_worker = std::thread([this, prog = m_td_progress, home = m_home, data = data_dir()] {
+    m_td_worker = std::thread([this, prog = m_td_progress, home = m_home, data = data_dir(),
+                               dh = versions_data_home(), ch = versions_config_home()] {
         const auto t0 = std::chrono::steady_clock::now();
         std::vector<core::scan::Seen> mine;
         const core::scan::Report sr = core::scan::scan(home, home, *prog, 0, &mine);
         core::catalog::Delta cat;
         core::tidy::Report rep;
+        core::versions::Report vf;
         if (!sr.refused.empty()) rep.error = "not looked: " + sr.refused;
         else if (sr.cancelled) rep.error = "stopped -- nothing recorded";
         else {
@@ -915,6 +917,16 @@ void Shell::on_tidy_look() {  // handler: Look at home, record, report (worker)
                 const long changed = core::catalog::set_kinds(data, kinds);
                 if (auto lg = log::get(log::Area::Catalog)) lg->info("kinds: {} extensions, {} rows set", kinds.size(), changed);
                 rep = core::tidy::report(data, sr.home, now);
+                vf = core::versions::find(data, sr.home, dh, ch);   // s017
+                if (auto lg = log::get(log::Area::Tidy)) {
+                    if (!vf.ok) lg->warn("versions: {}", vf.error);
+                    else lg->info("versions: {} families, {} older saves loose; {} app histories", vf.families.size(),
+                                  vf.loose, vf.history.size());
+                    for (const auto& f : vf.families)
+                        lg->debug("family '{}': {} saves, keeper {} ({}), {} loose", f.key(), f.members.size(),
+                                  f.members[f.keeper].rel, f.keeper_why, f.loose);
+                    for (const auto& h : vf.history) lg->info("app history: {} '{}' {} at {}", h.app, h.what, h.count, h.path);
+                }
             }
         }
         const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
@@ -937,6 +949,7 @@ void Shell::on_tidy_look() {  // handler: Look at home, record, report (worker)
             std::lock_guard lk(m_td_mx);
             m_td_found = std::move(rep);
             m_td_cat = std::move(cat);
+            m_vf_found = std::move(vf);
         }
         m_tidy_finished.emit();
     });
@@ -957,7 +970,11 @@ void Shell::on_tidy_found() {  // handler: the report is ready (Dispatcher -> UI
         std::lock_guard lk(m_td_mx);
         m_td_shown = m_td_found;
         m_td_cat_shown = m_td_cat;
+        m_vf_shown = m_vf_found;
     }
+    m_vf_checked.clear();   // s017: nothing pre-checked -- which one is the good one is yours to say
+    m_vf_keep.clear();
+    m_vf_said.clear();
     if (!m_td_shown.ok) {
         m_td_sub.set_text("No report: " + m_td_shown.error + ".");
         m_td_states.set_visible_child("start");
@@ -969,6 +986,7 @@ void Shell::on_tidy_found() {  // handler: the report is ready (Dispatcher -> UI
     m_td_checked.clear();
     m_tc_checked.clear();   // s016b: the Closet card -- nothing pre-checked
     m_td_keep_said.clear();
+    m_tc_away.reset();      // s016c
     for (const auto& g : m_td_shown.groups)
         if (g.verdict != core::tidy::Verdict::Dormant)
             for (std::size_t i = 0; i < g.rows.size() && i < kTidyShown; ++i) m_td_checked.insert(g.rows[i].rel);
@@ -1131,12 +1149,86 @@ void Shell::on_closet_junk() {  // handler: s016b -- checked Closet items -> the
     else tidy_done("Nothing moved", r.messages.empty() ? std::string("The door refused the plan.") : r.messages.front());
 }
 
+void Shell::on_closet_put_away(const std::string& rel) {  // handler: s016c -- Put away...: choose its home
+    auto dialog = Gtk::FileDialog::create();
+    dialog->set_title("Put away " + rel.substr(rel.rfind('/') + 1) + " -- choose its home");
+    dialog->set_initial_folder(Gio::File::create_for_path(m_home));
+    dialog->select_folder(*this, [this, dialog, rel](const Glib::RefPtr<Gio::AsyncResult>& result) {
+        std::string path;
+        try {
+            auto dir = dialog->select_folder_finish(result);
+            if (dir) path = dir->get_path();
+        } catch (const Glib::Error& e) {
+            if (auto lg = log::get(log::Area::Tidy)) lg->info("put away: dialog dismissed ({})", e.what());
+            return;
+        }
+        if (m_td_states.get_visible_child_name() != "results") return;
+        if (path.size() <= m_home.size() + 1 || path.compare(0, m_home.size() + 1, m_home + "/") != 0) {
+            m_td_keep_said = "Not put away: pick a folder inside your home (not home itself).";
+            paint_tidy();
+            return;
+        }
+        m_tc_away = std::make_pair(rel, path.substr(m_home.size() + 1));
+        m_tc_away_rule = false;
+        m_td_keep_said.clear();
+        paint_tidy();   // the preview, on the Closet card
+    });
+}
+
+void Shell::on_closet_put_go() {  // handler: s016c -- the previewed Put away -> one door step; the rule if checked
+    namespace td = core::tidy;
+    if (!m_door || door_busy() || m_td_worker.joinable() || !m_tc_away) return;
+    if (m_td_states.get_visible_child_name() != "results") return;
+    paint_preflight();
+    if (m_pf_red) { paint_tidy(); return; }
+    const td::ClosetItem* it = nullptr;
+    for (const auto& x : m_tc_view.items) if (x.rel == m_tc_away->first) it = &x;
+    if (!it) { m_tc_away.reset(); paint_tidy(); return; }
+    const std::string dest = m_tc_away->second;
+    auto pv = td::put_away_plan(m_home, *it, dest, m_td_shown.hands_off);
+    std::optional<core::rules::Rule> rule;
+    if (m_tc_away_rule) rule = td::home_rule(*it, dest, m_rl_book.rules);
+    if (auto lg = log::get(log::Area::Tidy)) {
+        lg->info("put away '{}' -> '{}': {}", it->rel, dest, pv.n ? "planned" : (pv.dropped.empty() ? "nothing" : pv.dropped.front()));
+    }
+    if (!pv.n) { paint_tidy(); return; }
+    pv.plan.previewed = true;   // the Put away box on the card was the preview
+    const auto r = m_door->run(pv.plan);
+    if (auto lg = log::get(log::Area::Tidy)) {
+        lg->info("put away: {} done, {} failed", r.done, r.failed);
+        for (const auto& m : r.messages) lg->warn("  {}", m);
+    }
+    const std::string name = it->rel.substr(it->rel.rfind('/') + 1);
+    m_tc_away.reset();
+    m_tc_away_rule = false;
+    if (!r.ok) {
+        tidy_done("Nothing moved", r.messages.empty() ? std::string("The door refused the plan.") : r.messages.front());
+        return;
+    }
+    std::string ruled;
+    if (rule) {   // Rouster's own rules.json, as the Rules page saves it; the rule is OFF
+        m_rl_book.rules.push_back(*rule);
+        rl_save();
+        paint_rules();
+        if (auto lg = log::get(log::Area::Rules)) lg->info("added (off) from Put away '{}': {}", rule->name, core::rules::summary(*rule));
+        ruled = " The rule \u201c" + rule->name + "\u201d is on the Rules page, off -- preview it there, then turn it on "
+                "(Delete there takes it away; Undo here doesn't).";
+    }
+    tidy_done(name, "put away in ~/" + dest + ". Undo takes the step back." + ruled);
+}
+
 void Shell::tidy_rereport(const std::string& said) {  // helper: s016a2 -- the report again from the catalog (no walk)
     if (m_td_worker.joinable() || m_td_states.get_visible_child_name() != "results") return;
     auto rep = core::tidy::report(data_dir(), m_home, static_cast<std::int64_t>(std::time(nullptr)));
     if (!rep.ok) return;
     std::set<std::string> was = m_td_checked;   // keep your checks where the row is still proposed
     m_td_shown = std::move(rep);
+    m_vf_shown = core::versions::find(data_dir(), m_home, versions_data_home(), versions_config_home());   // s017
+    {
+        std::set<std::string> keys;
+        for (const auto& f : m_vf_shown.families) keys.insert(f.key());
+        for (auto it = m_vf_checked.begin(); it != m_vf_checked.end();) it = keys.count(*it) ? std::next(it) : m_vf_checked.erase(it);
+    }
     m_td_checked.clear();
     for (const auto& g : m_td_shown.groups)
         for (std::size_t i = 0; i < g.rows.size() && i < kTidyShown; ++i)

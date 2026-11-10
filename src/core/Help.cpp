@@ -196,7 +196,22 @@ std::vector<Topic> build() {
                 "them back.",
                 "- To the Junk Drawer -- kept, no home yet; things there never age out.",
                 "Keep here, on any proposed row, leaves that file where it is and it is never proposed again. The "
-                "\"Kept here\" card lists them; Forget lets Tidy propose one again."}},
+                "\"Kept here\" card lists them; Forget lets Tidy propose one again.",
+                "Put away... on a Closet row: choose its home (a folder). The card shows the move first -- Put it "
+                "there, or Cancel. Check \"Also make it a rule\" and the next *.pdf (say) landing in the Closet will go "
+                "there too: the rule is added off, and the Rules page shows what it would move before you turn it on."}},
+            {"Version families", {
+                "Save, save, save: ch3.odt, ch3 final.odt, ch3 final2.odt, ch3 (1).odt -- the same name in one folder "
+                "with a mark on the end (final, v2, draft 3, (1), Copy of, - Copy). A bare number or a date is not a "
+                "mark: Chapter 2 and Chapter 3 are two chapters, two dated invoices are two invoices.",
+                "The newest is the keeper and stays. Check a family and press the button: the older saves go into "
+                "\"ch3 versions\" right beside it, one step, Undo takes it back. Nothing is checked for you.",
+                "Keep this, on any save, makes it the keeper (one in the versions folder comes back out); Rouster "
+                "remembers your choice. Not a family -- never proposed again.",
+                "\"reflex\" marks a save that looks like muscle memory: a copy's name, the same bytes as an older one, "
+                "or saved minutes before the next at nearly the same size.",
+                "App history -- Folio's backups, jot's daily copies, Trails' recordings -- is the app's own: listed, "
+                "left alone, never a family. Curvz, Folio, jot and Optik projects are folders Rouster keeps whole."}},
             {"Hands off", {
                 "\"Leave a folder alone...\" marks a folder -- your Scrivener folder, covers, workups. Nothing inside it "
                 "is ever proposed: not by Tidy, not by Archive, not by Duplicates (a duplicate pair with either copy "

@@ -5,6 +5,7 @@
 #include "core/Scan.hpp"   // human_bytes
 
 #include <algorithm>
+#include <cctype>
 #include <ctime>
 #include <sstream>
 #include <cstdio>
@@ -600,6 +601,60 @@ std::vector<std::string> kept(const std::string& data_dir) {
         "ORDER BY d.id DESC LIMIT 1) = 'keep-here' ORDER BY f.path");
     if (q.ok) for (const auto& row : q.rows) out.push_back(row[0]);
     return out;
+}
+
+// ── s016c: Put away ──────────────────────────────────────────────────────────
+Review put_away_plan(const std::string& home, const ClosetItem& item, const std::string& dest_rel,
+                     const std::vector<std::string>& hands_off) {
+    Review r;
+    const std::string closet = kCloset;
+    r.plan.label = "Tidy: put away " + base_of(item.rel) + " -> ~/" + dest_rel;
+    const auto no = [&](const std::string& why) { r.dropped.push_back(item.rel + ": " + why); return r; };
+    if (item.rel.rfind(closet + "/", 0) != 0 || item.rel == kJunkDrawer ||
+        item.rel.find('/', closet.size() + 1) != std::string::npos)
+        return no("not at the top of the Closet");
+    if (dest_rel.empty() || dest_rel.front() == '/' || dest_rel.back() == '/' || dest_rel.find("..") != std::string::npos ||
+        dest_rel.find("//") != std::string::npos)
+        return no("~/" + dest_rel + " isn't a folder under home");
+    if (dest_rel == closet || dest_rel.rfind(closet + "/", 0) == 0)
+        return no("that's the Closet -- the Junk Drawer has its own button");
+    if (catalog::under(hands_off, dest_rel)) return no("~/" + dest_rel + " is hands off");
+    if (!is_dir(home + "/" + dest_rel)) return no("~/" + dest_rel + " isn't a folder there");
+    if (const auto why = recheck(home, item); !why.empty()) return no(why);
+    const std::string to = home + "/" + dest_rel + "/" + base_of(item.rel);
+    if (exists(to)) return no("~/" + dest_rel + " already has a " + base_of(item.rel));
+    door::Action a;
+    a.verb = door::Verb::Move;
+    a.from = home + "/" + item.rel;
+    a.to = to;
+    a.bytes = item.bytes;
+    a.reason = "put away -- its home, chosen by you";
+    r.plan.actions.push_back(a);
+    r.n = 1;
+    r.bytes = item.bytes;
+    return r;
+}
+
+std::optional<rules::Rule> home_rule(const ClosetItem& item, const std::string& dest_rel,
+                                     const std::vector<rules::Rule>& existing, std::string* why) {
+    const auto no = [&](const std::string& w) -> std::optional<rules::Rule> { if (why) *why = w; return std::nullopt; };
+    if (item.dir) return no("a folder -- rules sort files");
+    const std::string name = base_of(item.rel);
+    const auto dot = name.rfind('.');
+    if (dot == std::string::npos || dot == 0 || dot + 1 == name.size()) return no("no extension to sort by");
+    std::string ext = name.substr(dot + 1);
+    for (auto& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    for (const auto& e : existing)
+        if (e.folder == kCloset && std::find(e.exts.begin(), e.exts.end(), ext) != e.exts.end())
+            return no("the rule “" + e.name + "” already sorts *." + ext + " in the Closet");
+    rules::Rule r;
+    r.name = "Closet: *." + ext + " -> " + dest_rel;
+    r.folder = kCloset;
+    r.exts = {ext};
+    r.act = rules::Do::Move;
+    r.dest = dest_rel;
+    r.enabled = false;
+    return r;
 }
 
 }  // namespace rouster::core::tidy
