@@ -21,10 +21,17 @@ find_package(spdlog REQUIRED)
 # No gtkmm on this library's link line, BY DESIGN: a stray UI include under
 # core/ fails to compile, so the seam is enforced by the build graph and the
 # core stays headless-testable. (docs/two-layer-seam.md.)
+# ── latch -- the shared door (2026-11-10), one repo beside this one ───────────
+# The workspace layout: <dir>/rouster-project/rouster and <dir>/latch-project/latch.
+set(LATCH_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../latch-project/latch" CACHE PATH "the latch library (the shared door)")
+if(NOT EXISTS "${LATCH_DIR}/CMakeLists.txt")
+    message(FATAL_ERROR "latch not found at ${LATCH_DIR} -- unzip latch-project beside rouster-project, or -DLATCH_DIR=...")
+endif()
+add_subdirectory(${LATCH_DIR} ${CMAKE_BINARY_DIR}/latch)
+
 add_library(rouster_core STATIC
     src/core/Recents.cpp
     src/core/Scan.cpp
-    src/core/Package.cpp
     # The catalog (s015b): Rouster's memory of your files -- first seen, history,
     # moves, decisions -- in its own catalog.db. The only file that opens a database.
     src/core/Catalog.cpp
@@ -35,22 +42,18 @@ add_library(rouster_core STATIC
     # Compare (s017b): the viewer's kinds, texts (txt / ODT / DOCX) and line diff; read-only.
     src/core/Compare.cpp
     src/core/Preflight.cpp
-    # THE ONE DOOR (s004): the only file that changes a user's files. The
-    # selftest's source gate fails if any other file makes a write call.
-    src/core/Door.cpp
+    # THE ONE DOOR (s004) lives in latch since 2026-11-10 (with git/child,
+    # packages and the never-touch list); include/core/Door.hpp is the shim.
     # Sweep (s006): finds and plans, read-only; the door acts.
     src/core/Sweep.cpp
     # Dev projects (s007): find, verify (git, read-only), lint, plan; the door acts.
     src/core/Dev.cpp
-    # git as a child process (Dev reads with it; the door's Clone verb writes with it).
     # Archive (s009): old files -> ~/Archive/<year>/<path>; put back from the manifest; read-only.
     src/core/Archive.cpp
     # Archive search (s018): ~/Archive walked + the catalog + the records; read-only.
     src/core/ArchiveSearch.cpp
     # Duplicates (s008): size -> head/tail -> full hash, folders, keep rules; read-only.
     src/core/Dups.cpp
-    src/core/Git.cpp
-    src/core/Pipe.cpp
     # Organize (s010): templates, naming, file into project, new version; read-only.
     src/core/Organize.cpp
     # Rules (s011): Hazel-style rules on watched folders; read-only. Settings: Rouster's own rules.json.
@@ -79,7 +82,7 @@ add_library(rouster_core STATIC
     src/core/Stones.cpp
 )
 target_include_directories(rouster_core PUBLIC include ${SQLITE_INCLUDE_DIRS} ${ZLIB_INCLUDE_DIRS})
-target_link_libraries(rouster_core PUBLIC ${SQLITE_LIBRARIES} ${ZLIB_LIBRARIES})
+target_link_libraries(rouster_core PUBLIC latch ${SQLITE_LIBRARIES} ${ZLIB_LIBRARIES})
 target_link_directories(rouster_core PUBLIC ${SQLITE_LIBRARY_DIRS} ${ZLIB_LIBRARY_DIRS})
 # Vendored nlohmann/json (header-only, MIT), PRIVATE -- an implementation detail
 # of the pump, no consumer inherits the include (CANON: surprise-free build).
@@ -89,7 +92,8 @@ target_include_directories(rouster_core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/thir
 add_executable(rouster_selftest src/selftest.cpp)
 target_link_libraries(rouster_selftest PRIVATE rouster_core)
 # The source gate reads src/ and include/ at test time.
-target_compile_definitions(rouster_selftest PRIVATE ROUSTER_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+target_compile_definitions(rouster_selftest PRIVATE ROUSTER_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+                                                   LATCH_SOURCE_DIR="${LATCH_DIR}")
 
 # ── rouster-helper (s013) -- the small ROOT helper, run only through pkexec ──────
 # Its own tiny link line: libc + the shared, pure Helper.cpp. No GTK, no spdlog,

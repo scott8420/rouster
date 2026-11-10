@@ -171,6 +171,7 @@ Shell::~Shell() { m_rl_timer.disconnect(); stop_scan(); stop_sweep(); stop_dev()
 
 void Shell::build_ui() {
     m_home = home_dir();
+    core::door::install();   // latch: Rouster's name + its root helper's rules, before any door
     // s017a2: Samson's folder, second home and catalog are Protected -- before any walk or door step.
     core::scan::set_owned(core::scan::samson_places(m_home, versions_config_home()));
     // s017a2: your own bundle list (bundles.json) joins the built-in package kinds.

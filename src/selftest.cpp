@@ -576,6 +576,7 @@ bool make_versions_fixture(const fs::path& home) {
 }
 
 int main(int argc, char** argv) {
+    rouster::core::door::install();   // latch: Rouster's name + root rules, as the app does at startup
     // `--make-fixture DIR`: build the fixture home for an Xvfb drive, then stop.
     if (argc == 3 && std::string(argv[1]) == "--make-fixture") {
         const bool ok = make_fixture(argv[2]) &&
@@ -4766,8 +4767,10 @@ int main(int argc, char** argv) {
     {
         std::cout << "\n-- source gate --\n";
         const fs::path root = ROUSTER_SOURCE_DIR;
-        const std::set<std::string> allowed = {"src/core/Door.cpp", "src/core/Recents.cpp", "src/selftest.cpp",
-            "src/core/Stones.cpp", "include/core/Stones.hpp", "src/core/Known.cpp", "src/core/Settings.cpp", "src/core/Pipe.cpp", "src/Registry.cpp", "include/Registry.hpp",
+        // latch (2026-11-10): the door and Pipe.cpp moved to the shared library; the
+        // gate reads latch's sources too, with its own two allowed files.
+        const std::set<std::string> allowed = {"src/core/Recents.cpp", "src/selftest.cpp",
+            "src/core/Stones.cpp", "include/core/Stones.hpp", "src/core/Known.cpp", "src/core/Settings.cpp", "src/Registry.cpp", "include/Registry.hpp",
             "src/helper/main.cpp", "src/core/Catalog.cpp"};
         const std::vector<std::string> calls = {"rename", "renameat", "renameat2", "unlink", "unlinkat", "rmdir",
             "remove", "remove_all", "copy_file", "copy", "create_directory", "create_directories", "create_symlink",
@@ -4811,21 +4814,29 @@ int main(int argc, char** argv) {
               line_hits("open(p, O_RDONLY)").empty() && line_hits("std::ifstream in(p);").empty());
 
         std::vector<std::string> hits;
-        std::size_t files = 0;
-        for (const char* sub : {"src", "include"}) {
-            for (const auto& e : fs::recursive_directory_iterator(root / sub)) {
-                const std::string rel = fs::relative(e.path(), root).string();
-                const auto ext = e.path().extension();
-                if (!e.is_regular_file() || (ext != ".cpp" && ext != ".hpp") || allowed.count(rel)) continue;
-                ++files;
-                std::ifstream in(e.path());
-                std::string line;
-                for (int n = 1; std::getline(in, line); ++n)
-                    for (const auto& h : line_hits(line)) hits.push_back(rel + ":" + std::to_string(n) + " " + h);
+        std::size_t files = 0, latch_files = 0;
+        const fs::path latch_root = LATCH_SOURCE_DIR;
+        const std::set<std::string> latch_allowed = {"src/Door.cpp", "src/Pipe.cpp"};
+        for (const auto& [base, ok_files, tag, count] :
+             {std::tuple{root, &allowed, std::string(""), &files},
+              std::tuple{latch_root, &latch_allowed, std::string("latch/"), &latch_files}}) {
+            for (const char* sub : {"src", "include"}) {
+                if (!fs::is_directory(base / sub)) continue;
+                for (const auto& e : fs::recursive_directory_iterator(base / sub)) {
+                    const std::string rel = fs::relative(e.path(), base).string();
+                    const auto ext = e.path().extension();
+                    if (!e.is_regular_file() || (ext != ".cpp" && ext != ".hpp") || ok_files->count(rel)) continue;
+                    ++*count;
+                    std::ifstream in(e.path());
+                    std::string line;
+                    for (int n = 1; std::getline(in, line); ++n)
+                        for (const auto& h : line_hits(line)) hits.push_back(tag + rel + ":" + std::to_string(n) + " " + h);
+                }
             }
         }
+        check("source gate: latch's sources were read too", latch_files >= 4, std::to_string(latch_files) + " latch files");
         check("source gate: no write call outside the door", hits.empty(),
-              hits.empty() ? std::to_string(files) + " files clean" : hits.front() + (hits.size() > 1 ? " (+" + std::to_string(hits.size() - 1) + ")" : ""));
+              hits.empty() ? std::to_string(files + latch_files) + " files clean" : hits.front() + (hits.size() > 1 ? " (+" + std::to_string(hits.size() - 1) + ")" : ""));
     }
     // -- Help (s013a2): the text held to the app --------------------------------
     {
