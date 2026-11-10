@@ -2,6 +2,7 @@
 #include "core/Catalog.hpp"
 #include "core/Dups.hpp"      // copy_like: the same "x (1)" / "Copy of x" Duplicates knows
 #include "core/Package.hpp"
+#include "core/Scan.hpp"   // samson_places
 
 #define XXH_INLINE_ALL
 #include "xxhash.h"
@@ -281,6 +282,22 @@ std::vector<History> app_history(const std::string& home, const std::string& dat
             h.bytes = du(sd);
             finish(std::move(h));
         }
+    }
+    // Samson: its folder (sealed/ counted) -- Protected (scan::samson_places); listed so you see why it's never proposed.
+    for (const auto& rel : scan::samson_places(home, config_home)) {
+        const std::string dir = home + "/" + rel;
+        if (!is_dir(dir)) continue;
+        History h{"Samson", name_of(rel), dir, 0, 0, 0, 0, false};
+        for (const auto& n : entries(dir + "/sealed")) {
+            if (!n.ends_with(".smsn")) continue;
+            ++h.count;
+            const std::int64_t t = mtime(dir + "/sealed/" + n);
+            if (!h.oldest || t < h.oldest) h.oldest = t;
+            if (t > h.newest) h.newest = t;
+        }
+        h.bytes = du(dir);
+        h.in_home = visible_in_home(home, dir);
+        out.push_back(std::move(h));   // listed even with nothing sealed yet: the folder is still Samson's
     }
     // Trails: <data>/trails/recordings/*.trail -- recordings it keeps (not versions; listed so nothing proposes them).
     {

@@ -43,6 +43,8 @@
 //             `.source` names the jots folder; `backup_dir` in
 //             <data>/jot/prefs.json moves it;
 //   Trails -- <data>/trails/recordings/*.trail (recordings, not versions).
+//   Samson -- its whole folder (~/Samson or samson_dir), PROTECTED by the
+//             scan (s017a2) -- listed so you see why nothing there is proposed.
 // Curvz, Optik, Quire and Mortimer keep no history of their own (read from
 // their code at s017); Folio's snapshots live INSIDE its bundle (a package).
 // ─────────────────────────────────────────────────────────────────────────────

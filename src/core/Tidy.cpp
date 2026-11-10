@@ -222,7 +222,9 @@ Report report(const std::string& data_dir, const std::string& home, std::int64_t
             Top t{n, 0, 0, ""};
             if (auto it = tops.find(n); it != tops.end()) { t.files = it->second.files; t.bytes = it->second.bytes; }
             struct stat g{};
+            const auto own = scan::owned();
             if (catalog::under(r.hands_off, n)) t.note = "hands off";
+            else if (std::find(own.begin(), own.end(), n) != own.end()) t.note = "Samson's -- never touched";
             else if (n == "Archive") t.note = "the Archive";
             else if (n == "Closet") t.note = "the Closet";
             else if (t.files == 0 && (dev_roots.count(n) || ::lstat((home + "/" + n + "/.git").c_str(), &g) == 0))

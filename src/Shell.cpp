@@ -1,4 +1,5 @@
 #include "Shell.hpp"
+#include "core/Package.hpp"   // s017a2: bundles.json
 #include "HelpWindow.hpp"      // complete type for ~unique_ptr<HelpWindow>
 #include "AboutWindow.hpp"      // complete type for ~unique_ptr<AboutWindow> in ~Shell()
 #include "ShortcutsDialog.hpp"  // ditto
@@ -170,6 +171,10 @@ Shell::~Shell() { m_rl_timer.disconnect(); stop_scan(); stop_sweep(); stop_dev()
 
 void Shell::build_ui() {
     m_home = home_dir();
+    // s017a2: Samson's folder, second home and catalog are Protected -- before any walk or door step.
+    core::scan::set_owned(core::scan::samson_places(m_home, versions_config_home()));
+    // s017a2: your own bundle list (bundles.json) joins the built-in package kinds.
+    core::pkg::set_extra(core::pkg::load_extra(data_dir()));
     m_door = std::make_unique<core::door::Door>(m_home, data_dir());
     if (const char* h = std::getenv("ROUSTER_HOME"); h && *h)   // s012d: a fixture's settings are the fixture's own
         m_door->set_dconf(core::door::fixture_dconf(m_home));

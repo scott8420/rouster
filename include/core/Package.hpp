@@ -34,6 +34,17 @@ const std::vector<std::string>& kinds();
 // a thing that may be a file must also check it is a directory.
 bool is_package_name(std::string_view name);
 
+// s017a2 (Scott: "a list of project files that are folders ... maintained"):
+// kinds() is the built-in list; YOUR list adds to it, no rebuild needed --
+// <rouster data dir>/bundles.json, edited by hand:
+//   { "bundles": [".quire2", ".myapp"] }
+// Each a ".ext" with something after the dot (lower-cased; a bad one is
+// skipped, never an error). A missing / unreadable file = none. READ-ONLY.
+std::vector<std::string> load_extra(const std::string& data_dir);
+// Set once at startup (the app; the selftest). is_package_name honours it.
+void set_extra(std::vector<std::string> exts);
+std::vector<std::string> extra();
+
 // The outermost package a path is strictly INSIDE (an ancestor component
 // whose name is a package's), as the prefix up to and including it;
 // "" when none. Works on relative or absolute paths. Ancestors are folders

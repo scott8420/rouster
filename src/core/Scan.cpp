@@ -1,12 +1,17 @@
 #include "core/Scan.hpp"
 #include "core/Package.hpp"
+#include "json.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <condition_variable>
 #include <cstdio>
 #include <deque>
 #include <filesystem>
+#include <atomic>
+#include <fstream>
 #include <map>
+#include <memory>
 #include <set>
 #include <thread>
 #include <utility>
@@ -63,6 +68,53 @@ const std::vector<std::string>& never_touch() {
 }
 
 namespace {
+// std::atomic<shared_ptr> (C++20): the free functions on shared_ptr are deprecated (GCC 16).
+std::atomic<std::shared_ptr<const std::vector<std::string>>> g_owned{std::make_shared<const std::vector<std::string>>()};
+}  // namespace
+
+void set_owned(std::vector<std::string> rels) {
+    g_owned.store(std::make_shared<const std::vector<std::string>>(std::move(rels)));
+}
+std::vector<std::string> owned() { return *g_owned.load(); }
+
+bool protected_name(std::string_view n) {
+    static constexpr std::string_view ext = ".samson";
+    if (n.size() <= ext.size()) return false;
+    for (std::size_t i = 0; i < ext.size(); ++i)
+        if (std::tolower(static_cast<unsigned char>(n[n.size() - ext.size() + i])) != ext[i]) return false;
+    return true;
+}
+
+std::vector<std::string> samson_places(const std::string& home, const std::string& config_home) {
+    std::string samson, catalog, second;
+    {
+        std::ifstream in(config_home + "/samson/settings.json");
+        if (in) {
+            const auto j = nlohmann::json::parse(in, nullptr, false);
+            const auto get = [&](const char* k, std::string& out) {
+                if (j.is_object() && j.contains(k) && j[k].is_string()) out = j[k].get<std::string>();
+            };
+            get("samson_dir", samson);
+            get("catalog_dir", catalog);
+            get("second_home", second);
+        }
+    }
+    if (samson.empty()) samson = home + "/Samson";
+    if (catalog.empty()) catalog = home + "/.local/share/samson";
+    std::vector<std::string> out;
+    for (std::string p : {samson, catalog, second}) {
+        if (p.empty()) continue;
+        if (p.rfind("~/", 0) == 0) p = home + p.substr(1);
+        while (p.size() > 1 && p.back() == '/') p.pop_back();
+        if (p.size() <= home.size() + 1 || p.compare(0, home.size() + 1, home + "/") != 0) continue;
+        const std::string rel = p.substr(home.size() + 1);
+        if (rel.find("/../") != std::string::npos || rel.rfind("../", 0) == 0 || rel == "..") continue;
+        out.push_back(rel);
+    }
+    return out;
+}
+
+namespace {
 
 std::string basename_of(const std::string& rel) {
     const auto s = rel.rfind('/');
@@ -87,6 +139,11 @@ DirClass classify_dir(const std::string& rel, Kind parent, bool looks_like_build
     const auto& nt = never_touch();
     if (std::find(nt.begin(), nt.end(), rel) != nt.end() || basename_of(rel) == "fixes")
         return {Kind::Protected, true, false};
+    {   // s017a2: Samson's places; a Samson container wherever it is
+        const auto own = g_owned.load();
+        if (std::find(own->begin(), own->end(), rel) != own->end() || protected_name(basename_of(rel)))
+            return {Kind::Protected, true, false};
+    }
     if (parent == Kind::Protected) return {Kind::Protected, false, false};
     if (parent == Kind::Trash)     return {Kind::Trash, false, false};
 
@@ -116,6 +173,7 @@ DirClass classify_dir(const std::string& rel, Kind parent, bool looks_like_build
 
 Kind classify_file(const std::string& rel, Kind parent) {
     if (parent != Kind::Other) return parent;
+    if (protected_name(basename_of(rel))) return Kind::Protected;   // s017a2: a Samson container
     static const std::set<std::string> histories = {
         ".bash_history", ".zsh_history", ".python_history", ".lesshst",
         ".node_repl_history", ".wget-hsts", ".sqlite_history", ".xsession-errors",

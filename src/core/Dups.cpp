@@ -310,6 +310,8 @@ Found find(const std::string& home_in, const std::string& root_in, Progress& pro
                 D[di].dirs.push_back(static_cast<int>(D.size()));
                 stack.push_back(static_cast<int>(D.size()));
                 D.push_back(std::move(d));
+            } else if (S_ISREG(st.st_mode) && scan::protected_name(n)) {
+                D[di].clean = false;   // s017a2: a Samson container -- never paired, so the folder isn't vouched for
             } else if (S_ISREG(st.st_mode)) {
                 FRec f;
                 f.rel = rel; f.name = n; f.dir = di;

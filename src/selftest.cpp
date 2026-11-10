@@ -466,7 +466,10 @@ bool make_versions_fixture(const fs::path& home) {
            at("FolioBackups/Tapper/Tapper_2026-11-02T10-00.folio.gz", "gz2", 2 * D) &&
            at(".local/share/jot/backups/home.jots/.source", (home / "Notes/home.jots").string() + "\n", 0) &&
            at(".local/share/jot/backups/home.jots/2026-11-01/a.md", "x", 2 * D) &&
-           at(".local/share/jot/backups/home.jots/2026-11-02/a.md", "x", D);
+           at(".local/share/jot/backups/home.jots/2026-11-02/a.md", "x", D) &&
+           // s017a2: Samson's folder (Protected) and a container -- never proposed, never moved.
+           at("Samson/sealed/w2.pdf.smsn", "SAMSON/1", D) && at("Samson/seal-done/w2.pdf", body, D) &&
+           at("Samson/seal-done/w2 (2).pdf", body, D) && at("Documents/Private.samson", body, 40 * 30 * D);
 }
 
 int main(int argc, char** argv) {
@@ -4327,6 +4330,89 @@ int main(int argc, char** argv) {
             check("versions: 'not a family' -> left out next time; 'keep this one' -> the keeper, 'you chose'",
                   chose && logo_gone && you_chose);
         }
+        fs::remove_all(home, ec);
+    }
+    // -- s017a2: Samson's places are Protected; your own bundle list --------------
+    {
+        std::cout << "\n-- samson + bundles --\n";
+        namespace sc = core::scan;
+        namespace vs = core::versions;
+        namespace dr = core::door;
+        const fs::path home = fs::temp_directory_path() / ("rouster_samson_" + std::to_string(::getpid()));
+        std::error_code ec;
+        fs::remove_all(home, ec);
+        fs::create_directories(home, ec);
+        const std::string H = home.string(), D = H + "/.local/share/rouster", CH = H + "/.config";
+        check("samson: defaults -- ~/Samson and its catalog", sc::samson_places(H, CH) ==
+              std::vector<std::string>{"Samson", ".local/share/samson"});
+        bool made = put_bytes(home, ".config/samson/settings.json",
+                              "{\"samson_dir\":\"~/Vault/\",\"catalog_dir\":\"/media/x\",\"second_home\":\"" + H +
+                              "/Mirror\",\"notify\":true}") &&
+                    put_bytes(home, "Vault/sealed/tax.pdf.smsn", "S") && put_bytes(home, "Vault/sealed/tax (2).pdf.smsn", "S") &&
+                    put_bytes(home, "Vault/seal-done/tax.pdf", std::string(5000, 't')) &&
+                    put_bytes(home, "Vault/seal-done/tax (2).pdf", std::string(5000, 't')) &&
+                    put_bytes(home, "Mirror/tax.pdf.smsn", "S") && put_bytes(home, "Docs/Private.samson", std::string(9000, 'v')) &&
+                    put_bytes(home, "Docs/note.txt", "n") && put_bytes(home, "Docs/note (1).txt", "n");
+        const auto places = sc::samson_places(H, CH);
+        check("samson: from its settings -- samson_dir (~ expanded), second home; a catalog outside home left out",
+              made && places == std::vector<std::string>{"Vault", "Mirror"});
+        sc::set_owned(places);
+        check("samson: its places are Protected, all the way down; a container is Protected anywhere",
+              sc::classify_dir("Vault", sc::Kind::Other, false).kind == sc::Kind::Protected &&
+              sc::classify_dir("Vault/seal-done", sc::Kind::Protected, false).kind == sc::Kind::Protected &&
+              sc::classify_dir("Mirror", sc::Kind::Other, false).kind == sc::Kind::Protected &&
+              sc::classify_dir("Docs/Private.samson", sc::Kind::Other, false).kind == sc::Kind::Protected &&
+              sc::classify_file("Docs/Private.SAMSON", sc::Kind::Other) == sc::Kind::Protected &&
+              sc::classify_dir("Docs", sc::Kind::Other, false).kind == sc::Kind::Other &&
+              sc::protected_name("x.samson") && !sc::protected_name(".samson") && !sc::protected_name("tax.pdf.smsn"));
+        core::scan::Progress p;
+        std::vector<sc::Seen> mine;
+        sc::scan(H, H, p, 0, &mine);
+        std::string seen;
+        for (const auto& s : mine) seen += s.rel + " ";
+        check("samson: a Look catalogs none of it -- only Docs/note*", mine.size() == 2 &&
+              seen.find("Vault") == std::string::npos && seen.find("samson") == std::string::npos, seen);
+        fs::create_directories(D, ec);
+        const auto rec = core::catalog::record(D, H, "", mine, {}, 1790000000);
+        const auto vr = vs::find(D, H, H + "/.local/share", CH);
+        bool samson_listed = false;
+        for (const auto& h : vr.history)
+            if (h.app == "Samson" && h.path == H + "/Vault" && h.count == 2) samson_listed = true;
+        check("samson: versions -- the note pair is a family, nothing of Samson's; its folder listed (2 sealed)",
+              rec.ok && vr.ok && vr.families.size() == 1 && vr.families[0].folder == "Docs" && samson_listed);
+        dr::Door door(H, D);
+        door.load();
+        const std::string before = files_snapshot(home);
+        const auto refused = [&](dr::Verb v, const std::string& from, const std::string& to) {
+            dr::Plan pl;
+            pl.label = "t";
+            pl.previewed = true;
+            dr::Action a;
+            a.verb = v;
+            a.from = H + "/" + from;
+            if (!to.empty()) a.to = H + "/" + to;
+            pl.actions.push_back(a);
+            const auto r = door.run(pl);
+            return !r.ok && !r.messages.empty() && r.messages.front().find("protected") != std::string::npos;
+        };
+        check("samson: the door refuses -- a seal-done original moved, a sealed file trashed, a container moved, "
+              "the second home trashed; the tree exact",
+              refused(dr::Verb::Move, "Vault/seal-done/tax (2).pdf", "Docs/tax (2).pdf") &&
+              refused(dr::Verb::Trash, "Vault/sealed/tax.pdf.smsn", "") &&
+              refused(dr::Verb::Move, "Docs/Private.samson", "Private.samson") &&
+              refused(dr::Verb::Trash, "Mirror", "") && files_snapshot(home) == before);
+        sc::set_owned({});
+
+        // Your own bundle list.
+        put_bytes(home, ".local/share/rouster/bundles.json",
+                  "{\"bundles\":[\".Quire2\",\"myapp\",\"bad/x\",\".a.b\",7,\".myapp\"]}");
+        const auto ex = core::pkg::load_extra(D);
+        core::pkg::set_extra(ex);
+        const bool on = core::pkg::is_package_name("Book.myapp") && core::pkg::is_package_name("B.QUIRE2");
+        core::pkg::set_extra({});
+        check("bundles: your list -- '.ext' or 'ext', lower-cased, bad ones skipped, no doubles; joins the packages",
+              ex == std::vector<std::string>{".quire2", ".myapp"} && on && !core::pkg::is_package_name("Book.myapp") &&
+              core::pkg::load_extra(H + "/nowhere").empty());
         fs::remove_all(home, ec);
     }
     // -- The source gate: no write call outside the door (s004) --------------

@@ -229,27 +229,29 @@ void Shell::paint_versions() {  // helper: s017 -- the Version families card + A
     if (!r.history.empty()) {
         auto c = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 4);
         c->add_css_class("card");
-        c->append(*vtext("App history · " + commas(r.history.size()), "card-title"));
-        auto sub = vtext("Saves an app keeps for itself -- it prunes them on its own schedule. Recognised and left alone; "
-                         "never a family.", "card-sub");
+        c->append(*vtext("Kept by our apps · " + commas(r.history.size()), "card-title"));
+        auto sub = vtext("History an app keeps for itself (it prunes on its own schedule), and Samson's folder. Recognised "
+                         "and left alone; never a family. Samson's folder and its containers are never touched at all.",
+                         "card-sub");
         sub->set_wrap(true);
         c->append(*sub);
         for (const auto& h : r.history) {
             auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 12);
             row->set_margin_start(6);
             const std::string what = h.app == "Trails" ? "Trails' recordings"
+                                   : h.app == "Samson" ? "Samson's folder, ~/" + h.path.substr(m_home.size() + 1)
                                    : h.app + "'s history of " + h.what;
             auto l = vtext(what, "detail-path");
             l->set_hexpand(true);
             l->set_ellipsize(Pango::EllipsizeMode::MIDDLE);
             l->set_tooltip_text(h.path);
             row->append(*l);
-            const char* unit = h.app == "jot" ? " days" : h.app == "Trails" ? " recordings" : " versions";
+            const char* unit = h.app == "jot" ? " days" : h.app == "Trails" ? " recordings" : h.app == "Samson" ? " sealed" : " versions";
             row->append(*vtext(commas(h.count) + unit + (h.newest ? ", newest " + ago(h.newest, now) : ""), "dim", 1.0f));
             auto sz = vtext(core::scan::human_bytes(h.bytes), "detail-size", 1.0f);
             sz->set_width_chars(9);
             row->append(*sz);
-            auto ch = vtext("managed by " + h.app, "td-query", 0.5f);
+            auto ch = vtext(h.app == "Samson" ? std::string("never touched") : "managed by " + h.app, "td-query", 0.5f);
             ch->set_valign(Gtk::Align::CENTER);
             row->append(*ch);
             c->append(*row);

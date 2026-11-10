@@ -127,6 +127,8 @@ struct Walk {
                 sum.bytes += c.bytes;
                 sum.files += c.files;
                 sum.newest = std::max(sum.newest, c.newest);
+            } else if (S_ISREG(st.st_mode) && scan::protected_name(n)) {
+                sum.clean = false;   // s017a2: a Samson container -- never archived
             } else if (S_ISREG(st.st_mode)) {
                 ++prog->files;
                 const std::uint64_t b = static_cast<std::uint64_t>(st.st_blocks) * 512u;
@@ -235,6 +237,8 @@ Found find(const std::string& home_in, std::int64_t now, int months, scan::Progr
             const scan::Kind k = scan::classify_dir(n, scan::Kind::Other, false).kind;
             if (k != scan::Kind::Other) continue;
             w.dir(n, k, 1);
+        } else if (S_ISREG(st.st_mode) && scan::protected_name(n)) {
+            continue;   // s017a2: a Samson container -- never archived
         } else if (S_ISREG(st.st_mode)) {
             ++prog.files;
             if (st.st_mtim.tv_sec >= w.cutoff) continue;

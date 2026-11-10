@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <vector>
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -45,6 +46,21 @@ const char* kind_treatment(Kind k);   // the one-line "why" shown under the name
 // The never-touch list, relative to home. Code, not configuration (§1.5).
 // Any directory named `fixes` is protected as well, wherever it is.
 const std::vector<std::string>& never_touch();
+
+// s017a2: places ANOTHER of our apps owns, Protected exactly like the
+// never-touch list (inherited all the way down; the door refuses them):
+// Samson's folder (seal/, sealed/, seal-done/ -- plaintext originals, names
+// " (2)" on purpose -- trash/, .waiting/, outbox/), its second home and its
+// catalog. Read from ~/.config/samson/settings.json (samson_dir, catalog_dir,
+// second_home; "" = its defaults ~/Samson, ~/.local/share/samson/catalog).
+// Relative to home; places outside home are left out (not ours to judge).
+std::vector<std::string> samson_places(const std::string& home, const std::string& config_home);
+// Set once at startup (the app; the selftest); read by classify_dir.
+void set_owned(std::vector<std::string> rels);
+std::vector<std::string> owned();
+// A name Rouster never moves, wherever it is: a Samson container ("*.samson",
+// an encrypted volume Samson lists by path).
+bool protected_name(std::string_view name);
 
 // A directory's kind, given its path relative to home ("" = home itself), the
 // kind of its parent, and whether it looks like a build tree (CMakeCache.txt,

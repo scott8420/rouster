@@ -3,6 +3,11 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <fstream>
+#include <memory>
+#include <atomic>
+
+#include "json.hpp"
 
 #include <dirent.h>
 #include <sys/stat.h>
@@ -21,8 +26,36 @@ const std::vector<std::string>& kinds() {
     return v;
 }
 
+namespace {
+// std::atomic<shared_ptr> (C++20): the free functions on shared_ptr are deprecated (GCC 16).
+std::atomic<std::shared_ptr<const std::vector<std::string>>> g_extra{std::make_shared<const std::vector<std::string>>()};
+}  // namespace
+
+std::vector<std::string> load_extra(const std::string& data_dir) {
+    std::vector<std::string> out;
+    std::ifstream in(data_dir + "/bundles.json");
+    if (!in) return out;
+    const auto j = nlohmann::json::parse(in, nullptr, false);
+    if (!j.is_object() || !j.contains("bundles") || !j["bundles"].is_array()) return out;
+    for (const auto& e : j["bundles"]) {
+        if (!e.is_string()) continue;
+        std::string x = e.get<std::string>();
+        for (char& c : x) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (!x.empty() && x[0] != '.') x = "." + x;
+        if (x.size() < 2 || x.find('/') != std::string::npos || x.find('.', 1) != std::string::npos) continue;
+        if (std::find(out.begin(), out.end(), x) == out.end()) out.push_back(x);
+    }
+    return out;
+}
+void set_extra(std::vector<std::string> exts) {
+    g_extra.store(std::make_shared<const std::vector<std::string>>(std::move(exts)));
+}
+std::vector<std::string> extra() { return *g_extra.load(); }
+
 bool is_package_name(std::string_view name) {
-    for (const auto& k : kinds()) {
+    const auto more = g_extra.load();
+    for (const auto* list : {&kinds(), more.get()})
+    for (const auto& k : *list) {
         if (name.size() <= k.size()) continue;   // something before the dot
         const auto tail = name.substr(name.size() - k.size());
         bool same = true;
