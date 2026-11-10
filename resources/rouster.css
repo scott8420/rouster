@@ -291,3 +291,14 @@ window.page-tidy button.orb {
   box-shadow: 0 0 0 6px rgba(255,255,255,0.10), 0 10px 40px rgba(52,211,153,0.45);
 }
 .td-query { background-color: rgba(52,211,153,0.22); color: #d1fae5; border-radius: 999px; padding: 1px 10px; font-size: 0.85em; }
+
+/* s017b: the versions viewer -- keeper left, a version right */
+.vv-pane { background: rgba(0,0,0,0.22); border-radius: 12px; padding: 8px; }
+.vv-text { font-family: "Cantarell", sans-serif; }
+.vv-line { padding: 2px 8px; border-radius: 6px; }
+.vv-same { color: rgba(244,241,251,0.78); }
+/* changed lines: neutral tints, not red/green -- the keeper is usually the NEWER side */
+.vv-left { background-color: rgba(96,165,250,0.22); color: #dbeafe; }
+.vv-right { background-color: rgba(251,191,36,0.20); color: #fef3c7; }
+.vv-blank { background-color: rgba(255,255,255,0.04); }
+.vv-gap { color: rgba(244,241,251,0.45); font-size: 0.85em; padding: 4px 0; }

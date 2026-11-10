@@ -11,13 +11,22 @@
 #include "Log.hpp"
 #include "core/Scan.hpp"
 #include "core/Tidy.hpp"
+#include "core/Compare.hpp"
 
 #include <gtkmm/checkbutton.h>
+#include <gtkmm/grid.h>
+#include <gtkmm/picture.h>
+#include <gdkmm/texture.h>
+#include <giomm/appinfo.h>
+#include <giomm/file.h>
+#include <glibmm/convert.h>
 #include <gtkmm/label.h>
 #include <gtkmm/scrolledwindow.h>
 #include <glibmm/main.h>
 #include <glibmm/miscutils.h>
 
+#include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <ctime>
 
@@ -51,6 +60,19 @@ std::string ago(std::int64_t t, std::int64_t now) {
     return core::tidy::age(d) + " ago";
 }
 std::string plural(std::size_t n, const char* one, const char* many) { return commas(n) + " " + (n == 1 ? one : many); }
+std::string when(std::int64_t t) {   // "2026-11-08 14:32"
+    if (t <= 0) return "";
+    const auto tt = static_cast<std::time_t>(t);
+    std::tm tm{};
+    localtime_r(&tt, &tm);
+    char buf[32];
+    std::strftime(buf, sizeof buf, "%Y-%m-%d %H:%M", &tm);
+    return buf;
+}
+std::string lower(std::string s) {
+    for (auto& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
 
 }  // namespace
 
@@ -150,6 +172,14 @@ void Shell::paint_versions() {  // helper: s017 -- the Version families card + A
                 sz->set_width_chars(9);
                 head->append(*sz);
             }
+            auto cmp = Gtk::make_managed<Gtk::Button>("Compare");
+            cmp->add_css_class("ghost");
+            cmp->add_css_class("small");
+            cmp->set_tooltip_text("Side by side: the keeper on the left, each older save on the right.");
+            cmp->signal_clicked().connect([this, key] {
+                Glib::signal_idle().connect_once([this, key] { open_versions_viewer(key); });
+            });
+            head->append(*cmp);
             auto no = Gtk::make_managed<Gtk::Button>("Not a family");
             no->add_css_class("ghost");
             no->add_css_class("small");
@@ -359,6 +389,469 @@ void Shell::versions_repaint(const std::function<void()>& change) {  // helper: 
     paint_tidy();
     if (sw)
         Glib::signal_idle().connect_once([sw, at] { sw->get_vadjustment()->set_value(at); });
+}
+
+// ── s017b: the viewer ────────────────────────────────────────────────────────
+// TIDY "Version families": left = the keeper, fixed; right = one version with
+// ◀ ▶ ("3 of 7", date, size), and under it Keep this one instead / Short life.
+// Pictures both at ONE scale (so a smaller save looks smaller); texts both,
+// changed lines marked (core::compare's line diff), only the changes unless
+// you ask for the whole; our apps' files: date, size, Open in Curvz.
+// Reading for the viewer is read-only; Short life is one door step.
+namespace {
+
+constexpr int         kPaneW = 440, kPaneH = 360;   // the box each picture is fitted in -- the same for both
+constexpr std::size_t kRowsShown = 1500;            // text rows painted; past that, said
+constexpr std::uint64_t kPictureCap = 64ull << 20;  // a bigger picture isn't loaded here
+
+const vs::Family* family_of(const vs::Report& r, const std::string& key) {
+    for (const auto& f : r.families)
+        if (f.key() == key) return &f;
+    return nullptr;
+}
+
+Gtk::Label* row_label(const std::string& s, const char* css) {
+    auto l = Gtk::make_managed<Gtk::Label>(s.empty() ? " " : s);
+    l->add_css_class("vv-line");
+    if (css) l->add_css_class(css);
+    l->set_xalign(0.0f);
+    l->set_yalign(0.0f);
+    l->set_wrap(true);
+    l->set_wrap_mode(Pango::WrapMode::WORD_CHAR);
+    l->set_width_chars(16);
+    l->set_max_width_chars(72);
+    l->set_hexpand(true);
+    return l;
+}
+
+}  // namespace
+
+void Shell::open_versions_viewer(const std::string& key) {  // handler: s017b -- a family's Compare -> the viewer
+    const auto* f = family_of(m_vf_shown, key);
+    if (!f) return;
+    m_vv_key = key;
+    m_vv_all = false;
+    m_vv_said.clear();
+    m_vv_rel.clear();
+    const std::size_t k = versions_keeper(*f);
+    for (std::size_t x = 0; x < f->members.size(); ++x)
+        if (x != k) { m_vv_rel = f->members[x].rel; break; }
+    if (auto lg = log::get(log::Area::Tidy)) lg->info("versions: viewer '{}' ({} saves)", key, f->members.size());
+    paint_versions_viewer();
+    m_td_states.set_visible_child("viewer");
+}
+
+void Shell::paint_versions_viewer() {  // helper: s017b -- keeper left, one version right, ◀ ▶
+    namespace cm = core::compare;
+    while (auto* ch = m_vv_box.get_first_child()) m_vv_box.remove(*ch);
+    const auto now = static_cast<std::int64_t>(std::time(nullptr));
+
+    auto head = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 14);
+    auto back = Gtk::make_managed<Gtk::Button>("‹ Back");
+    back->add_css_class("ghost");
+    back->set_valign(Gtk::Align::CENTER);
+    back->signal_clicked().connect([this] {
+        Glib::signal_idle().connect_once([this] {
+            m_vv_key.clear();
+            m_td_states.set_visible_child("results");
+            versions_repaint();
+        });
+    });
+    head->append(*back);
+    const auto* f = family_of(m_vf_shown, m_vv_key);
+    auto title = vtext(f ? (f->folder.empty() ? "~/" : "~/" + f->folder + "/") + f->base + (f->ext.empty() ? "" : "." + f->ext)
+                         : std::string("Version families"), "hero-title", 0.0f);
+    title->set_ellipsize(Pango::EllipsizeMode::MIDDLE);
+    title->set_hexpand(true);
+    head->append(*title);
+    if (f) head->append(*vtext(plural(f->members.size(), "save", "saves"), "dim", 1.0f));
+    m_vv_box.append(*head);
+    if (!m_vv_said.empty()) {
+        auto said = vtext(m_vv_said, "pf-green");
+        said->set_wrap(true);
+        m_vv_box.append(*said);
+    }
+    const std::size_t k = f ? versions_keeper(*f) : 0;
+    std::vector<std::size_t> others;
+    if (f)
+        for (std::size_t x = 0; x < f->members.size(); ++x)
+            if (x != k) others.push_back(x);
+    if (!f || others.empty()) {
+        m_vv_box.append(*vtext(f ? "Only the keeper is left -- nothing to set beside it." : "Nothing left to compare in this family.", "dim"));
+        return;
+    }
+    std::size_t pos = 0;
+    for (std::size_t x = 0; x < others.size(); ++x)
+        if (f->members[others[x]].rel == m_vv_rel) pos = x;
+    const vs::Member& L = f->members[k];
+    const vs::Member& R = f->members[others[pos]];
+    m_vv_rel = R.rel;
+    const std::string la = m_home + "/" + L.rel, ra = m_home + "/" + R.rel;
+    const std::string app = cm::app_of(f->ext);
+    const std::string open_label = app.empty() ? std::string("Open") : "Open in " + app;
+
+    // ── the two heads ──
+    auto cols = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 24);
+    cols->set_homogeneous(true);
+    const auto meta = [&](const vs::Member& m) {
+        return when(m.changed) + " · " + ago(m.changed, now) + " · " + core::scan::human_bytes(m.bytes);
+    };
+    const auto opener = [&](const std::string& rel) {
+        auto b = Gtk::make_managed<Gtk::Button>(open_label);
+        b->add_css_class("ghost");
+        b->add_css_class("small");
+        b->set_tooltip_text(app.empty() ? "Open it in the app that opens this kind of file. Rouster changes nothing."
+                                        : "Open it in " + app + ". Rouster changes nothing.");
+        b->signal_clicked().connect([this, rel, app] { versions_open_file(rel, app); });
+        return b;
+    };
+    {
+        auto c = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 4);
+        c->add_css_class("card");
+        auto top = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        const bool chose = k != f->keeper;
+        auto chip = vtext(chose ? std::string("KEEP · you chose")
+                          : f->keeper_why == "the only one outside its versions folder" ? std::string("KEEP")
+                                                                                     : "KEEP · " + f->keeper_why,
+                          "td-query", 0.5f);
+        top->append(*chip);
+        auto sp = Gtk::make_managed<Gtk::Box>();
+        sp->set_hexpand(true);
+        top->append(*sp);
+        top->append(*opener(L.rel));
+        c->append(*top);
+        auto n = vtext(name_of(L.rel) + (L.package ? "  (whole)" : ""), "detail-path");
+        n->set_ellipsize(Pango::EllipsizeMode::MIDDLE);
+        n->set_tooltip_text(la);
+        c->append(*n);
+        c->append(*vtext(meta(L), "dim"));
+        cols->append(*c);
+    }
+    {
+        auto c = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 4);
+        c->add_css_class("card");
+        auto top = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        auto prev = Gtk::make_managed<Gtk::Button>("◀");
+        prev->add_css_class("ghost");
+        prev->add_css_class("small");
+        prev->set_tooltip_text("Newer");
+        prev->set_sensitive(pos > 0);
+        auto next = Gtk::make_managed<Gtk::Button>("▶");
+        next->add_css_class("ghost");
+        next->add_css_class("small");
+        next->set_tooltip_text("Older");
+        next->set_sensitive(pos + 1 < others.size());
+        const std::string prel = pos > 0 ? f->members[others[pos - 1]].rel : "";
+        const std::string nrel = pos + 1 < others.size() ? f->members[others[pos + 1]].rel : "";
+        prev->signal_clicked().connect([this, prel] {
+            Glib::signal_idle().connect_once([this, prel] { m_vv_rel = prel; m_vv_said.clear(); paint_versions_viewer(); });
+        });
+        next->signal_clicked().connect([this, nrel] {
+            Glib::signal_idle().connect_once([this, nrel] { m_vv_rel = nrel; m_vv_said.clear(); paint_versions_viewer(); });
+        });
+        top->append(*prev);
+        top->append(*vtext(commas(pos + 1) + " of " + commas(others.size()), "detail-size", 0.5f));
+        top->append(*next);
+        const std::string chip = R.in_versions ? "in versions" : !R.reflex.empty() ? "reflex" : "";
+        if (!chip.empty()) {
+            auto ch = vtext(chip, "td-query", 0.5f);
+            if (!R.reflex.empty()) ch->set_tooltip_text("Looks like a reflex save: " + R.reflex);
+            top->append(*ch);
+        }
+        auto sp = Gtk::make_managed<Gtk::Box>();
+        sp->set_hexpand(true);
+        top->append(*sp);
+        top->append(*opener(R.rel));
+        c->append(*top);
+        auto n = vtext((R.in_versions ? "↳ " : "") + name_of(R.rel) + (R.package ? "  (whole)" : ""), "detail-path");
+        n->set_ellipsize(Pango::EllipsizeMode::MIDDLE);
+        n->set_tooltip_text(ra);
+        c->append(*n);
+        c->append(*vtext(meta(R), "dim"));
+        auto acts = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        acts->set_margin_top(6);
+        auto keep = Gtk::make_managed<Gtk::Button>("Keep this one instead");
+        keep->add_css_class("ghost");
+        keep->add_css_class("small");
+        keep->set_tooltip_text("Make this one the keeper (on screen until the card's button sorts the family). "
+                               "The old keeper moves over here.");
+        const std::string key = m_vv_key, rrel = R.rel, lrel = L.rel;
+        keep->signal_clicked().connect([this, key, rrel, lrel] {
+            Glib::signal_idle().connect_once([this, key, rrel, lrel] {
+                m_vf_keep[key] = rrel;
+                m_vf_checked.insert(key);
+                m_vv_rel = lrel;   // the old keeper, now on the right
+                m_vv_said = name_of(rrel) + " is the keeper now -- the family is checked. Back, then the card's button "
+                            "puts the others in its versions folder.";
+                m_vf_said = name_of(rrel) + " is the keeper of its family now -- checked; press the button to sort them.";
+                if (auto lg = log::get(log::Area::Tidy)) lg->info("versions: viewer: keep this one instead '{}' (on screen)", rrel);
+                paint_versions_viewer();
+            });
+        });
+        acts->append(*keep);
+        auto shortl = Gtk::make_managed<Gtk::Button>("Short life");
+        shortl->add_css_class("ghost");
+        shortl->add_css_class("small");
+        const bool busy = m_td_worker.joinable() || door_busy();
+        shortl->set_sensitive(!m_pf_red && !busy && m_door);
+        shortl->set_tooltip_text(m_pf_red ? "Preflight has a red check -- see Preflight."
+                                          : "Move this save to ~/Closet with 30 days to live -- then offered to the Trash "
+                                            "at a review, never deleted unasked. One step; Undo takes it back.");
+        shortl->signal_clicked().connect([this] { Glib::signal_idle().connect_once([this] { on_versions_short_life(); }); });
+        acts->append(*shortl);
+        c->append(*acts);
+        cols->append(*c);
+    }
+    m_vv_box.append(*cols);
+
+    // ── the same bytes? (only worth reading when the sizes match) ──
+    if (!L.package && !R.package && L.bytes == R.bytes && vs::same_bytes(la, ra))
+        m_vv_box.append(*vtext("The same bytes as the keeper -- a copy, not a version.", "pf-amber"));
+
+    // ── the content ──
+    const cm::Kind kind = cm::kind_of(la, f->ext, L.package);
+    if (kind == cm::Kind::Image) {
+        const auto load = [&](const vs::Member& m, const std::string& path) -> Glib::RefPtr<Gdk::Texture> {
+            if (m.bytes > kPictureCap) return {};
+            try {
+                return Gdk::Texture::create_from_file(Gio::File::create_for_path(path));
+            } catch (const Glib::Error& e) {
+                if (auto lg = log::get(log::Area::Tidy)) lg->info("versions: viewer: picture '{}' not shown: {}", path, e.what());
+            } catch (const std::exception& e) {
+                if (auto lg = log::get(log::Area::Tidy)) lg->info("versions: viewer: picture '{}' not shown: {}", path, e.what());
+            }
+            return {};
+        };
+        const auto lt = load(L, la), rt = load(R, ra);
+        int mw = 1, mh = 1;
+        for (const auto& t : {lt, rt})
+            if (t) { mw = std::max(mw, t->get_width()); mh = std::max(mh, t->get_height()); }
+        const double sc = std::min({1.0, static_cast<double>(kPaneW) / mw, static_cast<double>(kPaneH) / mh});
+        auto pics = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 24);
+        pics->set_homogeneous(true);
+        pics->set_valign(Gtk::Align::START);
+        for (const auto& [t, m] : {std::pair{lt, &L}, std::pair{rt, &R}}) {
+            auto col = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 6);
+            auto frame = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 0);
+            frame->add_css_class("vv-pane");
+            frame->set_size_request(-1, static_cast<int>(mh * sc) + 16);
+            frame->set_valign(Gtk::Align::START);
+            frame->set_vexpand(false);
+            if (t) {
+                auto pic = Gtk::make_managed<Gtk::Picture>();
+                pic->set_paintable(t);
+                pic->set_can_shrink(true);
+                pic->set_content_fit(Gtk::ContentFit::FILL);
+                pic->set_size_request(std::max(1, static_cast<int>(t->get_width() * sc)),
+                                      std::max(1, static_cast<int>(t->get_height() * sc)));
+                pic->set_halign(Gtk::Align::CENTER);
+                pic->set_valign(Gtk::Align::CENTER);
+                frame->append(*pic);
+                col->append(*frame);
+                col->append(*vtext(commas(static_cast<std::uint64_t>(t->get_width())) + " × " +
+                                   commas(static_cast<std::uint64_t>(t->get_height())) + " px" +
+                                   (sc < 1.0 ? "  ·  both at " + std::to_string(static_cast<int>(sc * 100 + 0.5)) + "%" : std::string()),
+                                   "dim", 0.5f));
+            } else {
+                auto l = vtext(m->bytes > kPictureCap ? "Too big to show here -- Open shows it."
+                                                      : "Rouster can't draw this picture -- Open shows it.", "dim", 0.5f);
+                l->set_valign(Gtk::Align::CENTER);
+                frame->append(*l);
+                col->append(*frame);
+            }
+            pics->append(*col);
+        }
+        m_vv_box.append(*pics);
+    } else if (kind == cm::Kind::Text) {
+        const auto lt = cm::read_text(la, f->ext), rt = cm::read_text(ra, f->ext);
+        if (!lt.ok || !rt.ok) {
+            m_vv_box.append(*vtext("Can't read the words: " + (!lt.ok ? "the keeper is " + lt.why : "this version is " + rt.why) +
+                                   ". Open shows it.", "pf-amber"));
+        } else {
+            const auto rs = cm::rows(lt.lines, rt.lines, m_vv_all ? 0 : 3);
+            auto bar = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 12);
+            std::string sum;
+            if (rs.too_different) sum = "Too different to mark line by line -- both shown as they are.";
+            else if (rs.identical()) sum = "The same text, word for word" + std::string(L.bytes != R.bytes ? " (the files differ, the words don't)." : ".");
+            else {
+                std::vector<std::string> parts;
+                if (rs.changed) parts.push_back(plural(rs.changed, "line changed", "lines changed"));
+                if (rs.removed) parts.push_back(plural(rs.removed, "line", "lines") + " only in the keeper");
+                if (rs.added) parts.push_back(plural(rs.added, "line", "lines") + " only in this one");
+                parts.push_back(plural(rs.same, "line", "lines") + " the same");
+                for (std::size_t x = 0; x < parts.size(); ++x) sum += (x ? " · " : "") + parts[x];
+            }
+            if (lt.cut || rt.cut) sum += " (Only the first " + commas(cm::kLineCap) + " lines are read.)";
+            auto sl = vtext(sum, "detail-path");
+            sl->set_wrap(true);
+            sl->set_hexpand(true);
+            bar->append(*sl);
+            if (!rs.too_different && !rs.identical()) {
+                auto all = Gtk::make_managed<Gtk::Button>(m_vv_all ? "Only the changes" : "The whole text");
+                all->add_css_class("ghost");
+                all->add_css_class("small");
+                all->signal_clicked().connect([this] {
+                    Glib::signal_idle().connect_once([this] { m_vv_all = !m_vv_all; paint_versions_viewer(); });
+                });
+                bar->append(*all);
+            }
+            m_vv_box.append(*bar);
+            if (!rs.identical() || m_vv_all) {
+                auto grid = Gtk::make_managed<Gtk::Grid>();
+                grid->add_css_class("vv-text");
+                grid->set_column_homogeneous(true);
+                grid->set_column_spacing(24);
+                grid->set_row_spacing(1);
+                int y = 0;
+                for (const auto& r : rs.rows) {
+                    if (static_cast<std::size_t>(y) >= kRowsShown) break;
+                    switch (r.mark) {
+                    case cm::Mark::Gap: {
+                        auto g = vtext("· " + plural(r.skipped, "line", "lines") + " the same ·", "vv-gap", 0.5f);
+                        grid->attach(*g, 0, y, 2, 1);
+                        break;
+                    }
+                    case cm::Mark::Same:
+                        grid->attach(*row_label(r.left, rs.too_different ? nullptr : "vv-same"), 0, y);
+                        grid->attach(*row_label(r.right, rs.too_different ? nullptr : "vv-same"), 1, y);
+                        break;
+                    case cm::Mark::Changed:
+                        grid->attach(*row_label(r.left, "vv-left"), 0, y);
+                        grid->attach(*row_label(r.right, "vv-right"), 1, y);
+                        break;
+                    case cm::Mark::Removed:
+                        grid->attach(*row_label(r.left, "vv-left"), 0, y);
+                        grid->attach(*row_label("", "vv-blank"), 1, y);
+                        break;
+                    case cm::Mark::Added:
+                        grid->attach(*row_label("", "vv-blank"), 0, y);
+                        grid->attach(*row_label(r.right, "vv-right"), 1, y);
+                        break;
+                    }
+                    ++y;
+                }
+                m_vv_box.append(*grid);
+                if (rs.rows.size() > kRowsShown)
+                    m_vv_box.append(*vtext("... and " + plural(rs.rows.size() - kRowsShown, "more row", "more rows") +
+                                           " -- Open shows the rest.", "dim"));
+            }
+        }
+    } else {
+        auto l = vtext(kind == cm::Kind::App
+                           ? "A " + app + " " + (app == "jot" ? "notebook" : app == "Folio" ? "book" : "project") +
+                                 " -- Rouster doesn't draw it. The dates and sizes are above; Open in " + app +
+                                 " shows each one."
+                           : "Rouster can't show this kind of file. The dates and sizes are above; Open shows it in its own app.",
+                       "dim");
+        l->set_wrap(true);
+        m_vv_box.append(*l);
+    }
+    if (auto* sw = dynamic_cast<Gtk::ScrolledWindow*>(m_vv_box.get_ancestor(Gtk::ScrolledWindow::get_type())))
+        Glib::signal_idle().connect_once([sw] { sw->get_vadjustment()->set_value(0.0); });
+}
+
+void Shell::on_versions_short_life() {  // handler: s017b -- the shown version -> ~/Closet, one door step
+    namespace td = core::tidy;
+    if (!m_door || door_busy() || m_td_worker.joinable()) return;
+    if (m_td_states.get_visible_child_name() != "viewer") return;   // preview first: only from the viewer
+    paint_preflight();
+    if (m_pf_red) { m_vv_said = "Preflight has a red check -- nothing moved. See Preflight."; paint_versions_viewer(); return; }
+    vs::Family* f = nullptr;
+    for (auto& x : m_vf_shown.families)
+        if (x.key() == m_vv_key) f = &x;
+    if (!f) return;
+    const std::size_t k = versions_keeper(*f);
+    std::size_t at = f->members.size();
+    for (std::size_t x = 0; x < f->members.size(); ++x)
+        if (x != k && f->members[x].rel == m_vv_rel) at = x;
+    if (at == f->members.size()) return;
+    const vs::Member m = f->members[at];
+    td::Row row;
+    row.rel = m.rel;
+    row.bytes = m.bytes;
+    row.last_used = m.changed;
+    row.query = "versions";
+    row.package = m.package;
+    row.dev = m.dev;
+    row.ino = m.ino;
+    row.changed = m.changed;
+    td::Act act = td::plan(m_home, td::Verdict::Short, {row});
+    if (auto lg = log::get(log::Area::Tidy)) {
+        lg->info("versions: viewer: short life '{}': {} moves, {} actions", m.rel, act.moves, act.plan.actions.size());
+        for (const auto& d : act.dropped) lg->info("  left out: {}", d);
+    }
+    if (!act.moves) {
+        m_vv_said = act.dropped.empty() ? std::string("Nothing to do.") : act.dropped.front() + " -- Look again.";
+        paint_versions_viewer();
+        return;
+    }
+    act.plan.previewed = true;   // the viewer on screen was the preview
+    const auto now = static_cast<std::int64_t>(std::time(nullptr));
+    const auto r = m_door->run(act.plan);
+    const std::size_t remembered = td::remember(data_dir(), m_home, act, now);
+    if (auto lg = log::get(log::Area::Tidy)) {
+        lg->info("versions: viewer: short life: {} done, {} failed; {} remembered", r.done, r.failed, remembered);
+        for (const auto& msg : r.messages) lg->warn("  {}", msg);
+    }
+    if (!r.ok) {
+        m_vv_said = "Not moved: " + (r.messages.empty() ? std::string("the door refused it") : r.messages.front()) +
+                    (r.done ? " -- Undo puts back what moved." : "");
+        paint_activity();
+        paint_versions_viewer();
+        return;
+    }
+    // Off the screen's family: the next one along takes its place on the right.
+    std::string next;
+    for (std::size_t x = at + 1; x < f->members.size() && next.empty(); ++x) if (x != k) next = f->members[x].rel;
+    for (std::size_t x = at; x-- > 0 && next.empty();) if (x != k) next = f->members[x].rel;
+    if (!m.in_versions && f->loose) {
+        --f->loose;
+        f->loose_bytes -= std::min(f->loose_bytes, m.bytes);
+        if (m_vf_shown.loose) --m_vf_shown.loose;
+        m_vf_shown.loose_bytes -= std::min(m_vf_shown.loose_bytes, m.bytes);
+    }
+    f->members.erase(f->members.begin() + static_cast<long>(at));
+    if (f->keeper > at) --f->keeper;
+    else if (f->keeper == at) f->keeper = 0;   // not reached: the keeper is never on the right
+    m_vv_rel = next;
+    m_vv_moved = true;
+    m_vv_said = name_of(m.rel) + " is in ~/Closet now, with 30 days to live. Undo (Activity) takes it back.";
+    if (f->members.size() < 2) {
+        const std::string key = m_vv_key;
+        m_vf_shown.families.erase(std::remove_if(m_vf_shown.families.begin(), m_vf_shown.families.end(),
+                                                 [&](const vs::Family& x) { return x.key() == key; }),
+                                  m_vf_shown.families.end());
+        m_vf_checked.erase(key);
+        m_vf_keep.erase(key);
+    }
+    paint_activity();
+    paint_versions_viewer();
+}
+
+void Shell::versions_open_file(const std::string& rel, const std::string& app) {  // helper: s017b -- Open / Open in Curvz
+    const std::string path = m_home + "/" + rel;
+    std::string said;
+    try {
+        if (!app.empty()) {
+            Glib::RefPtr<Gio::AppInfo> found;
+            const std::string want = lower(app);
+            for (const auto& info : Gio::AppInfo::get_all()) {
+                if (!info) continue;
+                const std::string id = lower(info->get_id());
+                if (lower(info->get_name()) == want || id.find("." + want + ".desktop") != std::string::npos ||
+                    id == want + ".desktop") { found = info; break; }
+            }
+            if (!found) said = app + " isn't installed here -- no desktop entry for it.";
+            else if (!found->launch(Gio::File::create_for_path(path))) said = app + " didn't start.";
+        } else {
+            Gio::AppInfo::launch_default_for_uri(Glib::filename_to_uri(path));
+        }
+    } catch (const Glib::Error& e) {
+        said = "Couldn't open it: " + std::string(e.what());
+    }
+    if (auto lg = log::get(log::Area::Tidy)) lg->info("versions: viewer: open '{}'{}: {}", rel, app.empty() ? "" : " in " + app,
+                                                      said.empty() ? "asked" : said);
+    if (!said.empty()) { m_vv_said = said; paint_versions_viewer(); }
 }
 
 }  // namespace rouster

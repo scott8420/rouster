@@ -12,6 +12,9 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(GTKMM REQUIRED gtkmm-4.0)
 # s015b: the catalog (Fedora: sqlite-devel; Ubuntu: libsqlite3-dev). Core only.
 pkg_check_modules(SQLITE REQUIRED sqlite3)
+# zlib (s017b): the viewer inflates an ODT / DOCX's text out of its zip.
+# Fedora: zlib-ng-compat-devel (gtk4-devel already pulls it in).
+pkg_check_modules(ZLIB REQUIRED zlib)
 find_package(spdlog REQUIRED)
 
 # ── rouster_core -- the GTK-free core (the model side of the one real seam) ──────
@@ -29,6 +32,8 @@ add_library(rouster_core STATIC
     src/core/Tidy.cpp
     # Version families (s017): families by name, app history recognised; read-only.
     src/core/Versions.cpp
+    # Compare (s017b): the viewer's kinds, texts (txt / ODT / DOCX) and line diff; read-only.
+    src/core/Compare.cpp
     src/core/Preflight.cpp
     # THE ONE DOOR (s004): the only file that changes a user's files. The
     # selftest's source gate fails if any other file makes a write call.
@@ -71,9 +76,9 @@ add_library(rouster_core STATIC
     # the verb table the selftest gate walks. docs/undo.md.
     src/core/Stones.cpp
 )
-target_include_directories(rouster_core PUBLIC include ${SQLITE_INCLUDE_DIRS})
-target_link_libraries(rouster_core PUBLIC ${SQLITE_LIBRARIES})
-target_link_directories(rouster_core PUBLIC ${SQLITE_LIBRARY_DIRS})
+target_include_directories(rouster_core PUBLIC include ${SQLITE_INCLUDE_DIRS} ${ZLIB_INCLUDE_DIRS})
+target_link_libraries(rouster_core PUBLIC ${SQLITE_LIBRARIES} ${ZLIB_LIBRARIES})
+target_link_directories(rouster_core PUBLIC ${SQLITE_LIBRARY_DIRS} ${ZLIB_LIBRARY_DIRS})
 # Vendored nlohmann/json (header-only, MIT), PRIVATE -- an implementation detail
 # of the pump, no consumer inherits the include (CANON: surprise-free build).
 target_include_directories(rouster_core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party)

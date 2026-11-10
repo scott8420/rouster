@@ -335,6 +335,17 @@ void Shell::build_tidy_page() {  // zone: Tidy
     scroll->set_child(*res);
     m_td_states.add(*scroll, "results");
 
+    // viewer (s017b): a family side by side -- the keeper left, one version right.
+    auto vscroll = Gtk::make_managed<Gtk::ScrolledWindow>();
+    vscroll->set_policy(Gtk::PolicyType::NEVER, Gtk::PolicyType::AUTOMATIC);
+    vscroll->set_vexpand(true);
+    m_vv_box.set_margin_start(32);
+    m_vv_box.set_margin_end(32);
+    m_vv_box.set_margin_top(12);
+    m_vv_box.set_margin_bottom(16);
+    vscroll->set_child(m_vv_box);
+    m_td_states.add(*vscroll, "viewer");
+
     // done (s016): what the step did; Undo / Activity / Look again.
     auto done = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 12);
     done->set_valign(Gtk::Align::CENTER);

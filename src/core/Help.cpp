@@ -210,6 +210,12 @@ std::vector<Topic> build() {
                 "remembers your choice. Not a family -- never proposed again.",
                 "\"reflex\" marks a save that looks like muscle memory: a copy's name, the same bytes as an older one, "
                 "or saved minutes before the next at nearly the same size.",
+                "Compare opens the viewer: the keeper on the left, one older save on the right, \u25C0 \u25B6 to step "
+                "through them. Pictures are drawn at one scale, so a smaller save looks smaller. Texts (plain text, "
+                "ODT, DOCX) are set side by side with the changed lines tinted -- only the changes, or The whole text. "
+                "Curvz, Folio, jot and Optik files show their date and size, with Open in Curvz (and the like). Keep "
+                "this one instead swaps the keeper; Short life sends the shown save to ~/Closet with 30 days to live, "
+                "one step, Undo takes it back.",
                 "App history -- Folio's backups, jot's daily copies, Trails' recordings -- is the app's own: listed, "
                 "left alone, never a family. Curvz, Folio, jot and Optik projects are folders Rouster keeps whole."}},
             {"Hands off", {

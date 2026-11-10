@@ -120,7 +120,9 @@ void Shell::on_undo() {  // handler: undo the last batch, through the door
         m_dv_sub.set_text("Undone -- the build output is back where it was. Look again to see it.");
         m_dv_states.set_visible_child("start");
     }
-    if (m_td_states.get_visible_child_name() == "done") {
+    if (const auto td = m_td_states.get_visible_child_name(); td == "done" || td == "viewer" || (td == "results" && m_vv_moved)) {   // s017b: the viewer too, and a card it changed
+        m_vv_moved = false;
+        m_vv_key.clear();
         m_td_sub.set_text("Undone -- everything is back where it was. Look again to see it.");
         m_td_states.set_visible_child("start");
     }
@@ -883,6 +885,8 @@ void Shell::on_archive_cancel() {  // handler: stop looking
 // ─────────────────────────────────────────────────────────────────────────────
 void Shell::on_tidy_look() {  // handler: Look at home, record, report (worker)
     if (m_td_worker.joinable()) return;
+    m_vv_moved = false;   // s017b: a fresh Look -- the card is current again
+    m_vv_key.clear();
     m_td_progress = std::make_shared<core::scan::Progress>();
     m_td_run_big.set_text("0 files");
     m_td_run_caption.set_text("Looking through your home...");

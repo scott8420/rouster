@@ -248,6 +248,10 @@ private:
     std::size_t versions_keeper(const core::versions::Family& f) const;   // category: helper: s017 -- the keeper on screen
     std::string versions_data_home() const;      // category: helper: s017 -- ~/.local/share (a fixture's own)
     std::string versions_config_home() const;    // category: helper: s017 -- ~/.config (a fixture's own)
+    void open_versions_viewer(const std::string& key);   // category: handler: s017b -- a family's Compare -> the viewer
+    void paint_versions_viewer();                // category: helper: s017b -- keeper left, one version right, ◀ ▶
+    void on_versions_short_life();               // category: handler: s017b -- the shown version -> ~/Closet, one door step
+    void versions_open_file(const std::string& rel, const std::string& app);   // category: helper: s017b -- Open / Open in Curvz
     void closet_gate();                          // category: helper: s016b -- the Closet card's two buttons + Select all
     void tidy_done(const std::string& big, const std::string& caption);   // category: helper: s016 -- the done state
     bool tick_archive();                         // category: helper: the live counters while looking
@@ -460,6 +464,12 @@ private:
     std::string                           m_vf_said;
     Gtk::Button*                          m_vf_go = nullptr;    // managed; reset each paint
     Gtk::Label*                           m_vf_gate = nullptr;
+    std::string                           m_vv_key;     // s017b: the family in the viewer ("" = none)
+    std::string                           m_vv_rel;     // ...the version shown on the right (by path: survives a keeper swap)
+    bool                                  m_vv_all = false;   // ...the whole text, not just the changes
+    std::string                           m_vv_said;
+    bool                                  m_vv_moved = false; // the viewer moved a save since the Look -- an Undo makes the card stale
+    Gtk::Box                              m_vv_box{Gtk::Orientation::VERTICAL, 14};
     core::catalog::Delta                  m_td_cat_shown;
     std::set<std::string>                 m_td_checked;     // s016: checked rows (painted rows only -- never one unseen)
     std::set<std::string>                 m_td_painted;     // ...the rows on screen

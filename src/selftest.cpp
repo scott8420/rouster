@@ -38,6 +38,9 @@
 #include "core/Catalog.hpp"
 #include "core/Tidy.hpp"
 #include "core/Versions.hpp"
+#include "core/Compare.hpp"
+
+#include <zlib.h>
 
 #include <sqlite3.h>
 
@@ -54,6 +57,7 @@
 #include <map>
 #include <optional>
 #include <random>
+#include <tuple>
 #include <utility>
 
 #include <fcntl.h>
@@ -438,6 +442,85 @@ bool make_profile_fixture(const fs::path& home) {
 }
 
 
+// s017b: a zip as a writer would make it (stored or deflated members), an ODT
+// (mimetype stored first, content.xml deflated), and a small PNG -- for the
+// compare checks and the viewer's fixture. The selftest may write; the core
+// only reads.
+std::string zip_bytes(const std::vector<std::tuple<std::string, std::string, bool>>& members) {
+    std::string out, cd;
+    const auto u16 = [](std::string& s, std::uint32_t v) { s += static_cast<char>(v & 0xFF); s += static_cast<char>((v >> 8) & 0xFF); };
+    const auto u32 = [&](std::string& s, std::uint32_t v) { u16(s, v & 0xFFFF); u16(s, v >> 16); };
+    for (const auto& [name, data, packed] : members) {
+        std::string body = data;
+        if (packed) {
+            z_stream z{};
+            deflateInit2(&z, 9, Z_DEFLATED, -MAX_WBITS, 8, Z_DEFAULT_STRATEGY);
+            body.assign(deflateBound(&z, static_cast<uLong>(data.size())), '\0');
+            z.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(data.data()));
+            z.avail_in = static_cast<uInt>(data.size());
+            z.next_out = reinterpret_cast<Bytef*>(body.data());
+            z.avail_out = static_cast<uInt>(body.size());
+            deflate(&z, Z_FINISH);
+            body.resize(z.total_out);
+            deflateEnd(&z);
+        }
+        const auto crc = static_cast<std::uint32_t>(crc32(0, reinterpret_cast<const Bytef*>(data.data()), static_cast<uInt>(data.size())));
+        const auto off = static_cast<std::uint32_t>(out.size());
+        u32(out, 0x04034b50); u16(out, 20); u16(out, 0); u16(out, packed ? 8 : 0); u16(out, 0); u16(out, 0x21);
+        u32(out, crc); u32(out, static_cast<std::uint32_t>(body.size())); u32(out, static_cast<std::uint32_t>(data.size()));
+        u16(out, static_cast<std::uint32_t>(name.size())); u16(out, 0);
+        out += name;
+        out += body;
+        u32(cd, 0x02014b50); u16(cd, 20); u16(cd, 20); u16(cd, 0); u16(cd, packed ? 8 : 0); u16(cd, 0); u16(cd, 0x21);
+        u32(cd, crc); u32(cd, static_cast<std::uint32_t>(body.size())); u32(cd, static_cast<std::uint32_t>(data.size()));
+        u16(cd, static_cast<std::uint32_t>(name.size())); u16(cd, 0); u16(cd, 0); u16(cd, 0); u16(cd, 0); u32(cd, 0); u32(cd, off);
+        cd += name;
+    }
+    const auto cd_off = static_cast<std::uint32_t>(out.size());
+    out += cd;
+    u32(out, 0x06054b50); u16(out, 0); u16(out, 0);
+    u16(out, static_cast<std::uint32_t>(members.size())); u16(out, static_cast<std::uint32_t>(members.size()));
+    u32(out, static_cast<std::uint32_t>(cd.size())); u32(out, cd_off); u16(out, 0);
+    return out;
+}
+std::string odt_bytes(const std::vector<std::string>& paragraphs, bool deflated = true) {
+    std::string body;
+    for (const auto& p : paragraphs) body += "<text:p text:style-name=\"P1\">" + p + "</text:p>";
+    const std::string xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><office:document-content xmlns:office=\"o\" "
+                            "xmlns:text=\"t\"><office:automatic-styles/><office:body><office:text>" + body +
+                            "</office:text></office:body></office:document-content>";
+    return zip_bytes({{"mimetype", "application/vnd.oasis.opendocument.text", false}, {"content.xml", xml, deflated}});
+}
+std::string png_bytes(std::uint32_t w, std::uint32_t h, std::uint32_t rgb, std::uint32_t stripe) {
+    std::string raw;
+    for (std::uint32_t y = 0; y < h; ++y) {
+        raw += '\0';
+        for (std::uint32_t x = 0; x < w; ++x) {
+            const std::uint32_t c = (y / 8) % 2 ? stripe : rgb;
+            raw += static_cast<char>((c >> 16) & 0xFF); raw += static_cast<char>((c >> 8) & 0xFF); raw += static_cast<char>(c & 0xFF);
+        }
+    }
+    std::string z(compressBound(static_cast<uLong>(raw.size())), '\0');
+    uLongf zl = static_cast<uLongf>(z.size());
+    compress(reinterpret_cast<Bytef*>(z.data()), &zl, reinterpret_cast<const Bytef*>(raw.data()), static_cast<uLong>(raw.size()));
+    z.resize(zl);
+    const auto be = [](std::string& s, std::uint32_t v) { for (int k = 3; k >= 0; --k) s += static_cast<char>((v >> (8 * k)) & 0xFF); };
+    std::string out = "\x89PNG\r\n\x1a\n";
+    const auto chunk = [&](const char* type, const std::string& data) {
+        be(out, static_cast<std::uint32_t>(data.size()));
+        const std::string td = std::string(type) + data;
+        out += td;
+        be(out, static_cast<std::uint32_t>(crc32(0, reinterpret_cast<const Bytef*>(td.data()), static_cast<uInt>(td.size()))));
+    };
+    std::string ihdr;
+    be(ihdr, w); be(ihdr, h);
+    ihdr += static_cast<char>(8); ihdr += static_cast<char>(2); ihdr += '\0'; ihdr += '\0'; ihdr += '\0';
+    chunk("IHDR", ihdr);
+    chunk("IDAT", z);
+    chunk("IEND", "");
+    return out;
+}
+
 // s017: version families for an Xvfb drive -- a chapter saved six ways, two Curvz
 // bundles, a tidy family, and Folio's history moved into home by its preference.
 bool make_versions_fixture(const fs::path& home) {
@@ -454,9 +537,29 @@ bool make_versions_fixture(const fs::path& home) {
     };
     const std::int64_t D = 86400;
     const std::string body(6000, 'a'), N = "Documents/Novels/";
-    return at(N + "ch3.odt", body + "one", 9 * D) && at(N + "ch3 draft.odt", body + "one", 8 * D) &&
-           at(N + "ch3 (1).odt", body + "two!", 7 * D) && at(N + "ch3 v2.odt", body + "three", 3 * D + 300) &&
-           at(N + "ch3 final.odt", body + "four", 3 * D) && at(N + "ch3 final2.odt", body + "five-five", D) &&
+    // s017b: the chapter's saves are real ODTs now, so the viewer has texts to
+    // set side by side -- a chapter that grows a line, loses one, changes one.
+    std::vector<std::string> ch;
+    for (int k = 1; k <= 40; ++k)
+        ch.push_back("Paragraph " + std::to_string(k) + ". Tapper felt the room before he saw it -- every fear in it "
+                     "pressed on him like weather, and he let it.");
+    const auto with = [&](int n) {   // the nth save: each one edits a little more
+        auto v = ch;
+        if (n >= 2) v[4] = "Paragraph 5. The colonel smiled; Tapper felt the lie under it like a stone under a rug.";
+        if (n >= 3) v.insert(v.begin() + 12, "A new line, written on the train &amp; kept.");
+        if (n >= 4) v.erase(v.begin() + 30);
+        if (n >= 5) v[38] = "Paragraph 40, rewritten:<text:s text:c=\"2\"/>the ending he wanted.";
+        if (n >= 6) v.push_back("THE END");
+        return odt_bytes(v);
+    };
+    return at(N + "ch3.odt", with(1), 9 * D) && at(N + "ch3 draft.odt", with(1), 8 * D) &&
+           at(N + "ch3 (1).odt", with(2), 7 * D) && at(N + "ch3 v2.odt", with(4), 3 * D + 300) &&
+           at(N + "ch3 final.odt", with(5), 3 * D) && at(N + "ch3 final2.odt", with(6), D) &&
+           at("Pictures/beach.png", png_bytes(320, 200, 0x2a7fd4, 0x9fd3ff), D) &&
+           at("Pictures/beach (1).png", png_bytes(320, 200, 0x2a7fd4, 0xe8d2a0), 5 * D) &&
+           at("Pictures/beach old.png", png_bytes(160, 100, 0xe8d2a0, 0xc9a86a), 40 * D) &&
+           at("Documents/notes.txt", "Rouster notes\n\n- the Closet\n- the Junk Drawer\n- versions viewer\n", D) &&
+           at("Documents/notes v2.txt", "Rouster notes\n\n- the Closet\n- versions\n", 4 * D) &&
            at(N + "Chapter 2.odt", body, D) && at(N + "Chapter 3.odt", body, D) &&
            at("Documents/Tapper.odt", body + "new", D) && at("Documents/Tapper versions/Tapper old.odt", body + "old", 30 * D) &&
            at("Pictures/Logo.curvz/project.json", "{}", 20 * D) && at("Pictures/Logo v2.curvz/project.json", "{ }", 2 * D) &&
@@ -4332,6 +4435,134 @@ int main(int argc, char** argv) {
         }
         fs::remove_all(home, ec);
     }
+    // -- s017b: compare -- kinds, texts out of txt / ODT / DOCX / FODT, the line diff --
+    {
+        std::cout << "\n-- compare --\n";
+        namespace cm = core::compare;
+        const fs::path dir = fs::temp_directory_path() / ("rouster_compare_" + std::to_string(::getpid()));
+        std::error_code ec;
+        fs::remove_all(dir, ec);
+        fs::create_directories(dir, ec);
+        const auto put = [&](const std::string& name, const std::string& data) { return put_bytes(dir, name, data); };
+        const auto P = [&](const std::string& name) { return (dir / name).string(); };
+        const std::string bad = "\xEF\xBF\xBD";
+
+        check("compare: clean_utf8 -- good kept, a stray byte / an overlong / NUL each replaced",
+              cm::clean_utf8("caf\xC3\xA9 \xE2\x80\x94 ok") == "caf\xC3\xA9 \xE2\x80\x94 ok" &&
+              cm::clean_utf8("a\xFF" "b") == "a" + bad + "b" && cm::clean_utf8("\xC0\xAF") == bad + bad &&
+              cm::clean_utf8(std::string("x\0y", 3)) == "x" + bad + "y" && cm::clean_utf8("\xE2\x80") == bad + bad);
+
+        bool made = put("a.png", png_bytes(8, 8, 0xff0000, 0x00ff00)) && put("notes.weird", "plain words\nmore\n") &&
+                    put("blob.weird", std::string("\x01\x02\0\x03", 4)) && put("Logo.curvz/project.json", "{}") &&
+                    put("Book.scriv/x", "y");
+        check("compare: kinds -- picture, text, our app's bundle (Curvz), a Mac package is Other, an unknown text "
+              "sniffed as text, unknown bytes are Other",
+              made && cm::kind_of(P("a.png"), "png", false) == cm::Kind::Image &&
+              cm::kind_of(P("x.odt"), "odt", false) == cm::Kind::Text &&
+              cm::kind_of(P("Logo.curvz"), "curvz", true) == cm::Kind::App && cm::app_of("curvz") == "Curvz" &&
+              cm::app_of("jots") == "jot" && cm::app_of("folio.gz").empty() &&
+              cm::kind_of(P("Book.scriv"), "scriv", true) == cm::Kind::Other &&
+              cm::kind_of(P("notes.weird"), "weird", false) == cm::Kind::Text &&
+              cm::kind_of(P("blob.weird"), "weird", false) == cm::Kind::Other);
+
+        made = put("crlf.txt", "\xEF\xBB\xBFone\r\ntwo\r\n\r\nfour\xFF\n");
+        const auto t1 = cm::read_text(P("crlf.txt"), "txt");
+        const auto t2 = cm::read_text(P("blob.weird"), "txt");
+        check("compare: a plain text -- BOM and CRs off, the blank line kept, the last newline isn't a line, bad bytes "
+              "replaced; a binary is 'not a text'",
+              made && t1.ok && t1.lines == std::vector<std::string>{"one", "two", "", "four" + bad} && !t2.ok &&
+              t2.why == "not a text");
+
+        const std::string body =
+            "<office:body><office:text><text:h text:outline-level=\"1\">Chapter Three</text:h>"
+            "<text:p>Tapper <text:span>felt</text:span> it &amp; <text:s text:c=\"3\"/>waited.</text:p>"
+            "<text:p/><text:p>A<text:tab/>tab<text:line-break/>and a break"
+            "<office:annotation><dc:creator>me</dc:creator><text:p>a comment</text:p></office:annotation></text:p>"
+            "<text:p>Note<text:note><text:note-citation>1</text:note-citation><text:note-body><text:p>foot</text:p>"
+            "</text:note-body></text:note> here &#x2014; &lt;ok&gt;</text:p></office:text></office:body>";
+        const std::string xml = "<?xml version=\"1.0\"?><office:document-content>" + body + "</office:document-content>";
+        const std::vector<std::string> want = {"Chapter Three", "Tapper felt it &    waited.", "", "A\ttab", "and a break",
+                                               "Note here \xE2\x80\x94 <ok>"};
+        made = put("ch.odt", zip_bytes({{"mimetype", "application/vnd.oasis.opendocument.text", false},
+                                        {"Thumbnails/thumbnail.png", png_bytes(4, 4, 0, 0), false},
+                                        {"content.xml", xml, true}})) &&
+               put("stored.odt", zip_bytes({{"mimetype", "x", false}, {"content.xml", xml, false}})) &&
+               put("ch.fodt", xml) && put("nocontent.odt", zip_bytes({{"mimetype", "x", false}})) &&
+               put("notzip.odt", "just words, no zip here at all, long enough to look");
+        const auto o1 = cm::read_text(P("ch.odt"), "odt"), o2 = cm::read_text(P("stored.odt"), "odt"),
+                   o3 = cm::read_text(P("ch.fodt"), "fodt"), o4 = cm::read_text(P("nocontent.odt"), "odt"),
+                   o5 = cm::read_text(P("notzip.odt"), "odt");
+        check("compare: an ODT's paragraphs (deflated, stored, flat FODT) -- heading, spans, entities, text:s, tab, "
+              "line break; comments and footnotes left out",
+              made && o1.ok && o1.lines == want && o2.ok && o2.lines == want && o3.ok && o3.lines == want,
+              o1.ok ? (o1.lines.size() > 1 ? "'" + o1.lines[1] + "'" : "n=" + std::to_string(o1.lines.size())) : o1.why);
+        check("compare: a zip without content.xml, and a file that isn't a zip -- not read, said why",
+              !o4.ok && o4.why == "the zip has no content.xml" && !o5.ok && o5.why == "not a zip", o4.why + " / " + o5.why);
+
+        const std::string dx = "<w:document><w:body><w:p><w:r><w:t>Hello</w:t></w:r><w:r><w:t xml:space=\"preserve\"> "
+                               "world &amp; more</w:t></w:r></w:p><w:p/><w:p><w:r><w:t>A</w:t><w:tab/><w:t>B</w:t>"
+                               "<w:br/><w:t>C</w:t><w:delText>gone</w:delText></w:r></w:p></w:body></w:document>";
+        made = put("d.docx", zip_bytes({{"[Content_Types].xml", "<x/>", true}, {"word/document.xml", dx, true}}));
+        const auto d1 = cm::read_text(P("d.docx"), "docx");
+        check("compare: a DOCX's paragraphs -- runs joined, tab, break; deleted text left out",
+              made && d1.ok && d1.lines == std::vector<std::string>{"Hello world & more", "", "A\tB", "C"});
+
+        // The diff.
+        using V = std::vector<std::string>;
+        const auto r0 = cm::rows(V{"a", "b", "c"}, V{"a", "b", "c"}, 0);
+        const auto r1 = cm::rows(V{"a", "b", "c", "d"}, V{"a", "B", "c", "d", "e"}, 0);
+        const auto r2 = cm::rows(V{"a", "b", "c"}, V{"a", "c"}, 0);
+        check("compare: the diff -- identical; one changed + one added, aligned; one removed against a blank",
+              r0.identical() && r0.rows.size() == 3 && r1.changed == 1 && r1.added == 1 && r1.removed == 0 &&
+              r1.rows.size() == 5 && r1.rows[1].mark == cm::Mark::Changed && r1.rows[1].left == "b" &&
+              r1.rows[1].right == "B" && r1.rows[4].mark == cm::Mark::Added && r1.rows[4].left.empty() &&
+              r1.rows[4].rno == 5 && r2.removed == 1 && r2.rows[1].mark == cm::Mark::Removed && r2.rows[1].right.empty());
+        V big;
+        for (int k = 0; k < 100; ++k) big.push_back("line " + std::to_string(k));
+        V big2 = big;
+        big2[50] = "changed";
+        const auto r3 = cm::rows(big, big2, 3);
+        std::size_t shown = 0, folded = 0;
+        for (const auto& r : r3.rows) { if (r.mark == cm::Mark::Gap) folded += r.skipped; else ++shown; }
+        check("compare: folding -- one change in 100 lines shows it with 3 lines either side, the rest in two gaps",
+              r3.rows.size() == 9 && r3.rows[0].mark == cm::Mark::Gap && r3.rows[0].skipped == 47 &&
+              r3.rows[4].mark == cm::Mark::Changed && r3.rows[8].mark == cm::Mark::Gap && shown + folded == 100,
+              std::to_string(r3.rows.size()) + " rows");
+        // Against a plain LCS on random small texts: the rows rebuild both sides exactly and the edit count is minimal.
+        std::mt19937 rng(17);
+        bool exact = true, minimal = true;
+        for (int trial = 0; trial < 300 && exact && minimal; ++trial) {
+            V a, b;
+            const int na = static_cast<int>(rng() % 25), nb = static_cast<int>(rng() % 25);
+            for (int k = 0; k < na; ++k) a.push_back(std::string(1, static_cast<char>('a' + rng() % 4)));
+            for (int k = 0; k < nb; ++k) b.push_back(std::string(1, static_cast<char>('a' + rng() % 4)));
+            const auto r = cm::rows(a, b, 0);
+            V ra, rb;
+            for (const auto& x : r.rows) {
+                if (x.mark != cm::Mark::Added) ra.push_back(x.left);
+                if (x.mark != cm::Mark::Removed) rb.push_back(x.right);
+            }
+            exact = ra == a && rb == b;
+            std::vector<std::vector<int>> L(a.size() + 1, std::vector<int>(b.size() + 1, 0));
+            for (std::size_t i = a.size(); i-- > 0;)
+                for (std::size_t j = b.size(); j-- > 0;)
+                    L[i][j] = a[i] == b[j] ? L[i + 1][j + 1] + 1 : std::max(L[i + 1][j], L[i][j + 1]);
+            minimal = r.same == static_cast<std::size_t>(L[0][0]);
+        }
+        check("compare: 300 random texts -- the rows rebuild both sides, and the same lines are a longest common run",
+              exact && minimal);
+        V x1, x2;
+        for (int k = 0; k < 2500; ++k) { x1.push_back("x" + std::to_string(k)); x2.push_back("y" + std::to_string(k)); }
+        const auto r4 = cm::rows(x1, x2, 3);
+        check("compare: past the edit budget -- too different to mark, both shown side by side",
+              r4.too_different && r4.rows.size() == 2500 && r4.rows[0].left == "x0" && r4.rows[0].right == "y0");
+        const std::string before = tree_snapshot(dir);
+        (void)cm::read_text(P("ch.odt"), "odt");
+        (void)cm::read_text(P("crlf.txt"), "txt");
+        (void)cm::kind_of(P("notes.weird"), "weird", false);
+        check("compare: reading changes nothing on disk", tree_snapshot(dir) == before);
+        fs::remove_all(dir, ec);
+    }
     // -- s017a2: Samson's places are Protected; your own bundle list --------------
     {
         std::cout << "\n-- samson + bundles --\n";
@@ -4560,7 +4791,7 @@ int main(int argc, char** argv) {
         // s015b: every library CMake asks pkg-config for is credited too (sqlite3 came with the catalog).
         std::vector<std::string> uncredited;
         {
-            const std::map<std::string, std::string> credit_of = {{"gtkmm-4.0", "gtkmm"}, {"sqlite3", "SQLite"}};
+            const std::map<std::string, std::string> credit_of = {{"gtkmm-4.0", "gtkmm"}, {"sqlite3", "SQLite"}, {"zlib", "zlib"}};
             std::ifstream cm(fs::path(ROUSTER_SOURCE_DIR) / "CMakeLists.txt");
             std::string line;
             while (std::getline(cm, line)) {
