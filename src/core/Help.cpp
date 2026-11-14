@@ -13,12 +13,13 @@ std::vector<Topic> build() {
 
     // ── Start here ──────────────────────────────────────────────────────────
     t.push_back({"welcome", "Rouster at a glance", "Start here",
-        "Keeps your home folder in order: organizes first, cleans second, and never loses anything on the way.",
+        "Mops up your home folder -- caches, duplicates, build output, system clutter -- and never loses anything on the way.",
         {
             {"", {
                 "A roustabout does the heavy hauling and the cleanup. Rouster looks through your home folder, "
-                "tells you what can go and why, files what belongs somewhere, and puts finished work away -- "
-                "and every change it makes can be taken back."}},
+                "tells you what can go and why, and clears it -- and every change it makes can be taken back. "
+                "Organizing your files -- where they live, what is archived -- is Tidy's work, a separate app; "
+                "Rouster mops up what Tidy leaves."}},
             {"Every module works the same way", {
                 "- Look. Rouster reads; looking never changes anything.",
                 "- Read the list. Safe items are already checked; anything doubtful is left unchecked with the reason beside it.",
@@ -26,7 +27,6 @@ std::vector<Topic> build() {
                 "- Undo. Every act is one step in Activity, and Undo puts it back."}},
             {"The sidebar", {
                 "- Clean up: Smart Scan, Sweep, System, Duplicates, Dev projects.",
-                "- Organize: Projects, Rules, Archive.",
                 "- Safety: Preflight, Profile backup, Activity."}},
             {"Getting help", {
                 "Press F1 on any page to open its help. Ctrl+? lists the keyboard shortcuts."}},
@@ -37,14 +37,14 @@ std::vector<Topic> build() {
         {
             {"Nothing is hard-deleted", {
                 "What Rouster removes goes to the Trash (the same Trash Files uses, with the original location "
-                "recorded) or to ~/Archive. Rouster never empties the Trash -- you do that in Files when you're sure. "
+                "recorded). Rouster never empties the Trash -- you do that in Files when you're sure. "
                 "So a clean frees space only once the Trash is emptied."}},
             {"One door, one record", {
                 "Every change goes through one part of Rouster (the door), which writes what it is about to do "
                 "to a record before it does it, and what happened after. That record is Activity, and it is what "
                 "Undo reads -- even after a crash or a restart."}},
             {"It refuses, it doesn't advise", {
-                "These are never touched, whatever a module or a rule asks:",
+                "These are never touched, whatever a module asks:",
                 "- ~/.ssh, ~/.gnupg, ~/.local/share/keyrings",
                 "- ~/.config/dconf, ~/.local/share/gnome-shell/extensions, ~/.local/share/flatpak",
                 "- any folder named fixes, anywhere",
@@ -53,8 +53,7 @@ std::vector<Topic> build() {
             {"Packages are one thing", {
                 "A Scrivener project (.scriv) -- and Pages, Numbers, Keynote, .rtfd, .app, a Photos library -- is a "
                 "folder on Linux but one thing to Rouster. It is never looked inside, never split, never swept, "
-                "paired or trashed piece by piece. The only thing Rouster ever does with one is move it whole "
-                "(Archive does, when all of it is untouched), and Undo moves it back."}},
+                "paired or trashed piece by piece."}},
             {"Never overwrites, never copies-and-deletes", {
                 "A move never lands on a file that's already there. A move to another drive is refused rather "
                 "than copied and deleted."}},
@@ -165,55 +164,6 @@ std::vector<Topic> build() {
                 "For workspaces, anything not in the template is listed. Known marks a name as yours; Forget undoes that."}},
         }});
 
-    // ── Organize ────────────────────────────────────────────────────────────
-    t.push_back({"projects", "Projects", "Organize",
-        "Starts projects from templates, names files the project's way, and files them where they belong.",
-        {
-            {"Templates", {
-                "A template is a plain folder in ~/.config/rouster/templates -- edit it in Files. Three starters "
-                "(Design job, Book, gtkmm app) can be added in one undoable step. Placeholders {id}, {title} and "
-                "{date} are filled in when a project is made."}},
-            {"File into a project", {
-                "Drop files on a project: each is renamed by the project's pattern (for example "
-                "{id}_{title}_{stamp}_{part}.{ext}) and routed by type. Anything that doesn't fit is flagged, never moved."}},
-            {"New version", {
-                "Copies a file under a fresh stamp and moves the old one into versions/. The copy shares storage "
-                "where the filesystem can."}},
-        }});
-
-    t.push_back({"rules", "Rules", "Organize",
-        "Hazel-style rules on a watched folder -- Downloads is the inbox.",
-        {
-            {"How to use it", {
-                "A rule looks at one folder: name, kinds and age decide what matches; the action moves it (renamed, "
-                "into dated folders), sends it to the Trash, archives it, or files it into a project. First match wins."}},
-            {"Preview first", {
-                "A rule turns on only from its own preview. Run rules now shows every match before anything moves, "
-                "and the whole run is one Activity step."}},
-            {"Watch", {
-                "With Watch on, enabled rules run every 10 minutes -- only while Rouster is open."}},
-        }});
-
-    t.push_back({"archive", "Archive", "Organize",
-        "Moves files you haven't touched in a long time to ~/Archive, keeping their folders.",
-        {
-            {"How to use it", {
-                "Choose how old (6 months to 5 years; a year by default) and press Look. Old files move to "
-                "~/Archive/<year>/<where they were>. A folder that's old all the way through goes as one."}},
-            {"Getting things back", {
-                "In the archive lists what Rouster put there; Put back sends any of it home -- at any time, not only "
-                "through Undo."}},
-            {"Searching the archive", {
-                "Search the archive (on the start page, or In the archive) finds anything in ~/Archive by its name "
-                "or by where it came from -- every word you type must be in one or the other. Narrow it by kind "
-                "(Documents, Pictures, Music, Video, Text & code, Archives, Other) and by year.",
-                "Check a hit and press Put back: a file that went in inside a folder comes back with its folder. "
-                "Open shows it where it is; nothing moves. Something you put in ~/Archive by hand is found too, "
-                "but only what Rouster put there can be put back."}},
-            {"Good to know", {
-                "Age is the last change (mtime). Dev projects, repos, hidden files and fixes/ are never archived."}},
-        }});
-
     // ── Safety ──────────────────────────────────────────────────────────────
     t.push_back({"preflight", "Preflight", "Safety",
         "The checklist that must be clear before Rouster cleans.",
@@ -305,15 +255,14 @@ std::vector<Topic> build() {
         "Rouster's own files -- all inside your home except the helper.",
         {
             {"", {
-                "- ~/.local/share/rouster -- the Activity record (manifest.jsonl), saved settings for Undo, rules, known names.",
+                "- ~/.local/share/rouster -- the Activity record (manifest.jsonl), saved settings for Undo, known names.",
                 "- ~/.local/share/rouster/catalog.db -- the catalog: Rouster's memory of your files (names, sizes, "
                 "when each was first seen, last opened, last changed, moved, gone). Never their contents. "
                 "Delete it and the next Smart Scan of home starts it again -- only the history and your decisions are lost.",
-                "- ~/.config/rouster/templates -- project templates.",
-                "- ~/Archive -- archived files and profile backups.",
+                "- ~/Archive/Profile -- profile backups.",
                 "- ~/.local/share/Trash -- what Rouster (and you) sent to the Trash.",
                 "- /home/.rouster-snapshots -- snapshots (root-owned, read-only).",
-                "Uninstalling Rouster removes the app; --purge also removes its settings. Your archive, backups and "
+                "Uninstalling Rouster removes the app; --purge also removes its settings. Your backups and "
                 "snapshots are yours and stay."}},
         }});
     return t;

@@ -80,21 +80,6 @@ Shell::Shell()
       m_du_gate("shell.dups.gate"),
       m_du_done_big("shell.dups.done_big"),
       m_du_done_caption("shell.dups.done_caption"),
-      m_ar_page("shell.archive.page", Gtk::Orientation::VERTICAL),
-      m_ar_states("shell.archive.states"),
-      m_ar_sub("shell.archive.sub"),
-      m_ar_find("shell.archive.find"),
-      m_ar_spinner("shell.archive.spinner"),
-      m_ar_run_big("shell.archive.run_big"),
-      m_ar_run_caption("shell.archive.run_caption"),
-      m_ar_cancel("shell.archive.cancel"),
-      m_ar_big("shell.archive.big"),
-      m_ar_caption("shell.archive.caption"),
-      m_ar_list("shell.archive.list", Gtk::Orientation::VERTICAL, 10),
-      m_ar_go("shell.archive.go"),
-      m_ar_gate("shell.archive.gate"),
-      m_ar_done_big("shell.archive.done_big"),
-      m_ar_done_caption("shell.archive.done_caption"),
       m_pr_page("shell.profile.page", Gtk::Orientation::VERTICAL),
       m_pr_states("shell.profile.states"),
       m_pr_sub("shell.profile.sub"),
@@ -114,45 +99,6 @@ Shell::Shell()
       m_pr_rs_list("shell.profile.rs_list", Gtk::Orientation::VERTICAL, 10),
       m_pr_rs_gate("shell.profile.rs_gate"),
       m_pr_rs_go("shell.profile.rs_go"),
-      m_pj_page("shell.projects.page", Gtk::Orientation::VERTICAL),
-      m_pj_states("shell.projects.states"),
-      m_pj_home("shell.projects.home", Gtk::Orientation::VERTICAL, 14),
-      m_pj_new_title("shell.projects.new_title"),
-      m_pj_id("shell.projects.id"),
-      m_pj_title("shell.projects.title"),
-      m_pj_new_where("shell.projects.new_where"),
-      m_pj_new_list("shell.projects.new_list", Gtk::Orientation::VERTICAL, 4),
-      m_pj_new_gate("shell.projects.new_gate"),
-      m_pj_new_go("shell.projects.new_go"),
-      m_pj_pv_title("shell.projects.preview_title"),
-      m_pj_pv_sub("shell.projects.preview_sub"),
-      m_pj_pv_list("shell.projects.preview_list", Gtk::Orientation::VERTICAL, 4),
-      m_pj_pv_gate("shell.projects.preview_gate"),
-      m_pj_pv_go("shell.projects.preview_go"),
-      m_pj_head("shell.projects.head"),
-      m_pj_head_sub("shell.projects.head_sub"),
-      m_pj_list("shell.projects.list", Gtk::Orientation::VERTICAL, 12),
-      m_pj_gate("shell.projects.gate"),
-      m_pj_go("shell.projects.go"),
-      m_pj_done_big("shell.projects.done_big"),
-      m_pj_done_caption("shell.projects.done_caption"),
-      m_pj_done_back("shell.projects.done_back"),
-      m_rl_page("shell.rules.page", Gtk::Orientation::VERTICAL),
-      m_rl_states("shell.rules.states"),
-      m_rl_list("shell.rules.list", Gtk::Orientation::VERTICAL, 14),
-      m_rl_name("shell.rules.name"), m_rl_folder("shell.rules.folder"), m_rl_glob("shell.rules.glob"),
-      m_rl_exts("shell.rules.exts"), m_rl_days("shell.rules.days"), m_rl_dest("shell.rules.dest"),
-      m_rl_rename("shell.rules.rename"),
-      m_rl_edit_title("shell.rules.edit_title"),
-      m_rl_summary("shell.rules.summary"),
-      m_rl_preview("shell.rules.preview", Gtk::Orientation::VERTICAL, 8),
-      m_rl_edit_gate("shell.rules.edit_gate"),
-      m_rl_save_off("shell.rules.save_off"), m_rl_save_on("shell.rules.save_on"), m_rl_delete("shell.rules.delete"),
-      m_rl_run_list("shell.rules.run_list", Gtk::Orientation::VERTICAL, 10),
-      m_rl_run_gate("shell.rules.run_gate"),
-      m_rl_go("shell.rules.go"),
-      m_rl_done_big("shell.rules.done_big"),
-      m_rl_done_caption("shell.rules.done_caption"),
       m_pf_page("shell.preflight.page", Gtk::Orientation::VERTICAL, 10),
       m_pf_summary("shell.preflight.summary"),
       m_pf_rows("shell.preflight.rows", Gtk::Orientation::VERTICAL, 10),
@@ -167,7 +113,7 @@ Shell::Shell()
 
 // The worker must be gone before the members it touches (m_report, the
 // dispatcher). close-request does this too; the dtor is the backstop.
-Shell::~Shell() { m_rl_timer.disconnect(); stop_scan(); stop_sweep(); stop_dev(); stop_dups(); stop_archive(); stop_profile(); stop_preflight(); stop_system(); }
+Shell::~Shell() { stop_scan(); stop_sweep(); stop_dev(); stop_dups(); stop_profile(); stop_preflight(); stop_system(); }
 
 void Shell::build_ui() {
     m_home = home_dir();
@@ -191,12 +137,8 @@ void Shell::build_ui() {
     set_scanning(false);
     paint_preflight();
     paint_activity();
-    paint_projects();
-    m_rl_book = core::rules::load(data_dir() + "/" + core::rules::kFile);
-    rl_save(false);   // arms the watch timer if it is on; writes nothing
-    paint_rules();
 
-    signal_close_request().connect([this] { stop_scan(); stop_sweep(); stop_dev(); stop_dups(); stop_archive(); stop_profile(); stop_preflight(); stop_system(); return false; }, false);
+    signal_close_request().connect([this] { stop_scan(); stop_sweep(); stop_dev(); stop_dups(); stop_profile(); stop_preflight(); stop_system(); return false; }, false);
     m_scan_finished.connect(sigc::mem_fun(*this, &Shell::on_scan_done));
     m_sweep_finished.connect(sigc::mem_fun(*this, &Shell::on_sweep_found));
     m_dev_finished.connect(sigc::mem_fun(*this, &Shell::on_dev_found));
@@ -205,7 +147,6 @@ void Shell::build_ui() {
     m_dups_acted.connect(sigc::mem_fun(*this, &Shell::on_dups_acted));
     m_snapshot_taken.connect(sigc::mem_fun(*this, &Shell::on_snapshot_taken));
     m_system_acted.connect(sigc::mem_fun(*this, &Shell::on_system_acted));
-    m_archive_finished.connect(sigc::mem_fun(*this, &Shell::on_archive_found));
     m_profile_finished.connect(sigc::mem_fun(*this, &Shell::on_profile_found));
     m_profile_looked.connect(sigc::mem_fun(*this, &Shell::on_profile_looked));
     m_profile_packed.connect(sigc::mem_fun(*this, &Shell::on_profile_packed));

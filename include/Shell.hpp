@@ -10,10 +10,7 @@
 #include "core/Sweep.hpp"    // s006: the first module that acts
 #include "core/Dev.hpp"      // s007: dev projects
 #include "core/Dups.hpp"     // s008: duplicates
-#include "core/Archive.hpp"  // s009: archive
 #include "core/Profile.hpp"  // s012: profile backup
-#include "core/Organize.hpp" // s010: templates, naming, file into project
-#include "core/Rules.hpp"    // s011: rules on watched folders
 #include "core/System.hpp"   // s013b: package cache, journal, trim (root)
 #include <gtkmm/stack.h>
 #include <gtkmm/spinner.h>
@@ -67,12 +64,6 @@
 //   "Where does the light clean act?"    -> Shell_handlers.cpp (on_dev_run -> m_door->run)
 //   "Where is the Duplicates page?"      -> Shell_zones.cpp   (build_dups_page); groups: Shell_helpers.cpp (paint_dups)
 //   "Where does Duplicates act?"         -> Shell_handlers.cpp (on_dups_run -> worker -> m_door->run)
-//   "Where is the Archive page?"         -> Shell_zones.cpp   (build_archive_page); rows: Shell_helpers.cpp (paint_archive)
-//   "Where does Archive act?"            -> Shell_handlers.cpp (on_archive_run -> m_door->run)
-//   "Where is the Projects page?"        -> Shell_zones.cpp   (build_projects_page); painting: Shell_helpers.cpp (paint_projects / paint_pj_project)
-//   "Where do Projects act?"             -> Shell_handlers.cpp (on_pj_create / on_pj_file / on_pj_confirm -> m_door->run)
-//   "Where is the Rules page?"           -> Shell_zones.cpp   (build_rules_page); painting: Shell_helpers.cpp (paint_rules)
-//   "Where do rules act?"                -> Shell_handlers.cpp (on_rl_run, on_rl_tick -> m_door->run)
 //   "Where is the Profile backup page?"  -> Shell_zones.cpp   (build_profile_page); rows: Shell_helpers.cpp (paint_profile)
 //   "Where does a profile backup act?"   -> Shell_handlers.cpp (on_profile_run -> m_door->run)
 //   "Where does a write go?"             -> core/Door.* -- nowhere else (the selftest's source gate)
@@ -101,9 +92,6 @@ private:
     void build_system_page();                    // category: zone: System (s013b) -- root housekeeping
     void build_dev_page();                       // category: zone: Dev projects (s007)
     void build_dups_page();                      // category: zone: Duplicates (s008)
-    void build_archive_page();                   // category: zone: Archive (s009)
-    void build_projects_page();                  // category: zone: Projects (s010)
-    void build_rules_page();                     // category: zone: Rules (s011)
     void build_profile_page();                   // category: zone: Profile backup (s012a)
     void build_preflight_page();                 // category: zone: Preflight (s003)
     void build_activity_page();                  // category: zone: Activity (s004)
@@ -147,15 +135,6 @@ private:
     void on_snapshot_take();                     // category: handler: s013 -- Preflight's Take snapshot -> worker -> the door -> pkexec
     void on_snapshot_taken();                    // category: handler: the helper answered (Dispatcher, UI thread)
     void stop_preflight();                       // category: helper: join a snapshot in flight (close, dtor)
-    void on_archive_find();                      // category: handler: look for old files (worker)
-    void on_archive_cancel();                    // category: handler: stop looking
-    void on_archive_found();                     // category: handler: the worker finished (Dispatcher, UI thread)
-    void on_archive_view(bool stored);           // category: handler: Old files / In the archive
-    void on_archive_search_open();               // category: handler: s018 -- Search the archive (from the start page)
-    void archive_reindex();                      // category: helper: s018 -- ~/Archive walked + the catalog + the records
-    void paint_archive_hits();                   // category: helper: s018 -- the stored list, or what the search found
-    void on_archive_months(int months);          // category: handler: the "untouched for" choice -> look again
-    void on_archive_run();
     void on_profile_find();                      // category: handler: gather the set-up (worker: dconf, dnf, flatpak)
     void on_profile_found();                     // category: handler: the worker finished (Dispatcher, UI thread)
     void on_profile_run();                       // category: handler: checked rows -> a plan (one new folder) -> the door
@@ -165,32 +144,7 @@ private:
     void on_profile_packed();                    // category: handler: s012c -- the secrets are encrypted (Dispatcher, UI thread)
     void on_profile_open_secrets();              // category: handler: s012c -- restore's Open -> worker: decrypt in memory + compare
     void on_profile_secrets_opened();            // category: handler: s012c -- the secrets were opened (Dispatcher, UI thread)
-    void on_profile_restore();                   // category: handler: checked rows -> Trash + Copy plan -> the door                       // category: handler: checked rows -> a plan (archive or put back) -> the door
-    void on_pj_home();                           // category: handler: back to templates + projects (re-read)
-    void on_pj_new(std::size_t tmpl);            // category: handler: a template's New project... -> the form
-    void on_pj_form();                           // category: handler: id / title typed -> the plan again
-    void on_pj_create();                         // category: handler: the form's plan -> the door
-    void on_pj_starters();                       // category: handler: Install starter templates... -> the preview
-    void on_pj_version(const std::string& rel);  // category: handler: a row's New version -> the preview
-    void on_pj_confirm();                        // category: handler: the preview's act button -> the door
-    void on_pj_open(const std::string& dir);     // category: handler: open a project
-    void on_pj_pick_project();                   // category: handler: folder chooser -> open a project
-    void on_pj_add_files();                      // category: handler: file chooser -> the queue
-    void on_pj_dropped(const std::vector<std::string>& paths);   // category: handler: files dropped / chosen -> the queue
-    void on_pj_file();                           // category: handler: the checked queue -> a plan -> the door
-    void on_pj_show(const std::string& path);    // category: handler: open a folder in Files
-    void on_rl_edit(std::size_t i);              // category: handler: a rule's Edit (or New rule: npos) -> the form
-    void on_rl_form();                           // category: handler: a field changed -> the draft + its matches (the preview)
-    void on_rl_save(bool on);                    // category: handler: Save (off) / Save and turn on -> rules.json
-    void on_rl_delete();                         // category: handler: the form's Delete -> gone, with a way back
-    void on_rl_undelete();                       // category: handler: Put it back
-    void on_rl_toggle(std::size_t i, bool on);   // category: handler: a rule's switch (on -> via the form's preview)
-    void on_rl_move(std::size_t i, int by);      // category: handler: reorder (first match wins)
-    void on_rl_starters();                       // category: handler: add the starter rules, all off
-    void on_rl_watch(bool on);                   // category: handler: run every 10 minutes while open
-    void on_rl_preview();                        // category: handler: Run rules now -> every match, checked
-    void on_rl_run();                            // category: handler: the checked matches -> a plan -> the door
-    bool on_rl_tick();                           // category: handler: the watch timer -> the enabled rules -> the door
+    void on_profile_restore();                   // category: handler: checked rows -> Trash + Copy plan -> the door
     void on_preflight();                         // category: handler: run the checklist again
     void on_pick_folder();                       // category: handler: folder chooser -> scan it
     void on_recent_open(const std::string& p);   // category: handler: scan a recent folder again
@@ -226,10 +180,6 @@ private:
     void dups_preset();                          // category: helper: checks for the mode; nothing unshown stays checked
     void paint_dups();                           // category: helper: mode switch, one card per group, rows with checks
     void dups_gate();                            // category: helper: the act button's label + whether it may act
-    void stop_archive();                         // category: helper: cancel + join (close, dtor)
-    bool tick_archive();                         // category: helper: the live counters while looking
-    void paint_archive();                        // category: helper: view switch, cards per top folder / the stored list
-    void archive_gate();
     void stop_profile();                         // category: helper: cancel + join (close, dtor)
     void paint_profile();                        // category: helper: cards per group, rows with checks, what wasn't gathered
     void profile_backup(std::string secrets, std::size_t secret_files);   // category: helper: plan + the door (after any encrypting)
@@ -237,15 +187,6 @@ private:
     void paint_profile_start();                  // category: helper: the earlier backups, each with Restore...
     void paint_profile_restore();                // category: helper: the restore preview -- files by state, diffs, commands
     void profile_restore_gate();                 // category: helper: the restore button's label + whether it may act                         // category: helper: the act button's label + whether it may act
-    void paint_projects();                       // category: helper: the home state -- templates, projects
-    void paint_pj_plan(Gtk::Box& box, const core::door::Plan& plan);   // category: helper: a plan, step by step (the preview)
-    void paint_pj_project();                     // category: helper: the open project -- the queue, what's in it
-    void pj_gate();                              // category: helper: the file button's label + whether it may act
-    void pj_done(const core::door::Result& r, const std::string& big, const std::string& what, const std::string& back);   // category: helper: the done state
-    void paint_rules();                          // category: helper: the list state -- the rules in order
-    void paint_rl_matches(Gtk::Box& box, std::vector<core::rules::Match>& ms, bool checks);   // category: helper: matches by rule
-    void rl_save(bool write = true);             // category: helper: rules.json (core::save_own) + the timer
-    void rl_gate();                              // category: helper: the run button's label + whether it may act
     bool door_busy() const;                      // category: helper: a retire / restore owns the door right now
     void go_to(const std::string& page);         // category: helper: select a module's sidebar row
     void note_recent(const std::string& path);   // category: helper: push onto the list + persist
@@ -393,44 +334,6 @@ private:
     std::size_t        m_du_act_total = 0;
     std::vector<std::string> m_du_dropped;   // left out of the plan, and why
 
-    // Archive (s009): start | running | results | done.
-    widgets::Box     m_ar_page;
-    widgets::Stack   m_ar_states;
-    widgets::Label   m_ar_sub;
-    widgets::Button  m_ar_find;
-    widgets::Spinner m_ar_spinner;
-    widgets::Label   m_ar_run_big;
-    widgets::Label   m_ar_run_caption;
-    widgets::Button  m_ar_cancel;
-    widgets::Label   m_ar_big;
-    widgets::Label   m_ar_caption;
-    widgets::Box     m_ar_list;
-    widgets::Button  m_ar_go;
-    widgets::Label   m_ar_gate;
-    widgets::Label   m_ar_done_big;
-    widgets::Label   m_ar_done_caption;
-    core::archive::Found m_ar_shown;                 // checks live here (UI thread only)
-    std::vector<core::archive::Stored> m_ar_stored;  // from the manifest (UI thread only)
-    bool             m_ar_view_stored = false;
-    Gtk::Box         m_ar_search_bar{Gtk::Orientation::HORIZONTAL, 8};   // s018: the search row (kept across repaints)
-    Gtk::SearchEntry m_ar_search;
-    Gtk::DropDown    m_ar_kind, m_ar_year;
-    Gtk::Box         m_ar_hits{Gtk::Orientation::VERTICAL, 10};          // ...and what's under it (rebuilt per keystroke)
-    core::archive::Index m_ar_index;
-    std::vector<int> m_ar_year_list;             // the year dropdown's years (index 0 = any)
-    bool             m_ar_dd_quiet = false;
-    int              m_ar_months = core::archive::kDefaultMonths;
-    static constexpr std::size_t kArchiveShown = 300;   // rows painted; unpainted rows are never checked
-    std::size_t      m_ar_painted = 0;
-
-    Glib::Dispatcher                      m_archive_finished;
-    std::shared_ptr<core::scan::Progress> m_ar_progress;
-    std::thread                           m_ar_worker;
-    std::mutex                            m_ar_mx;
-    core::archive::Found                  m_ar_found;
-    sigc::connection                      m_ar_tick;
-    Glib::RefPtr<Gio::SimpleAction>       m_act_ar_find, m_act_ar_cancel, m_act_ar_run;
-
     // Profile backup (s012a): start | running | results | done.
     widgets::Box     m_pr_page;
     widgets::Stack   m_pr_states;
@@ -477,68 +380,6 @@ private:
     core::secrets::Opened m_pr_sec_found;           // worker -> UI (m_pr_mx)
     Glib::Dispatcher     m_profile_packed;
     Glib::Dispatcher     m_profile_sec_opened;
-
-    // Projects (s010): home | new | preview | project | done.
-    widgets::Box     m_pj_page;
-    widgets::Stack   m_pj_states;
-    widgets::Box     m_pj_home;        // templates + projects (painted)
-    widgets::Label   m_pj_new_title;
-    widgets::Entry   m_pj_id;
-    widgets::Entry   m_pj_title;
-    widgets::Label   m_pj_new_where;
-    widgets::Box     m_pj_new_list;    // the plan, step by step -- the preview
-    widgets::Label   m_pj_new_gate;
-    widgets::Button  m_pj_new_go;
-    widgets::Label   m_pj_pv_title;
-    widgets::Label   m_pj_pv_sub;
-    widgets::Box     m_pj_pv_list;
-    widgets::Label   m_pj_pv_gate;
-    widgets::Button  m_pj_pv_go;
-    widgets::Label   m_pj_head;        // the open project's name
-    widgets::Label   m_pj_head_sub;    // template · pattern · where
-    widgets::Box     m_pj_list;        // the queue + what's in the project (painted)
-    widgets::Label   m_pj_gate;
-    widgets::Button  m_pj_go;          // "File 3 files"
-    widgets::Label   m_pj_done_big;
-    widgets::Label   m_pj_done_caption;
-    widgets::Button  m_pj_done_back;
-    std::vector<core::organize::Template> m_pj_templates;   // UI thread only
-    std::vector<core::organize::Project>  m_pj_projects;
-    std::size_t      m_pj_tmpl = 0;                          // the template the form is for
-    core::organize::Project m_pj_open;                       // the open project
-    bool             m_pj_has_open = false;
-    std::vector<core::organize::Incoming> m_pj_queue;        // the preview of a filing; checks live here
-    core::door::Plan m_pj_plan;                              // what the form / preview shows, and exactly what runs
-    bool             m_pj_plan_gated = false;                // the preview moves user files: Preflight gates it
-    std::string      m_pj_back = "home";                     // where done's Back goes
-    static constexpr std::size_t kProjectShown = 300;        // rows painted
-
-    // Rules (s011): list | edit | run | done.
-    widgets::Box     m_rl_page;
-    widgets::Stack   m_rl_states;
-    widgets::Box     m_rl_list;        // the rules (painted)
-    widgets::Entry   m_rl_name, m_rl_folder, m_rl_glob, m_rl_exts, m_rl_days, m_rl_dest, m_rl_rename;
-    Gtk::DropDown*   m_rl_do = nullptr;
-    widgets::Label   m_rl_edit_title;
-    widgets::Label   m_rl_summary;
-    widgets::Box     m_rl_preview;     // the draft's matches
-    widgets::Label   m_rl_edit_gate;
-    widgets::Button  m_rl_save_off, m_rl_save_on, m_rl_delete;
-    widgets::Box     m_rl_run_list;
-    widgets::Label   m_rl_run_gate;
-    widgets::Button  m_rl_go;
-    widgets::Label   m_rl_done_big;
-    widgets::Label   m_rl_done_caption;
-    core::rules::Book m_rl_book;                       // what rules.json holds (UI thread only)
-    core::rules::Rule m_rl_draft;
-    std::size_t      m_rl_edit = static_cast<std::size_t>(-1);   // the rule in the form; -1 = new
-    std::vector<core::rules::Match> m_rl_draft_matches;
-    std::vector<core::rules::Match> m_rl_matches;      // the run preview; checks live here
-    std::optional<core::rules::Rule> m_rl_deleted;     // Put it back
-    std::size_t      m_rl_deleted_at = 0;
-    std::string      m_rl_said;                        // the last automatic run / a deletion
-    sigc::connection m_rl_timer;
-    bool             m_rl_filling = false;             // the form is being filled: no on_rl_form
 
     // Preflight (s003).
     bool            m_pf_red = true;  // a red check stops every act button; true until the first run

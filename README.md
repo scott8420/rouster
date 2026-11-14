@@ -1,8 +1,10 @@
 # Rouster
 
-A roustabout does the heavy hauling and the cleanup. Rouster keeps a Linux
-home folder in order: it **organizes first, cleans second**, and never loses
-anything on the way.
+A roustabout does the heavy hauling and the cleanup. Rouster mops up a Linux
+home folder -- caches, duplicates, build output, system clutter -- and never
+loses anything on the way. Organizing (where files live, the archive, rules,
+projects) is [Tidy](https://github.com/scott8420/tidy)'s work; Rouster cleans
+what Tidy leaves.
 
 - **Smart Scan** -- one scan, one summary, safe items pre-checked.
 - **Sweep** -- caches, thumbnails, Trash, old logs, orphaned app folders.
@@ -10,9 +12,8 @@ anything on the way.
   every path stays put and the space comes back.
 - **Dev projects** -- clean build output; retire workspaces whose repos are
   verified pushed to GitHub, keeping the docs and a one-click restore.
-- **Archive** -- files untouched for months, by year, restorable.
-- **Organize** -- project templates, datetime-stamped naming, Hazel-style
-  rules for Downloads and other folders.
+- **System** -- the package cache, the journal, fstrim (through a small
+  polkit helper).
 - **Profile** -- back up and restore the things that make the desktop feel
   like home: dotfiles, GNOME settings, extensions, fonts, package lists.
 

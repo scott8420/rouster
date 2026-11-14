@@ -32,12 +32,6 @@ void Shell::bind_actions() {  // bindings: actions + recents group
     m_act_du_cancel->set_enabled(false);
     m_act_du_run->set_enabled(false);
     add_action("go-dups",       [this]() { go_to("dups"); });
-    m_act_ar_find   = add_action("archive-find",   sigc::mem_fun(*this, &Shell::on_archive_find));
-    m_act_ar_cancel = add_action("archive-cancel", sigc::mem_fun(*this, &Shell::on_archive_cancel));
-    m_act_ar_run    = add_action("archive-run",    sigc::mem_fun(*this, &Shell::on_archive_run));
-    m_act_ar_cancel->set_enabled(false);
-    m_act_ar_run->set_enabled(false);
-    add_action("go-archive",    [this]() { go_to("archive"); });
     m_act_pr_find   = add_action("profile-find",   sigc::mem_fun(*this, &Shell::on_profile_find));
     m_act_pr_run    = add_action("profile-run",    sigc::mem_fun(*this, &Shell::on_profile_run));
     m_act_pr_run->set_enabled(false);

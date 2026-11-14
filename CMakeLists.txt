@@ -51,18 +51,12 @@ add_library(rouster_core STATIC
     src/core/Sweep.cpp
     # Dev projects (s007): find, verify (git, read-only), lint, plan; the door acts.
     src/core/Dev.cpp
-    # Archive (s009): old files -> ~/Archive/<year>/<path>; put back from the manifest; read-only.
-    src/core/Archive.cpp
-    # Archive search (s018): ~/Archive walked + the catalog + the records; read-only.
-    src/core/ArchiveSearch.cpp
     # Duplicates (s008): size -> head/tail -> full hash, folders, keep rules; read-only.
     src/core/Dups.cpp
-    # Organize (s010): templates, naming, file into project, new version; read-only.
-    src/core/Organize.cpp
-    # Rules (s011): Hazel-style rules on watched folders; read-only. Settings: Rouster's own rules.json.
-    src/core/Rules.cpp
+    # s019c: Archive (s009, s018), Organize (s010) and Rules (s011) retired -- Tidy owns them.
     src/core/Profile.cpp
     src/core/Secrets.cpp
+    # Settings: Rouster's own small files (profile-notes.md) in its data dir.
     src/core/Settings.cpp
     # Known (s007b): the names promoted to known-optional -- Rouster's own setting.
     src/core/Known.cpp

@@ -25,10 +25,7 @@
 #include "core/Dev.hpp"
 #include "core/Known.hpp"
 #include "core/Dups.hpp"
-#include "core/Archive.hpp"
 #include "core/Package.hpp"
-#include "core/Organize.hpp"
-#include "core/Rules.hpp"
 #include "core/Settings.hpp"
 #include "core/Profile.hpp"
 #include "core/Helper.hpp"
@@ -389,33 +386,6 @@ bool make_dups_fixture(const fs::path& home) {
     return ok;
 }
 
-// Old files for an Archive drive (s009): a 2019 tax folder (one item), a
-// 2018 trip in Pictures, a 2021 letter, an old installer in Downloads.
-bool make_archive_fixture(const fs::path& home) {
-    const std::vector<std::pair<std::string, std::int64_t>> f = {
-        {"Documents/Taxes 2019/return.pdf", 1556000000}, {"Documents/Taxes 2019/receipts/r1.pdf", 1556000000},
-        {"Documents/Taxes 2019/receipts/r2.pdf", 1556100000}, {"Pictures/Trip 2018/day1.jpg", 1530000000},
-        {"Pictures/Trip 2018/day2.jpg", 1530100000}, {"Documents/old-letter.odt", 1620000000},
-        {"Downloads/setup-2.4.iso", 1650000000}, {"Documents/active.odt", 0}};
-    bool ok = true;
-    for (const auto& [rel, t] : f) {
-        ok &= put(home, rel, 30000);
-        if (!t) continue;
-        struct timespec ts[2] = {{t, 0}, {t, 0}};
-        ::utimensat(AT_FDCWD, (home / rel).c_str(), ts, AT_SYMLINK_NOFOLLOW);
-    }
-    return ok;
-}
-
-// Loose files to file into a project (s010): a logo, a font, a photo, a note.
-bool make_organize_fixture(const fs::path& home) {
-    bool ok = true;
-    for (const char* r : {"Downloads/Acme logo FINAL.ai", "Downloads/Brandon Grotesque.otf", "Downloads/shoot 01.JPG",
-                          "Downloads/call notes.txt"})
-        ok &= put(home, r, 12000);
-    return ok;
-}
-
 // A set-up home (s012): dotfiles, an ssh config, an extension, autostart, a
 // user unit enabled by a link, a font -- what a profile backup gathers.
 bool make_profile_fixture(const fs::path& home) {
@@ -443,8 +413,6 @@ int main(int argc, char** argv) {
         const bool ok = make_fixture(argv[2]) &&
                         make_dev_fixture(argv[2], std::string(argv[2]) + "_remotes") &&   // s007
                         make_dups_fixture(argv[2]) &&                                       // s008
-                        make_archive_fixture(argv[2]) &&                                    // s009
-                        make_organize_fixture(argv[2]) &&                                   // s010
                         make_profile_fixture(argv[2]);                                      // s012
         // s012d: a few settings in the FIXTURE's own dconf (never the desktop's),
         // when dconf + dbus-run-session are here; skipped quietly when not.
@@ -2175,530 +2143,6 @@ int main(int argc, char** argv) {
         fs::remove_all(home, ec);
     }
 
-    // -- Archive: find (read-only) -> plan (MakeDir + Move) -> door -> put back (s009)
-    {
-        std::cout << "\n-- archive --\n";
-        namespace ar = core::archive;
-        namespace dr = core::door;
-        const fs::path home = fs::temp_directory_path() / "rouster_selftest_archive";
-        std::error_code ec;
-        fs::remove_all(home, ec);
-        fs::create_directories(home / ".local/share/Trash/files", ec);
-        fs::create_directories(home / ".local/share/Trash/info", ec);
-        fs::create_directories(home / ".local/share/rouster", ec);
-        const std::string H = home.string();
-        const std::int64_t now = 2000000000, old = 1830000000;   // 2033 / end of 2027
-        const std::vector<std::string> olds = {"Documents/old.pdf", "Documents/trip/a.jpg", "Documents/trip/b.jpg",
-            "Documents/trip/sub/c.txt", "Documents/mixed/o.txt", "Documents/hid/x.txt", "Documents/hid/.h",
-            "Pictures/p.png", "notes.txt", "Develop/proj/old.c", "Music/repo/song.wav", ".cache/oldc",
-            "Archive/2020/x.txt", "Documents/fixes/f.txt"};
-        for (const auto& r : olds) put(home, r, 5000);
-        put(home, "Documents/new.pdf", 5000);
-        put(home, "Documents/mixed/n.txt", 5000);
-        fs::create_directories(home / "Music/repo/.git", ec);
-        for (const char* r : {"Documents/new.pdf", "Documents/mixed/n.txt"}) {   // new by the pinned clock
-            struct timespec ts[2] = {{now - 86400, 0}, {now - 86400, 0}};
-            ::utimensat(AT_FDCWD, (home / r).c_str(), ts, AT_SYMLINK_NOFOLLOW);
-        }
-        for (const auto& r : olds) {
-            struct timespec ts[2] = {{old, 0}, {old, 0}};
-            ::utimensat(AT_FDCWD, (home / r).c_str(), ts, AT_SYMLINK_NOFOLLOW);
-        }
-        std::tm tm{};
-        std::time_t ot = old;
-        ::localtime_r(&ot, &tm);
-        const int Y = tm.tm_year + 1900;
-        const std::string YS = std::to_string(Y);
-
-        check("archive: destination", ar::destination("Documents/x.pdf", 2019) == "Archive/2019/Documents/x.pdf");
-        const std::string before = files_snapshot(home);
-        core::scan::Progress prog;
-        ar::Found f = ar::find(H, now, 12, prog);
-        check("archive: find changes nothing", files_snapshot(home) == before && f.refused.empty() && prog.done);
-        std::string got;
-        for (const auto& it : f.items) got += it.rel + (it.folder ? "/ " : " ");
-        const std::set<std::string> want = {"Documents/hid/x.txt", "Documents/mixed/o.txt", "Documents/old.pdf",
-                                            "Documents/trip", "Pictures/p.png", "notes.txt"};
-        std::set<std::string> have;
-        for (const auto& it : f.items) have.insert(it.rel);
-        check("archive: exactly the old things -- a whole old folder as one, a mixed folder's old file, top files",
-              have == want, got);
-        const auto item = [&](const std::string& rel) -> ar::Item* {
-            for (auto& it : f.items) if (it.rel == rel) return &it;
-            return nullptr;
-        };
-        check("archive: the old folder is one item of 3 files, its year the newest file's",
-              item("Documents/trip") && item("Documents/trip")->folder && item("Documents/trip")->files == 3 &&
-              item("Documents/trip")->year == Y);
-        check("archive: never seen -- new files, dev roots, repos, hidden, ~/Archive, fixes/",
-              !item("Documents/new.pdf") && !item("Develop/proj/old.c") && !item("Music/repo/song.wav") &&
-              !item(".cache/oldc") && !item("Archive/2020/x.txt") && !item("Documents/fixes/f.txt") && !item("Documents/hid"));
-        check("archive: nothing pre-checked",
-              std::none_of(f.items.begin(), f.items.end(), [](auto& it) { return it.checked; }));
-
-        dr::Door door(H, H + "/.local/share/rouster");
-        door.load();
-        item("Documents/trip")->checked = true;
-        item("Documents/old.pdf")->checked = true;
-        std::vector<std::string> dropped;
-        dr::Plan p = ar::plan(H, f.items, dropped);
-        std::size_t mk = 0, mv = 0;
-        for (const auto& a : p.actions) (a.verb == dr::Verb::MakeDir ? mk : mv)++;
-        check("archive: plan -- 2 folders made (~/Archive is there: <year>, <year>/Documents, parents first), then 2 moves",
-              mk == 2 && mv == 2 && p.actions[0].to == H + "/Archive/" + YS && p.actions[1].to == H + "/Archive/" + YS + "/Documents" &&
-              dropped.empty(), std::to_string(mk) + "+" + std::to_string(mv));
-        check("archive: the door refuses it unpreviewed", !door.run(p).ok && files_snapshot(home) == before);
-        p.previewed = true;
-        auto r = door.run(p);
-        check("archive: run -> in ~/Archive/<year>/<path>, gone from where they were",
-              r.ok && fs::exists(home / ("Archive/" + YS + "/Documents/trip/sub/c.txt")) &&
-              fs::exists(home / ("Archive/" + YS + "/Documents/old.pdf")) && !fs::exists(home / "Documents/trip") &&
-              !fs::exists(home / "Documents/old.pdf"), r.messages.empty() ? "" : r.messages.front());
-        const auto outside_trash = [](const std::string& snap) {
-            std::istringstream in(snap);
-            std::string o;
-            for (std::string l; std::getline(in, l);)
-                if (l.find("/.local/share/Trash") == std::string::npos) o += l + "\n";
-            return o;
-        };
-        auto u = door.undo();
-        check("archive: undo -> exact (the made folders, empty again, went to the Trash)",
-              u.ok && outside_trash(files_snapshot(home)) == outside_trash(before), u.messages.empty() ? "" : u.messages.front());
-
-        // Again, then put back from the manifest -- not through Undo.
-        r = door.run(p);
-        std::vector<ar::Stored> st = ar::stored(door, H);
-        check("archive: the manifest lists what is in the archive, and where it came from",
-              r.ok && st.size() == 2 && st[0].back == "Documents/old.pdf" && st[1].back == "Documents/trip" && st[1].folder);
-        put(home, "Documents/old.pdf", 10);   // something new where one came from
-        st = ar::stored(door, H);
-        check("archive: a place that's taken now is blocked", st[0].blocked && !st[1].blocked);
-        for (auto& s : st) s.checked = true;
-        dropped.clear();
-        dr::Plan pb = ar::put_back(H, st, dropped);
-        check("archive: put back leaves the blocked one, says why",
-              pb.actions.size() == 1 && pb.actions[0].to == H + "/Documents/trip" && dropped.size() == 1);
-        pb.previewed = true;
-        r = door.run(pb);
-        check("archive: put back -> home again; the archive keeps the rest",
-              r.ok && fs::exists(home / "Documents/trip/sub/c.txt") && ar::stored(door, H).size() == 1);
-        fs::remove(home / "Documents/old.pdf", ec);
-        {   // a put back whose folder is gone makes it again
-            fs::remove_all(home / "Documents/mixed", ec);
-            fs::remove_all(home / "Documents/hid", ec);
-            fs::remove_all(home / "Documents/new.pdf", ec);
-            fs::rename(home / "Documents/trip", home / "Pictures/trip", ec);   // Documents now empty...
-            fs::remove(home / "Documents/fixes/f.txt", ec);
-            fs::remove(home / "Documents/fixes", ec);
-            fs::remove(home / "Documents", ec);                                // ...and gone
-            auto s2 = ar::stored(door, H);
-            for (auto& s : s2) s.checked = true;
-            dropped.clear();
-            dr::Plan p2 = ar::put_back(H, s2, dropped);
-            p2.previewed = true;
-            const auto r2 = door.run(p2);
-            check("archive: put back into a folder that's gone -> MakeDir, then the move",
-                  p2.actions.size() == 2 && p2.actions[0].verb == dr::Verb::MakeDir && r2.ok &&
-                  fs::exists(home / "Documents/old.pdf"), r2.messages.empty() ? "" : r2.messages.front());
-        }
-        {   // the made folder isn't trashed by an undo while something is in it
-            core::scan::Progress p3;
-            ar::Found f3 = ar::find(H, now, 12, p3);
-            for (auto& it : f3.items) it.checked = it.rel == "notes.txt";
-            dropped.clear();
-            dr::Plan p4 = ar::plan(H, f3.items, dropped);
-            p4.previewed = true;
-            door.run(p4);   // makes Archive/<Y>/... no: Archive/<Y> exists; notes.txt goes straight in
-            dr::Action mk1; mk1.verb = dr::Verb::MakeDir; mk1.to = H + "/Music/box";
-            door.run(dr::Plan{"box", {mk1}, true});
-            put(home, "Music/box/mine.txt", 10);
-            const auto ub = door.undo();
-            check("archive: undo of a made folder that has something in it -> left in place, said so",
-                  !ub.ok && fs::exists(home / "Music/box/mine.txt") && !ub.messages.empty() &&
-                  ub.messages[0].find("left in place") != std::string::npos, ub.messages.empty() ? "" : ub.messages[0]);
-        }
-        {   // the door's plan-order policy
-            dr::Action m1; m1.verb = dr::Verb::MakeDir; m1.to = H + "/Archive/x";
-            dr::Action m2; m2.verb = dr::Verb::MakeDir; m2.to = H + "/Archive/x/y";
-            dr::Action mvv; mvv.verb = dr::Verb::Move; mvv.from = H + "/notes2.txt"; mvv.to = H + "/Archive/x/y/notes2.txt";
-            put(home, "notes2.txt", 10);
-            check("door: a Move into a folder an earlier MakeDir makes -- allowed; without it -- refused",
-                  door.refusal(mvv, {m1.to, m2.to}).empty() && !door.refusal(mvv).empty());
-            dr::Action pr; pr.verb = dr::Verb::MakeDir; pr.to = H + "/.ssh/x";
-            const auto twice = door.run(dr::Plan{"twice", {m1, m1}, true});
-            check("door: mkdir refuses -- the same folder twice in a plan, protected, an existing one",
-                  !twice.ok && twice.done == 0 && !door.refusal(pr).empty() &&
-                  !door.refusal(dr::Action{dr::Verb::MakeDir, "", H + "/Music"}).empty());
-        }
-        {
-            core::scan::Progress pc;
-            pc.cancel = true;
-            check("archive: cancel -> stops, says so", ar::find(H, now, 12, pc).cancelled);
-        }
-        fs::remove_all(home, ec);
-    }
-
-    // -- Organize: templates, new project, file into project, new version (s010)
-    {
-        std::cout << "\n-- organize --\n";
-        namespace og = core::organize;
-        namespace dr = core::door;
-        const fs::path home = fs::temp_directory_path() / "rouster_selftest_organize";
-        std::error_code ec;
-        fs::remove_all(home, ec);
-        for (const char* d : {".local/share/Trash/files", ".local/share/Trash/info", ".local/share/rouster", ".config",
-                              "Documents", "Downloads"})
-            fs::create_directories(home / d, ec);
-        const std::string H = home.string();
-        const auto there = [](const fs::path& p) { struct stat st{}; return ::lstat(p.c_str(), &st) == 0; };
-        const auto slurp = [](const fs::path& p) { std::ifstream in(p, std::ios::binary); std::ostringstream o; o << in.rdbuf(); return o.str(); };
-        const auto outside_trash = [](const std::string& snap) {
-            std::istringstream in(snap);
-            std::string out;
-            for (std::string l; std::getline(in, l);)
-                if (l.find("/.local/share/Trash") == std::string::npos) out += l + "\n";
-            return out;
-        };
-        dr::Door door(H, H + "/.local/share/rouster");
-        door.load();
-        const auto go = [&](dr::Plan p) { p.previewed = true; return door.run(p); };
-
-        check("organize: slug -- spaces and _ / become one '-', never hidden",
-              og::slug("Spring Catalog_2026 / v2") == "Spring-Catalog-2026-v2" && og::slug(".hidden  x") == "hidden-x" &&
-              og::slug("a - b") == "a-b", og::slug("Spring Catalog_2026 / v2"));
-        const std::int64_t T0 = 1793000000;   // pinned clock for names
-        const og::Values v{"2611", "Acme Spring Catalog", T0};
-        check("organize: fill -- names slugged, text as typed",
-              og::fill("{id}_{title}_{yyyymmdd}", v) == "2611_Acme-Spring-Catalog_" + og::stamp(T0, false) &&
-              og::fill("# {title}", v, false) == "# Acme Spring Catalog");
-        check("organize: no templates yet", og::templates(H).empty());
-
-        // Starters: MakeDir + Write through the door, one step, undoable.
-        std::vector<std::string> skipped;
-        const std::string b0 = files_snapshot(home);
-        auto sp = og::starters(H, skipped);
-        check("organize: starters plan changes nothing; three templates, nothing skipped",
-              files_snapshot(home) == b0 && skipped.empty() && !sp.actions.empty());
-        auto r = go(sp);
-        check("organize: starters through the door", r.ok, r.messages.empty() ? "" : r.messages.front());
-        auto ts = og::templates(H);
-        check("organize: three templates, each readable",
-              ts.size() == 3 && ts[0].name == "Book" && ts[1].name == "Design job" && ts[2].name == "gtkmm app" &&
-              ts[0].problem.empty() && ts[1].problem.empty() && ts[2].problem.empty() &&
-              ts[1].rules.pattern == "{id}_{title}_{yyyymmdd-hhmm}_{part}.{ext}" && ts[1].root == "Documents/Jobs");
-        {
-            std::vector<std::string> sk;
-            check("organize: starters again -- all three skipped, nothing to do", og::starters(H, sk).actions.empty() && sk.size() == 3);
-        }
-        {
-            const auto u = door.undo();
-            check("organize: undo the starters -- exact outside the Trash", u.ok && outside_trash(files_snapshot(home)) == outside_trash(b0),
-                  u.messages.empty() ? "" : u.messages.front());
-            std::vector<std::string> sk;
-            go(og::starters(H, sk));
-            check("organize: starters again after undo", og::templates(H).size() == 3);
-        }
-        ts = og::templates(H);
-        og::Template design = ts[1];
-        // A binary file in the template is copied, not written.
-        const std::string blank = std::string("\0\x01PDF-ish\0", 10) + noise(30000, 9);
-        put_bytes(fs::path(design.path), "finals/{id}_blank.bin", blank);
-
-        // New project.
-        std::vector<std::string> probs;
-        const std::string b2 = files_snapshot(home);
-        auto np = og::new_project(H, design, v, probs);
-        const std::string pdir = H + "/Documents/Jobs/2611_Acme-Spring-Catalog";
-        std::size_t copies = 0, writes = 0;
-        for (const auto& a : np.actions) { copies += a.verb == dr::Verb::Copy; writes += a.verb == dr::Verb::Write; }
-        check("organize: new project plan changes nothing; makes Jobs/ first; one Copy, two Writes",
-              files_snapshot(home) == b2 && probs.empty() && og::project_dir(H, design, v) == pdir &&
-              np.actions.front().verb == dr::Verb::MakeDir && np.actions.front().to == H + "/Documents/Jobs" &&
-              copies == 1 && writes == 2, probs.empty() ? "" : probs.front());
-        r = go(np);
-        const std::string S0 = og::stamp(T0);
-        const fs::path brief = fs::path(pdir) / ("brief/2611_Acme-Spring-Catalog_" + S0 + "_brief.md");
-        check("organize: new project through the door -- the tree, placeholders filled",
-              r.ok && fs::is_directory(pdir + "/workups") && fs::is_directory(pdir + "/versions") &&
-              slurp(brief).rfind("# Acme Spring Catalog\n\nJob 2611", 0) == 0,
-              r.messages.empty() ? brief.string() : r.messages.front());
-        check("organize: the binary template file copied byte for byte", slurp(pdir + "/finals/2611_blank.bin") == blank);
-        og::Project pj;
-        check("organize: the project carries its own rules",
-              og::load_project(pdir, pj) && pj.id == "2611" && pj.title == "Acme Spring Catalog" &&
-              pj.tmpl == "Design job" && pj.rules.pattern == design.rules.pattern && og::route(pj, "OTF") == "fonts");
-        check("organize: projects() finds it", og::projects(H, og::templates(H)).size() == 1);
-        {
-            std::vector<std::string> p2, p3;
-            og::new_project(H, design, v, p2);
-            og::new_project(H, design, og::Values{"", "x", T0}, p3);
-            check("organize: refused -- already there; no id", !p2.empty() && !p3.empty());
-        }
-
-        // Naming.
-        og::Parts parts;
-        check("organize: fits -- the brief fits, a stray doesn't",
-              og::fits(pj, brief.filename().string(), &parts) && parts.part == "brief" && parts.ext == "md" && parts.stamp == S0 &&
-              !og::fits(pj, "stray notes.txt") && !og::fits(pj, "2612_Acme-Spring-Catalog_" + S0 + "_x.md"));
-
-        // File into project.
-        for (const char* f : {"Downloads/Acme logo FINAL.ai", "Downloads/Brandon.otf", "Downloads/notes", "Downloads/a/x.ai",
-                              "Downloads/b/x.ai"})
-            put(home, f, 6000);
-        fs::create_directories(home / "Downloads/folder", ec);
-        for (const char* f : {"Downloads/a/x.ai", "Downloads/b/x.ai"}) {   // same name, same minute -> -2
-            struct timespec ts2[2] = {{T0, 0}, {T0, 0}};
-            ::utimensat(AT_FDCWD, (home / f).c_str(), ts2, AT_SYMLINK_NOFOLLOW);
-        }
-        const std::string b3 = files_snapshot(home);
-        auto in = og::propose(H, pj, {H + "/Downloads/Acme logo FINAL.ai", H + "/Downloads/Brandon.otf", H + "/Downloads/notes",
-                                      H + "/Downloads/a/x.ai", H + "/Downloads/b/x.ai", H + "/Downloads/folder", "/etc/hostname",
-                                      brief.string()});
-        const auto stamp_of = [&](const char* rel) { struct stat st{}; ::lstat((home / rel).c_str(), &st); return og::stamp(st.st_mtim.tv_sec); };
-        const std::string P = pdir + "/";
-        const std::string N = "2611_Acme-Spring-Catalog_";
-        check("organize: propose changes nothing", files_snapshot(home) == b3 && in.size() == 8);
-        check("organize: named by the pattern, routed by type",
-              in[0].to == P + "workups/" + N + stamp_of("Downloads/Acme logo FINAL.ai") + "_Acme-logo-FINAL.ai" &&
-              in[1].to == P + "fonts/" + N + stamp_of("Downloads/Brandon.otf") + "_Brandon.otf" &&
-              in[2].to == P + N + stamp_of("Downloads/notes") + "_notes", in[0].to + " | " + in[2].to);
-        check("organize: the same name twice -> the second gets -2",
-              in[3].to == P + "workups/" + N + S0 + "_x.ai" && in[4].to == P + "workups/" + N + S0 + "_x-2.ai", in[4].to);
-        check("organize: not filed -- a folder, outside home, already filed",
-              in[5].to.empty() && !in[5].checked && in[6].to.empty() && in[7].to.empty() && in[7].note == "already filed");
-        in[2].checked = false;   // unchecked stays
-        {   // changed since propose -> left out
-            struct timespec ts3[2] = {{T0 + 99, 0}, {T0 + 99, 0}};
-            ::utimensat(AT_FDCWD, (home / "Downloads/b/x.ai").c_str(), ts3, AT_SYMLINK_NOFOLLOW);
-        }
-        std::vector<std::string> dropped;
-        auto fp = og::file_plan(pj, in, dropped);
-        check("organize: file plan -- 3 moves, the changed one left out, unchecked stays",
-              fp.actions.size() == 3 && dropped.size() == 1 && dropped[0].find("changed since") != std::string::npos);
-        const std::string b4 = files_snapshot(home);
-        r = go(fp);
-        check("organize: filed through the door",
-              r.ok && there(in[0].to) && there(in[1].to) && there(in[3].to) && !there(home / "Downloads/Brandon.otf") &&
-              there(home / "Downloads/notes") && there(home / "Downloads/b/x.ai"), r.messages.empty() ? "" : r.messages.front());
-        auto u = door.undo();
-        check("organize: undo the filing -- exact", u.ok && files_snapshot(home) == b4);
-        {   // a route to a folder the project doesn't have yet -> MakeDir first
-            og::Project q = pj;
-            q.rules.routes.push_back({"sketches/raw", {"zzz"}});
-            put(home, "Downloads/s.zzz", 3000);
-            std::vector<std::string> d2;
-            auto qp = og::file_plan(q, og::propose(H, q, {H + "/Downloads/s.zzz"}), d2);
-            check("organize: a missing route folder is made first (parents first), then the move",
-                  qp.actions.size() == 3 && qp.actions[0].verb == dr::Verb::MakeDir && qp.actions[0].to == P + "sketches" &&
-                  qp.actions[1].to == P + "sketches/raw" && qp.actions[2].verb == dr::Verb::Move);
-            const std::string b5 = files_snapshot(home);
-            r = go(qp);
-            u = door.undo();
-            check("organize: ...through the door and back exactly (outside the Trash)", r.ok && u.ok && outside_trash(files_snapshot(home)) == outside_trash(b5), u.messages.empty() ? "" : u.messages.front());
-        }
-
-        // Flagged, not moved.
-        put(home, "Documents/Jobs/2611_Acme-Spring-Catalog/stray notes.txt", 100);
-        {
-            const auto c = og::contents(pj);
-            std::size_t misfit = 0;
-            bool hidden = false;
-            for (const auto& e : c) { misfit += !e.fits; hidden |= e.rel.find(".rouster") != std::string::npos; }
-            check("organize: contents -- the stray and the template's blank flagged; .rouster.json not listed",
-                  misfit == 2 && !hidden, std::to_string(misfit));
-        }
-
-        // New version.
-        const std::string rel = "brief/" + brief.filename().string();
-        const std::int64_t T1 = T0 + 3600;
-        std::string why;
-        auto vp = og::new_version(pj, rel, T1, why);
-        const std::string fresh = P + "brief/" + N + og::stamp(T1) + "_brief.md";
-        check("organize: new version plan -- Copy to the new stamp, then the old into versions/",
-              why.empty() && vp.actions.size() == 2 && vp.actions[0].verb == dr::Verb::Copy && vp.actions[0].to == fresh &&
-              vp.actions[1].verb == dr::Verb::Move && vp.actions[1].to == P + "versions/" + brief.filename().string(), why);
-        const std::string body = slurp(brief);
-        const std::string b6 = files_snapshot(home);
-        r = go(vp);
-        check("organize: new version through the door -- same text, old one in versions/",
-              r.ok && slurp(fresh) == body && !there(brief) && there(P + "versions/" + brief.filename().string()),
-              r.messages.empty() ? "" : r.messages.front());
-        {
-            std::string w1, w2, w3;
-            og::new_version(pj, "brief/" + fs::path(fresh).filename().string(), T1, w1);
-            og::new_version(pj, "stray notes.txt", T1, w2);
-            og::new_version(pj, "versions/" + brief.filename().string(), T1 + 600, w3);
-            check("organize: no new version -- this minute again, a misfit, an old version",
-                  !w1.empty() && !w2.empty() && !w3.empty(), w1);
-        }
-        u = door.undo();
-        check("organize: undo the new version -- exact outside the Trash, the copy in the Trash",
-              u.ok && outside_trash(files_snapshot(home)) == outside_trash(b6) &&
-              there(home / (".local/share/Trash/files/" + fs::path(fresh).filename().string())),
-              u.messages.empty() ? "" : u.messages.front());
-        {   // Copy refusals
-            fs::create_directories(home / ".ssh", ec);
-            put(home, ".ssh/key", 10);
-            dr::Action c1; c1.verb = dr::Verb::Copy; c1.from = H + "/Documents"; c1.to = H + "/Documents/d2";
-            dr::Action c2; c2.verb = dr::Verb::Copy; c2.from = H + "/.ssh/key"; c2.to = H + "/Documents/key";
-            dr::Action c3; c3.verb = dr::Verb::Copy; c3.from = "/etc/hostname"; c3.to = H + "/Documents/h";
-            dr::Action c4; c4.verb = dr::Verb::Copy; c4.from = brief.string(); c4.to = pdir + "/stray notes.txt";
-            dr::Action c5; c5.verb = dr::Verb::Copy; c5.from = brief.string(); c5.to = H + "/.ssh/b.md";
-            check("door: copy refuses -- a folder, a protected source, outside home, an existing target, a protected target",
-                  !door.refusal(c1).empty() && !door.refusal(c2).empty() && !door.refusal(c3).empty() &&
-                  !door.refusal(c4).empty() && !door.refusal(c5).empty());
-        }
-        {   // the manifest keeps the copy's source
-            dr::Door d2(H, H + "/.local/share/rouster");
-            d2.load();
-            bool src = false;
-            for (const auto& b : d2.batches())
-                for (auto id : b.records)
-                    if (const auto* rec = d2.record(id); rec && rec->verb == dr::Verb::Copy && rec->src == brief.string()) src = true;
-            check("door: the manifest records what a copy was made from", src);
-        }
-        fs::remove_all(home, ec);
-    }
-
-    // -- Rules: match (read-only) -> plan -> door (s011) ---------------------
-    {
-        std::cout << "\n-- rules --\n";
-        namespace rl = core::rules;
-        namespace dr = core::door;
-        const fs::path home = fs::temp_directory_path() / "rouster_selftest_rules";
-        std::error_code ec;
-        fs::remove_all(home, ec);
-        for (const char* d : {".local/share/Trash/files", ".local/share/Trash/info", ".local/share/rouster", "Downloads", "Documents"})
-            fs::create_directories(home / d, ec);
-        const std::string H = home.string();
-        const std::string data = H + "/.local/share/rouster";
-        const std::int64_t now = 2000000000;
-        const auto age = [&](const char* rel, std::int64_t t) {
-            struct timespec ts[2] = {{t, 0}, {t, 0}};
-            ::utimensat(AT_FDCWD, (home / rel).c_str(), ts, AT_SYMLINK_NOFOLLOW);
-        };
-        const std::int64_t D = 86400;
-        for (const char* f : {"Downloads/Invoice-March.PDF", "Downloads/manual.pdf", "Downloads/setup.iso", "Downloads/new.iso",
-                              "Downloads/movie.mp4.part", "Downloads/.hidden.pdf", "Downloads/sub/deep.pdf", "Downloads/Font.otf",
-                              "Downloads/arriving.pdf", "Downloads/old.zip"})
-            put(home, f, 4000);
-        age("Downloads/Invoice-March.PDF", now - 10 * D); age("Downloads/manual.pdf", now - 3 * D);
-        age("Downloads/setup.iso", now - 60 * D);         age("Downloads/new.iso", now - 2 * D);
-        age("Downloads/movie.mp4.part", now - 90 * D);    age("Downloads/.hidden.pdf", now - 90 * D);
-        age("Downloads/sub/deep.pdf", now - 90 * D);      age("Downloads/Font.otf", now - 1 * D);
-        age("Downloads/arriving.pdf", now - 30);          age("Downloads/old.zip", now - 400 * D);
-
-        check("rules: glob -- case-insensitive * and ?",
-              rl::glob_match("*invoice*", "Invoice-March.PDF") && rl::glob_match("Screenshot*", "screenshot 1.png") &&
-              rl::glob_match("a?c", "abc") && !rl::glob_match("*.pdf", "x.pdfx") && rl::glob_match("*", ""));
-        check("rules: partial downloads are never touched",
-              rl::in_progress("movie.mp4.part") && rl::in_progress("x.CRDOWNLOAD") && !rl::in_progress("x.pdf"));
-
-        rl::Book book;
-        rl::Rule inv; inv.name = "Invoices"; inv.glob = "*invoice*"; inv.act = rl::Do::Move; inv.dest = "Documents/Invoices/{year}";
-        inv.rename = "{yyyymmdd}_{stem}.{ext}"; inv.enabled = true;
-        rl::Rule pdf; pdf.name = "PDFs"; pdf.exts = {"pdf"}; pdf.older_days = 7; pdf.act = rl::Do::Move; pdf.dest = "Documents/PDFs"; pdf.enabled = true;
-        rl::Rule iso; iso.name = "Installers"; iso.exts = {"iso"}; iso.older_days = 30; iso.act = rl::Do::Trash; iso.enabled = true;
-        rl::Rule arc; arc.name = "Old"; arc.older_days = 180; arc.act = rl::Do::Archive; arc.enabled = true;
-        rl::Rule off; off.name = "Fonts"; off.exts = {"otf"}; off.act = rl::Do::Move; off.dest = "Documents/Fonts";   // not enabled
-        book.rules = {inv, pdf, iso, arc, off};
-        book.watch = true;
-        {
-            const auto b2 = rl::from_json(rl::to_json(book));
-            check("rules: the book round-trips through JSON",
-                  b2.watch && b2.rules.size() == 5 && b2.rules[0].rename == inv.rename && b2.rules[2].act == rl::Do::Trash &&
-                  b2.rules[1].exts == pdf.exts && !b2.rules[4].enabled && rl::from_json("not json").rules.empty());
-            check("rules: saved in Rouster's own folder, read back",
-                  core::save_own(data, rl::kFile, rl::to_json(book)) && rl::load(data + "/" + rl::kFile).rules.size() == 5 &&
-                  !core::save_own(data, "../x.json", "{}"));
-        }
-        rl::Rule all; all.name = "All"; all.act = rl::Do::Trash;
-        rl::Rule self; self.name = "Self"; self.exts = {"pdf"}; self.dest = "Downloads";
-        rl::Rule nofolder = pdf; nofolder.folder = "Nope";
-        rl::Rule nofile = pdf; nofile.act = rl::Do::File; nofile.dest = "Documents";
-        check("rules: problems -- matches everything, into itself, no folder, not a project; a good rule has none",
-              !rl::problem(all, H).empty() && !rl::problem(self, H).empty() && !rl::problem(nofolder, H).empty() &&
-              !rl::problem(nofile, H).empty() && rl::problem(pdf, H).empty() && rl::problem(arc, H).empty());
-
-        const std::string before = files_snapshot(home);
-        auto ms = rl::matches(H, book.rules, now);
-        check("rules: matching changes nothing", files_snapshot(home) == before);
-        std::map<std::string, std::pair<std::size_t, std::string>> got;
-        for (const auto& m : ms) got[fs::path(m.from).filename().string()] = {m.rule, m.to};
-        const auto Y = [&](std::int64_t t) { std::time_t tt = t; std::tm tm{}; ::localtime_r(&tt, &tm); return std::to_string(tm.tm_year + 1900); };
-        std::string list;
-        for (const auto& [k, v] : got) list += k + ":" + std::to_string(v.first) + " ";
-        check("rules: first match wins -- the invoice to Invoices (not PDFs), manual too young, the old iso, the old zip archived",
-              got.size() == 3 && got.count("Invoice-March.PDF") && got["Invoice-March.PDF"].first == 0 &&
-              got.count("setup.iso") && got["setup.iso"].first == 2 && got.count("old.zip") && got["old.zip"].first == 3 &&
-              got.count("arriving.pdf") == 0, list);
-        check("rules: never -- partial, hidden, in a subfolder, still arriving, a rule that's off",
-              !got.count("movie.mp4.part") && !got.count(".hidden.pdf") && !got.count("deep.pdf") && !got.count("arriving.pdf") &&
-              !got.count("Font.otf"));
-        check("rules: where -- renamed into a dated folder; the archive by year",
-              got["Invoice-March.PDF"].second == H + "/Documents/Invoices/" + Y(now - 10 * D) + "/" +
-                  core::organize::stamp(now - 10 * D, false) + "_Invoice-March.PDF" &&
-              got["old.zip"].second == H + "/Archive/" + Y(now - 400 * D) + "/Downloads/old.zip", got["Invoice-March.PDF"].second);
-        {
-            const auto one = rl::matches(H, book.rules, now, std::size_t(4));
-            check("rules: the edit preview -- one rule, even while off", one.size() == 1 && fs::path(one[0].from).filename() == "Font.otf");
-        }
-
-        dr::Door door(H, data);
-        door.load();
-        age("Downloads/setup.iso", now - 61 * D);   // changed since -> left out
-        std::vector<std::string> dropped;
-        auto p = rl::plan(H, book.rules, ms, dropped);
-        std::size_t mk = 0, mv = 0, tr = 0;
-        for (const auto& a : p.actions) { mk += a.verb == dr::Verb::MakeDir; mv += a.verb == dr::Verb::Move; tr += a.verb == dr::Verb::Trash; }
-        check("rules: plan -- folders made first, 2 moves, the changed iso left out", mk == 5 && mv == 2 && tr == 0 &&
-              dropped.size() == 1 && p.actions.front().verb == dr::Verb::MakeDir, std::to_string(mk) + "/" + std::to_string(mv));
-        check("rules: the door refuses it unpreviewed", !door.run(p).ok);
-        const std::string b1 = files_snapshot(home);
-        p.previewed = true;
-        auto r = door.run(p);
-        check("rules: run -- the invoice renamed into place, the zip archived",
-              r.ok && fs::exists(got["Invoice-March.PDF"].second) && fs::exists(got["old.zip"].second) &&
-              !fs::exists(home / "Downloads/old.zip"), r.messages.empty() ? "" : r.messages.front());
-        auto u = door.undo();
-        check("rules: undo -- exact outside the Trash", u.ok && [&] {
-            std::istringstream a(files_snapshot(home)), b(b1);
-            std::string x, y, l;
-            while (std::getline(a, l)) if (l.find("/.local/share/Trash") == std::string::npos) x += l + "\n";
-            while (std::getline(b, l)) if (l.find("/.local/share/Trash") == std::string::npos) y += l + "\n";
-            return x == y;
-        }());
-        {   // Trash, and File into a project
-            const auto m2 = rl::matches(H, book.rules, now);
-            std::vector<std::string> d2;
-            auto p2 = rl::plan(H, book.rules, m2, d2);
-            p2.previewed = true;
-            bool trashed = false;
-            for (const auto& a : p2.actions) trashed |= a.verb == dr::Verb::Trash && a.from == H + "/Downloads/setup.iso";
-            r = door.run(p2);
-            check("rules: the iso goes to the Trash", trashed && r.ok && fs::exists(home / ".local/share/Trash/files/setup.iso"));
-            door.undo();
-        }
-        {
-            fs::create_directories(home / "Documents/Jobs/7_X/fonts", ec);
-            put_bytes(home, "Documents/Jobs/7_X/.rouster.json",
-                      R"({"kind":"project","id":"7","title":"X","pattern":"{id}_{title}_{yyyymmdd}_{part}.{ext}","routes":{"fonts":["otf"]}})");
-            rl::Rule fi; fi.name = "Fonts to job 7"; fi.exts = {"otf"}; fi.act = rl::Do::File; fi.dest = "Documents/Jobs/7_X"; fi.enabled = true;
-            const auto m3 = rl::matches(H, {fi}, now);
-            check("rules: File into a project -- its pattern and route",
-                  rl::problem(fi, H).empty() && m3.size() == 1 &&
-                  m3[0].to == H + "/Documents/Jobs/7_X/fonts/7_X_" + core::organize::stamp(now - D, false) + "_Font.otf",
-                  m3.empty() ? "" : m3[0].to);
-        }
-        {
-            const auto st = rl::starters();
-            check("rules: starters -- five, all off, each one usable once its folder exists",
-                  st.size() == 5 && std::none_of(st.begin(), st.end(), [](auto& x) { return x.enabled; }) &&
-                  rl::problem(st[0], H).empty(), rl::problem(st[0], H));
-        }
-        fs::remove_all(home, ec);
-    }
-
     // -- Profile backup: find (read-only) -> plan (MakeDir + Copy + Write) -> door (s012a)
     {
         std::cout << "\n-- profile --\n";
@@ -3291,39 +2735,10 @@ int main(int argc, char** argv) {
         check("packages/dups: a look inside a package is refused",
               !core::dups::find(H, H + "/Documents/Novels/Tapper.scriv/Files", dp2).refused.empty());
 
-        // Archive
-        core::scan::Progress ap;
-        auto af = core::archive::find(H, now, 12, ap);
-        const auto aitem = [&](const std::string& rel) -> core::archive::Item* {
-            for (auto& it : af.items) if (it.rel == rel) return &it;
-            return nullptr;
-        };
-        check("packages/archive: an all-old package is ONE item, all 4 files (hidden too) -- top of home too",
-              aitem("Documents/Novels/Tapper.scriv") && aitem("Documents/Novels/Tapper.scriv")->package &&
-              aitem("Documents/Novels/Tapper.scriv")->files == 4 && aitem("Top.SCRIV") && aitem("Top.SCRIV")->package);
-        check("packages/archive: a package with one new file is not offered at all -- never its old files alone",
-              !aitem("Documents/Novels/Fresh.scriv") &&
-              std::none_of(af.items.begin(), af.items.end(), [&](auto& it) { return inside_any(it.rel); }));
-        check("packages/archive: a FILE named .key is an ordinary old file", aitem("Documents/report.key") &&
-              !aitem("Documents/report.key")->package);
-        check("packages/archive: Look changed nothing", files_snapshot(home) == before);
-
+        // The door: the backstop, whatever a page asks for. (s019c: Archive, Rules and
+        // file-into-project retired -- the door's own refusals are what's left to hold.)
         dr::Door door(H, H + "/.local/share/rouster");
         door.load();
-        aitem("Documents/Novels/Tapper.scriv")->checked = true;
-        std::vector<std::string> dropped;
-        dr::Plan ap1 = core::archive::plan(H, af.items, dropped);
-        ap1.previewed = true;
-        auto r1 = door.run(ap1);
-        std::tm tm{};
-        std::time_t ot = old;
-        ::localtime_r(&ot, &tm);
-        const std::string Y = std::to_string(tm.tm_year + 1900);
-        check("packages/archive: moved whole -- every file inside, hidden too, under ~/Archive/<year>/",
-              r1.ok && !fs::exists(home / "Documents/Novels/Tapper.scriv") &&
-              fs::exists(home / ("Archive/" + Y + "/Documents/Novels/Tapper.scriv/Files/Data/b.rtf")) &&
-              fs::exists(home / ("Archive/" + Y + "/Documents/Novels/Tapper.scriv/.hidden")),
-              r1.messages.empty() ? "" : r1.messages.front());
         const auto outside_trash = [](const std::string& snap) {
             std::istringstream in(snap);
             std::string o;
@@ -3331,34 +2746,6 @@ int main(int argc, char** argv) {
                 if (l.find("/.local/share/Trash") == std::string::npos) o += l + "\n";
             return o;
         };
-        auto u1 = door.undo();
-        check("packages/archive: undo -> exactly back", u1.ok && outside_trash(files_snapshot(home)) == outside_trash(before));
-
-        // Rules
-        core::rules::Rule rr; rr.name = "x"; rr.exts = {"rtf"}; rr.act = core::rules::Do::Trash;
-        rr.folder = "Documents/Novels/Tapper.scriv/Files/Data";
-        const std::string w1 = core::rules::problem(rr, H);
-        rr.folder = "Documents/Novels/Tapper.scriv";
-        const std::string w2 = core::rules::problem(rr, H);
-        rr.folder = "Documents"; rr.act = core::rules::Do::Move; rr.dest = "Documents/Novels/Fresh.scriv/Files";
-        const std::string w3 = core::rules::problem(rr, H);
-        rr.dest = "Documents/Novels/Elsewhere";
-        const std::string w4 = core::rules::problem(rr, H);
-        check("packages/rules: never watch a package or inside one, never move into one; an ordinary rule still runs",
-              w1.find("package") != std::string::npos && w2.find("package") != std::string::npos &&
-              w3.find("package") != std::string::npos && w4.empty(), w1 + " | " + w3 + " | " + w4);
-
-        // File into a project
-        core::organize::Project proj;
-        proj.path = H + "/Documents/Job";
-        const auto inc = core::organize::propose(H, proj, {H + "/Documents/Novels/Fresh.scriv/Files/old.rtf",
-                                                           H + "/Documents/Novels/Tapper.scriv"});
-        check("packages/organize: a file inside a package, or a package, is not filed -- and says why",
-              inc.size() == 2 && !inc[0].checked && inc[0].note.find("package") != std::string::npos &&
-              !inc[1].checked && inc[1].note.find("package") != std::string::npos,
-              inc.size() == 2 ? inc[0].note + " | " + inc[1].note : "");
-
-        // The door: the backstop, whatever a page asks for.
         const auto one = [&](dr::Action a) {
             dr::Plan p;
             p.label = "pkg";
@@ -3618,105 +3005,6 @@ int main(int argc, char** argv) {
               !ct::record("", H, "", mine, {}, N4).ok && !ct::record("relative/dir", H, "", mine, {}, N4).ok);
         fs::remove_all(home, ec);
     }
-    // -- s018: search the archive -- name, kind, where it came from, when ----------
-    {
-        std::cout << "\n-- archive search --\n";
-        namespace ar = core::archive;
-        namespace dr = core::door;
-        const fs::path home = fs::temp_directory_path() / ("rouster_arsearch_" + std::to_string(::getpid()));
-        std::error_code ec;
-        fs::remove_all(home, ec);
-        fs::create_directories(home / ".local/share/Trash/files", ec);
-        fs::create_directories(home / ".local/share/Trash/info", ec);
-        fs::create_directories(home / ".local/share/rouster", ec);
-        const std::string H = home.string(), D = H + "/.local/share/rouster";
-        {
-            const auto none = ar::index(H, D, {});
-            check("archive search: no ~/Archive yet -- nothing found, no error", none.ok && none.entries.empty());
-        }
-        const std::int64_t now = 2000000000, old = 1830000000;
-        const std::vector<std::string> olds = {"Documents/Taxes/w2.pdf", "Documents/Taxes/1099.pdf", "Pictures/beach.jpg",
-                                               "Music/song.mp3", "Documents/taxes notes.txt", "Novels/Tapper.scriv/Files/a.rtf"};
-        for (const auto& r : olds) put(home, r, 5000);
-        for (const auto& r : olds) {
-            struct timespec ts[2] = {{old, 0}, {old, 0}};
-            ::utimensat(AT_FDCWD, (home / r).c_str(), ts, AT_SYMLINK_NOFOLLOW);
-        }
-        std::tm tm{};
-        std::time_t ot = old;
-        ::localtime_r(&ot, &tm);
-        const int Y = tm.tm_year + 1900;
-        core::scan::Progress prog;
-        ar::Found f = ar::find(H, now, 12, prog);
-        for (auto& it : f.items) it.checked = true;
-        dr::Door door(H, D);
-        door.load();
-        std::vector<std::string> dropped;
-        dr::Plan p = ar::plan(H, f.items, dropped);
-        p.previewed = true;
-        const auto r = door.run(p);
-        put(home, "Archive/2020/Loose/by hand.txt", 100);   // put there by hand: found, not Rouster's to put back
-        put(home, "Archive/2020/.hidden", 100);
-        const std::vector<ar::Stored> st = ar::stored(door, H);
-        const std::string before = files_snapshot(home);
-        const ar::Index ix = ar::index(H, D, st);
-        check("archive search: the index changes nothing on disk", files_snapshot(home) == before);
-        const auto entry = [&](const std::string& name) -> const ar::Entry* {
-            for (const auto& e : ix.entries) if (e.name == name) return &e;
-            return nullptr;
-        };
-        const auto* w2 = entry("w2.pdf");
-        const auto* beach = entry("beach.jpg");
-        const auto* hand = entry("by hand.txt");
-        const auto* book = entry("Tapper.scriv");
-        check("archive search: walked -- every file, a package as ONE entry, hidden names not",
-              r.ok && ix.ok && ix.entries.size() == 7 && book && book->package && !entry("a.rtf") && !entry(".hidden"),
-              std::to_string(ix.entries.size()) + " entries");
-        check("archive search: where it came from -- a file inside an archived folder comes back WITH it",
-              w2 && w2->recorded && w2->inside && w2->from == "Documents/Taxes/w2.pdf" && w2->stored != ar::kNoStored &&
-              st[w2->stored].back == "Documents/Taxes" && w2->year == Y && w2->archived > 0);
-        check("archive search: a file archived alone is its own item; one put there by hand is found, its 'from' read "
-              "off the layout, nothing to put it back",
-              beach && beach->recorded && !beach->inside && beach->from == "Pictures/beach.jpg" && hand && !hand->recorded &&
-              hand->from == "Loose/by hand.txt" && hand->stored == ar::kNoStored && hand->year == 2020);
-        check("archive search: kinds -- pdf, jpg, mp3, txt, a .scriv",
-              w2 && w2->kind == "Documents" && beach && beach->kind == "Pictures" && entry("song.mp3") &&
-              entry("song.mp3")->kind == "Music" && hand && hand->kind == "Text & code" && book && book->kind == "Documents" &&
-              ar::search_kind("bin", "image/png") == "Pictures" && ar::search_kind("odt", "application/zip") == "Documents" &&
-              ar::search_kind("xyz", "") == "Other");
-        check("archive search: years present, newest first", ix.years.size() == 2 && ix.years[0] == std::max(Y, 2020));
-        const auto names = [&](const ar::Query& q) {
-            std::string out;
-            for (auto i : ar::match(ix, q, 50)) out += ix.entries[i].name + "|";
-            return out;
-        };
-        const std::string t1 = names({"w2", "", 0}), t2 = names({"TAXES", "", 0}), t3 = names({"taxes w2", "", 0}),
-                          t4 = names({"", "Pictures", 0}), t5 = names({"", "", 2020}), t6 = names({"pdf documents", "", 0}),
-                          t7 = names({"nothing like it", "", 0});
-        check("archive search: by name / by where it came from / every word must be there / a name match first",
-              t1 == "w2.pdf|" && t3 == "w2.pdf|" && t2.rfind("taxes notes.txt|", 0) == 0 && t2.size() > 17 &&
-              t2.find("w2.pdf") != std::string::npos && t2.find("1099.pdf") != std::string::npos && t7.empty(),
-              t2);
-        check("archive search: by kind, by year, words across name and path",
-              t4 == "beach.jpg|" && t5 == "by hand.txt|" && t6.find("w2.pdf") != std::string::npos &&
-              t6.find("1099.pdf") != std::string::npos && t6.find("beach") == std::string::npos, t4 + " / " + t5 + " / " + t6);
-        std::size_t total = 0;
-        const auto lim = ar::match(ix, {"", "", 0}, 3, &total);
-        check("archive search: a limit, and the total said", lim.size() == 3 && total == 7 && ar::Query{}.empty() &&
-              !ar::Query{"x", "", 0}.empty());
-        // Put back from a hit: the folder it came in with goes home whole.
-        std::vector<ar::Stored> pick = st;
-        for (auto& s : pick) s.checked = false;
-        if (w2) pick[w2->stored].checked = true;
-        dropped.clear();
-        dr::Plan pb = ar::put_back(H, pick, dropped);
-        pb.previewed = true;
-        const auto rb = door.run(pb);
-        check("archive search: Put back from a hit inside a folder -> the whole folder is home again",
-              rb.ok && fs::exists(home / "Documents/Taxes/w2.pdf") && fs::exists(home / "Documents/Taxes/1099.pdf") &&
-              ar::index(H, D, ar::stored(door, H)).entries.size() == 5);
-        fs::remove_all(home, ec);
-    }
     // -- s017a2: Samson's places are Protected; your own bundle list --------------
     {
         std::cout << "\n-- samson + bundles --\n";
@@ -3801,7 +3089,7 @@ int main(int argc, char** argv) {
     //   Recents.cpp   -- Rouster's own recents file, in its own data dir;
     //   selftest.cpp  -- it builds and tears down fixtures;
     //   Known.cpp     -- Rouster's own setting (promoted names), in its own data dir;
-    //   Settings.cpp  -- Rouster's own files (rules.json), in its own data dir;
+    //   Settings.cpp  -- Rouster's own files (profile-notes.md), in its own data dir;
     //   Pipe.cpp      -- s012c: write() only into the pipes of the child it made (gpg's stdin, fd 3);
     //   helper/main.cpp -- s013: the ROOT helper; it makes Rouster's snapshot folder and the snapshots.
     //                    pkexec (the way to root) and the btrfs snapshot ioctls are gate tokens:
@@ -3913,10 +3201,34 @@ int main(int argc, char** argv) {
         namespace hl = core::help;
         bool pages = true;
         std::string missing;
-        // Every sidebar page (Shell_zones' m_stack ids) has a topic -- F1 opens it.
-        for (const char* id : {"scan", "sweep", "system", "dups", "dev", "projects", "rules", "archive", "preflight", "profile", "activity"})
-            if (!hl::find(id)) { pages = false; missing += std::string(id) + " "; }
-        check("help: every sidebar page has a topic", pages, missing);
+        // Every sidebar page has a topic -- F1 opens it. s019c: the pages are read
+        // from Shell_zones.cpp's item("<id>", ...) rows, so a page that leaves the
+        // sidebar can't leave its topic behind, and a new one can't come without one.
+        std::set<std::string> sidebar;
+        {
+            std::ifstream z(fs::path(ROUSTER_SOURCE_DIR) / "src/Shell_zones.cpp");
+            for (std::string line; std::getline(z, line);) {
+                const auto at = line.find("    item(\"");
+                if (at != 0) continue;
+                const auto q = line.find('"', 10);
+                if (q != std::string::npos) sidebar.insert(line.substr(10, q - 10));
+            }
+        }
+        for (const auto& id : sidebar)
+            if (!hl::find(id)) { pages = false; missing += id + " "; }
+        check("help: every sidebar page has a topic", pages && sidebar.size() >= 8,
+              missing.empty() ? std::to_string(sidebar.size()) + " pages" : missing);
+        // s019c: Archive, Rules and Projects retired (Tidy owns them) -- no topic for them, no Organize group.
+        bool retired = true;
+        for (const char* id : {"archive", "rules", "projects"}) if (hl::find(id)) retired = false;
+        for (const auto& t : hl::topics()) if (t.group == "Organize") retired = false;
+        check("help: no topic for a retired page (Archive, Rules, Projects), no Organize group", retired);
+        // ...and every topic in a page group (Clean up, Safety) is a page on the sidebar.
+        std::string orphan;
+        for (const auto& t : hl::topics())
+            if ((t.group == "Clean up" || t.group == "Safety") && !sidebar.count(t.id) && t.id != "files" && t.id != "helper" && t.id != "trying")
+                orphan += t.id + " ";
+        check("help: every page topic is a sidebar page", orphan.empty(), orphan);
         std::set<std::string> ids;
         bool full = true, unique = true;
         for (const auto& t : hl::topics()) {

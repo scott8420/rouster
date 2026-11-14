@@ -33,18 +33,6 @@ window.rouster.page-dups {
   background-image: radial-gradient(circle at 75% 15%, rgba(56,189,248,0.45), transparent 55%),
                     linear-gradient(160deg, #0c2f4a 0%, #0e4a6e 55%, #0a2236 100%);
 }
-window.rouster.page-archive {
-  background-image: radial-gradient(circle at 75% 15%, rgba(251,113,133,0.45), transparent 55%),
-                    linear-gradient(160deg, #4a1424 0%, #6b1a33 55%, #2e0d18 100%);
-}
-window.rouster.page-projects {
-  background-image: radial-gradient(circle at 75% 15%, rgba(251,191,36,0.45), transparent 55%),
-                    linear-gradient(160deg, #4a3411 0%, #6b4a12 55%, #2e200b 100%);
-}
-window.rouster.page-rules {
-  background-image: radial-gradient(circle at 75% 15%, rgba(167,139,250,0.45), transparent 55%),
-                    linear-gradient(160deg, #2a1a52 0%, #3b2275 55%, #1c1238 100%);
-}
 window.rouster.page-profile {
   background-image: radial-gradient(circle at 75% 15%, rgba(163,230,53,0.40), transparent 55%),
                     linear-gradient(160deg, #22330d 0%, #34501a 55%, #16220a 100%);
@@ -101,10 +89,6 @@ window.page-dev button.orb {
 window.page-dups button.orb {
   background-image: linear-gradient(160deg, #7dd3fc 0%, #0ea5e9 55%, #0369a1 100%);
   box-shadow: 0 0 0 6px rgba(255,255,255,0.10), 0 10px 40px rgba(56,189,248,0.45);
-}
-window.page-archive button.orb {
-  background-image: linear-gradient(160deg, #fda4af 0%, #f43f5e 55%, #be123c 100%);
-  box-shadow: 0 0 0 6px rgba(255,255,255,0.10), 0 10px 40px rgba(251,113,133,0.45);
 }
 window.page-preflight button.orb {
   background-image: linear-gradient(160deg, #5eead4 0%, #14b8a6 55%, #0e7490 100%);
@@ -201,33 +185,8 @@ window.page-dups button.act {
 }
 button.ghost.mode:checked { background: rgba(255,255,255,0.24); border-color: rgba(255,255,255,0.55); }
 
-/* Archive (s009). */
-.ar-dot { background-color: #fb7185; }
-window.page-archive button.act {
-  background-image: linear-gradient(160deg, #fda4af 0%, #e11d48 100%);
-  box-shadow: 0 6px 22px rgba(251,113,133,0.35);
-}
-
-/* Projects (s010): templates, naming, file into project, new version. */
-.pj-dot { background-color: #fbbf24; }
-window.page-projects button.orb {
-  background-image: linear-gradient(160deg, #fde68a 0%, #f59e0b 55%, #b45309 100%);
-  box-shadow: 0 0 0 6px rgba(255,255,255,0.10), 0 10px 40px rgba(251,191,36,0.45);
-}
-window.page-projects button.act {
-  background-image: linear-gradient(160deg, #fde68a 0%, #d97706 100%);
-  box-shadow: 0 6px 22px rgba(251,191,36,0.35);
-}
-.pj-drop { border: 2px dashed rgba(255,255,255,0.28); border-radius: 14px; padding: 22px; }
-.pj-over .pj-drop { border-color: #fbbf24; background-color: rgba(251,191,36,0.10); }
-.pj-misfit { background-color: rgba(251,191,36,0.20); color: #fef3c7; border-radius: 999px; padding: 1px 10px; font-size: 0.85em; }
+/* Entries (the Profile passphrases). */
 window.rouster entry { background-color: rgba(0,0,0,0.25); color: #ffffff; border-radius: 8px; }
-
-/* Rules (s011). */
-window.page-rules button.act {
-  background-image: linear-gradient(160deg, #c4b5fd 0%, #7c3aed 100%);
-  box-shadow: 0 6px 22px rgba(167,139,250,0.35);
-}
 
 /* Profile backup (s012a). */
 .pr-dot { background-color: #a3e635; }
