@@ -294,7 +294,7 @@ std::string Shell::data_dir() const {  // helper: where the manifest lives
 void Shell::paint_activity() {  // helper: the manifest's batches, newest first
     namespace dr = core::door;
     if (door_busy()) {   // the act worker owns the door; on_dev_acted repaints
-        m_act_said.set_text("A retire / restore is running -- Activity fills in when it is done.");
+        m_act_said.set_text("A Dev projects clean is running -- Activity fills in when it is done.");
         if (m_act_undo_action) m_act_undo_action->set_enabled(false);
         return;
     }
@@ -1340,7 +1340,7 @@ core::door::Result Shell::door_run(const core::door::Plan& plan) {  // helper: g
     return m_door->run(plan);
 }
 
-bool Shell::door_busy() const {  // helper: a retire / restore / duplicates run owns the door right now
+bool Shell::door_busy() const {  // helper: a clean / duplicates / profile / system run owns the door right now
     return m_dv_acting || m_du_acting || m_pf_acting || m_sy_acting;
 }
 
@@ -1355,154 +1355,100 @@ bool Shell::tick_dev() {  // helper: the live counters while looking
     return true;
 }
 
-void Shell::paint_dev() {  // helper: one card per project: verdict, checks, lint, build rows
+void Shell::paint_dev() {  // helper: s020c -- ready (one checkbox) or not (one line why)
     namespace dv = core::dev;
     while (auto* c = m_dv_list.get_first_child()) m_dv_list.remove(*c);
     auto& projects = m_dv_shown.projects;
 
-    for (std::size_t pi = 0; pi < projects.size(); ++pi) {
+    const auto card_of = [&](std::size_t pi) {
         const auto& p = projects[pi];
-        const auto st = p.repo.status;
-        const char* tone = st == dv::Status::Backed ? "pf-green" : st == dv::Status::Retired ? "dim"
-                         : (st == dv::Status::NoRemote || st == dv::Status::NotRepo) ? "pf-red" : "pf-amber";
-        const char* dotc = st == dv::Status::Backed ? "dv-backed" : st == dv::Status::Retired ? "dv-retired"
-                         : (st == dv::Status::NoRemote || st == dv::Status::NotRepo) ? "dv-unsafe" : "dv-notclean";
+        const bool ready = p.group == dv::Group::Clean;
+        std::uint64_t all = 0;
+        bool any = false, on = false;
+        for (const auto& r : p.rows) { all += r.bytes; any = any || r.offered; on = on || r.checked; }
 
-        auto card = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 4);
+        auto card = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 2);
         card->add_css_class("card");
         card->add_css_class("dev-card");
-        auto head = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
-        auto dot = Gtk::make_managed<Gtk::Box>();
-        dot->add_css_class("dot");
-        dot->add_css_class(dotc);
-        dot->set_valign(Gtk::Align::CENTER);
-        head->append(*dot);
+        auto head = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 10);
+        if (ready && any) {
+            auto cb = Gtk::make_managed<Gtk::CheckButton>();
+            cb->set_active(on);
+            cb->set_valign(Gtk::Align::CENTER);
+            cb->signal_toggled().connect([this, cb, pi] {
+                if (pi < m_dv_shown.projects.size())
+                    for (auto& r : m_dv_shown.projects[pi].rows) r.checked = r.offered && cb->get_active();
+                dev_gate();
+            });
+            head->append(*cb);
+        } else {
+            auto dot = Gtk::make_managed<Gtk::Box>();
+            dot->add_css_class("dot");
+            dot->add_css_class(ready ? "dv-backed" : p.group == dv::Group::NoGit ? "dv-nogit" : "dv-unsafe");
+            dot->set_valign(Gtk::Align::CENTER);
+            head->append(*dot);
+        }
         head->append(*text(p.name, "card-title"));
-        auto where = text("~/" + p.rel + (p.kind == dv::Kind::Workspace ? "  · workspace" : "  · repo"), "card-sub");
+        auto where = text("~/" + p.rel, "card-sub");
         where->set_hexpand(true);
         where->set_ellipsize(Pango::EllipsizeMode::MIDDLE);
         head->append(*where);
-        auto chip = text(dv::status_name(st), "status-chip");
-        chip->add_css_class(tone);
-        chip->set_valign(Gtk::Align::CENTER);
-        head->append(*chip);
-        // Retire (a backed-up workspace) / Restore (a retired one): each opens a preview first.
-        if (p.kind == dv::Kind::Workspace && (st == dv::Status::Backed || st == dv::Status::Retired)) {
-            auto b = Gtk::make_managed<Gtk::Button>(st == dv::Status::Retired ? "Restore…" : "Retire…");
+        if (ready && all) head->append(*text(scan::human_bytes(all), "detail-size", 1.0f));
+        if (const auto pp = dv::push_plan(p); pp.why_not.empty()) {   // s020a
+            auto b = Gtk::make_managed<Gtk::Button>("Push…");
             b->add_css_class("ghost");
             b->add_css_class("small");
             b->set_valign(Gtk::Align::CENTER);
-            b->set_tooltip_text(st == dv::Status::Retired
-                ? "Clone it back from " + p.repo.host + " -- you see the plan first"
-                : "Send the working copy and old backups to the Trash, leave RESTORE.txt -- you see the plan first");
+            b->set_tooltip_text("Push what's committed here to " + p.repo.remote + " (" + p.repo.host + ") -- you see what goes first");
             const std::string rel = p.rel;
-            const bool retired = st == dv::Status::Retired;
-            b->signal_clicked().connect([this, rel, retired] { retired ? on_dev_restore(rel) : on_dev_retire(rel); });
+            b->signal_clicked().connect([this, rel] { on_dev_push(rel); });
             head->append(*b);
         }
         card->append(*head);
 
-        // The verdict, in one line, then whatever failed.
-        std::string verdict;
-        const std::string sha = p.repo.head.empty() ? std::string("no commits") : p.repo.head.substr(0, 7);
-        switch (st) {
-            case dv::Status::Backed:
-                verdict = "On " + p.repo.host + " (" + p.repo.remote + ") at " + sha +
-                          (p.repo.branch.empty() ? "" : " on " + p.repo.branch) +
-                          " -- committed, pushed, no local-only branches, no stashes, tags pushed; asked live.";
-                break;
-            case dv::Status::NotClean:
-                verdict = "Not everything here is on " + p.repo.remote + " (" + p.repo.host + "):";
-                break;
-            case dv::Status::Unreachable:
-                verdict = "Couldn't ask " + p.repo.remote + " (" + p.repo.host + "): " + p.repo.error +
-                          ". Unknown, so treated as not clean.";
-                break;
-            case dv::Status::NoRemote:
-            case dv::Status::NotRepo:
-                verdict = "Not backed up: " + p.repo.error + ". Rouster leaves it alone.";
-                break;
-            case dv::Status::Retired:
-                verdict = "Retired " + p.restore.retired + " -- the working copy lives on " + p.repo.host + " at " + sha +
-                          (p.repo.branch.empty() ? "" : " (" + p.repo.branch + ")") + ". RESTORE.txt says how to get it back.";
-                break;
+        // One line.
+        std::string line;
+        if (ready) {
+            if (!any) line = p.repo.cleaned ? "Already clean -- git restore . in ~/" + p.repo_rel + " brings the source back."
+                                            : "Nothing to clean.";
+            else {
+                std::string parts;
+                for (const auto& r : p.rows)
+                    parts += (parts.empty() ? "" : ", ") + std::string(dv::part_name(r.part)) + " " + scan::human_bytes(r.bytes);
+                line = "On " + p.repo.host + ". Takes " + parts + " -- keeps .git, docs, scripts, fixes.";
+            }
+        } else if (p.group == dv::Group::NoGit) {
+            line = "Not ready -- " + (p.repo.error.empty() ? std::string(dv::status_name(p.repo.status)) : p.repo.error) +
+                   ". Back up its source, docs and scripts if you still need it.";
+        } else {
+            line = "Not ready -- " + dv::why_red(p);
         }
-        auto v = text(verdict, st == dv::Status::Backed ? "dim" : tone);
+        auto v = text(line, ready ? "dim" : "pf-red");
         v->set_wrap(true);
+        if (ready) {   // hover: every item
+            std::string tip;
+            std::size_t n = 0;
+            for (const auto& r : p.rows)
+                for (const auto& it : r.items) {
+                    if (n++ < 30) tip += (tip.empty() ? "" : "\n") + scan::human_bytes(it.bytes) + "   ~/" + it.rel;
+                }
+            if (n > 30) tip += "\n… and " + std::to_string(n - 30) + " more";
+            if (!tip.empty()) card->set_tooltip_text(tip);
+        }
         card->append(*v);
-        if (st == dv::Status::NotClean)
-            for (const auto& c : p.repo.checks) {
-                if (c.ok) continue;
-                auto l = text("•  " + c.name + ": " + c.detail, "dim");
-                l->set_wrap(true);
-                l->set_margin_start(12);
-                card->append(*l);
-            }
-        if (!p.repo.other_remotes.empty()) {
-            std::string o;
-            for (const auto& r : p.repo.other_remotes) o += (o.empty() ? "" : ", ") + r;
-            card->append(*text("Also has " + o + " -- checked against " + p.repo.remote + " only.", "dim"));
-        }
-        if (!p.repo.ignored.empty()) {
-            std::string ig;
-            for (std::size_t i = 0; i < p.repo.ignored.size() && i < 6; ++i) ig += (i ? ", " : "") + p.repo.ignored[i];
-            if (p.repo.ignored.size() > 6) ig += " and " + std::to_string(p.repo.ignored.size() - 6) + " more";
-            auto l = text("Ignored, but here: " + ig, "dim");
-            l->set_wrap(true);
-            l->set_tooltip_text("Git ignores these, so they are not on the remote. Retire would lose them -- decide first.");
-            card->append(*l);
-        }
-        // Template drift (workspaces).
-        for (const auto& d : p.drift) {
-            auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
-            auto tag = text(dv::tier_name(d.tier), "drift-tag");
-            tag->add_css_class(d.tier == dv::Tier::Required ? "pf-red" : d.tier == dv::Tier::Note ? "dim" : "pf-amber");
-            row->append(*tag);
-            auto w = text(d.what, "dim");
-            w->set_wrap(true);
-            w->set_hexpand(true);
-            row->append(*w);
-            if (!d.name.empty() && (d.tier == dv::Tier::Unknown || d.promoted)) {
-                auto k = Gtk::make_managed<Gtk::Button>(d.promoted ? "Forget" : "Known");
-                k->add_css_class("ghost");
-                k->add_css_class("small");
-                k->set_valign(Gtk::Align::CENTER);
-                k->set_tooltip_text(d.promoted ? "Not known-optional after all: report " + d.name + " again"
-                                               : "Known-optional from now on, in every workspace: stop reporting " + d.name);
-                const std::string rel = p.rel, name = d.name;
-                const bool add = !d.promoted;
-                k->signal_clicked().connect([this, rel, name, add] { on_dev_known(rel, name, add); });
-                row->append(*k);
-            }
-            card->append(*row);
-        }
-        // Build output: a check each (shown, unchecked and insensitive when not offered).
-        for (std::size_t bi = 0; bi < p.builds.size(); ++bi) {
-            const auto& b = p.builds[bi];
-            auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 12);
-            row->add_css_class("sweep-row");
-            auto cb = Gtk::make_managed<Gtk::CheckButton>();
-            cb->set_active(b.offered && b.checked);
-            cb->set_sensitive(b.offered);
-            cb->signal_toggled().connect([this, cb, pi, bi] {
-                if (pi < m_dv_shown.projects.size() && bi < m_dv_shown.projects[pi].builds.size())
-                    m_dv_shown.projects[pi].builds[bi].checked = cb->get_active();
-                dev_gate();
-            });
-            auto sz = text(scan::human_bytes(b.bytes), "detail-size", 1.0f);
-            sz->set_width_chars(9);
-            auto path = text("~/" + b.rel, "detail-path");
-            path->set_hexpand(true);
-            path->set_ellipsize(Pango::EllipsizeMode::MIDDLE);
-            path->set_tooltip_text(m_home + "/" + b.rel + "  —  " + with_commas(b.files) +
-                                   (b.files == 1 ? " file" : " files") + " of build output");
-            row->append(*cb);
-            row->append(*sz);
-            row->append(*path);
-            if (!b.note.empty()) row->append(*text(b.note, "dim", 1.0f));
-            card->append(*row);
-        }
-        m_dv_list.append(*card);
+        return card;
+    };
+
+    // Ready first, then not ready; by path inside each.
+    for (const bool ready : {true, false}) {
+        std::size_t n = 0;
+        for (const auto& p : projects) n += (p.group == dv::Group::Clean) == ready;
+        if (!n) continue;
+        auto head = text(std::string(ready ? "READY" : "NOT READY") + "  ·  " + std::to_string(n), "dv-section");
+        head->add_css_class(ready ? "dv-section-clean" : "dv-section-red");
+        m_dv_list.append(*head);
+        for (std::size_t pi = 0; pi < projects.size(); ++pi)
+            if ((projects[pi].group == dv::Group::Clean) == ready) m_dv_list.append(*card_of(pi));
     }
     if (projects.empty()) {
         std::string roots;
@@ -1517,34 +1463,31 @@ void Shell::paint_dev() {  // helper: one card per project: verdict, checks, lin
     dev_gate();
 }
 
-void Shell::dev_gate() {  // helper: the light-clean button's label + whether it may act
+void Shell::dev_gate() {  // helper: the Clean button's label + whether it may act
     namespace dv = core::dev;
-    std::uint64_t bytes = 0, all = 0;
-    std::size_t n = 0, backed = 0, unsafe = 0, notclean = 0;
+    std::size_t clean = 0, nogit = 0, red = 0;
     for (const auto& p : m_dv_shown.projects) {
-        const auto st = p.repo.status;
-        backed   += st == dv::Status::Backed;
-        unsafe   += st == dv::Status::NoRemote || st == dv::Status::NotRepo;
-        notclean += st == dv::Status::NotClean || st == dv::Status::Unreachable;
-        backed   += st == dv::Status::Retired;   // retired = safely on its remote
-        for (const auto& b : p.builds) {
-            all += b.bytes;
-            if (b.offered && b.checked) { bytes += b.bytes; ++n; }
-        }
+        clean += p.group == dv::Group::Clean;
+        nogit += p.group == dv::Group::NoGit;
+        red   += p.group == dv::Group::LookInto;
     }
+    // The total is the plan's: a folder inside a ticked Source isn't counted twice.
+    const auto plan = dv::clean_plan(m_home, m_dv_shown.projects);
+    std::uint64_t bytes = 0;
+    for (const auto& a : plan.actions) bytes += a.bytes;
+    const auto n = plan.actions.size();
     m_dv_big.set_text(scan::human_bytes(bytes));
     const auto np = m_dv_shown.projects.size();
-    m_dv_caption.set_text("of build output chosen, of " + scan::human_bytes(all) + " · " + with_commas(np) +
-                          (np == 1 ? " project: " : " projects: ") + with_commas(backed) + " backed up, " +
-                          with_commas(notclean) + " not clean, " + with_commas(unsafe) + " not backed up");
-    m_dv_go.set_label(n ? "Move " + scan::human_bytes(bytes) + " of build output to the Trash" : "Move to the Trash");
+    m_dv_caption.set_text("ticked to clean · " + with_commas(np) + (np == 1 ? " project: " : " projects: ") +
+                          with_commas(clean) + " ready, " + with_commas(nogit + red) + " not ready");
+    m_dv_go.set_label(n ? "Clean " + scan::human_bytes(bytes) + "…" : "Clean…");
     const bool busy = m_dv_worker.joinable();
     if (m_pf_red)
         m_dv_gate.set_text("Preflight has a red check. Dev projects waits until it clears -- see Preflight.");
     else if (!n)
-        m_dv_gate.set_text("Nothing checked.");
+        m_dv_gate.set_text("Nothing ticked.");
     else
-        m_dv_gate.set_text("Only build output moves -- sources, docs, backups and fixes/ stay. One step; Undo brings it back.");
+        m_dv_gate.set_text("docs/, scripts/, fixes/ and .git always stay. You see every step first; one step, Undo brings it back.");
     if (m_act_dv_run) m_act_dv_run->set_enabled(n > 0 && !m_pf_red && !busy);
 }
 
@@ -1560,7 +1503,26 @@ void Shell::paint_dev_confirm(const std::string& title, const std::string& sub, 
     };
     auto steps = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 6);
     steps->add_css_class("card");
-    steps->append(*text("What happens, in this order -- one step, Undo takes it all back", "card-title"));
+    {
+        std::uint64_t total = 0;
+        for (const auto& a : m_dv_plan.actions) total += a.bytes;
+        steps->append(*text(m_dv_cf_push ? "What happens, in this order -- git push, no Undo (it only adds to the remote)"
+                                         : "What happens -- one step, Undo takes it all back · " + scan::human_bytes(total) +
+                                               " in all", "card-title"));
+    }
+    if (m_dv_cf_push)   // s020a: the push's steps are git's, not the door's
+        for (const auto& w : keep) {
+            auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 12);
+            row->add_css_class("sweep-row");
+            auto v = text("Push", "drift-tag");
+            v->add_css_class("pf-green");
+            row->append(*v);
+            auto l = text(w, "dim");
+            l->set_wrap(true);
+            l->set_hexpand(true);
+            row->append(*l);
+            steps->append(*row);
+        }
     for (const auto& a : m_dv_plan.actions) {
         auto row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 12);
         row->add_css_class("sweep-row");
@@ -1585,7 +1547,7 @@ void Shell::paint_dev_confirm(const std::string& title, const std::string& sub, 
         steps->append(*row);
     }
     m_dv_cf_list.append(*steps);
-    if (!keep.empty()) {
+    if (!keep.empty() && !m_dv_cf_push) {
         std::string k;
         for (const auto& x : keep) k += (k.empty() ? "" : ", ") + x;
         auto l = text("Stays: " + k, "dim");

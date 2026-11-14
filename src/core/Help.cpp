@@ -150,7 +150,7 @@ std::vector<Topic> build() {
         }});
 
     t.push_back({"dev", "Dev projects", "Clean up",
-        "Checks your code projects are safely on GitHub, cleans their build output, and retires finished ones.",
+        "Checks your code projects are safely on GitHub, and cleans what can go: old zips, build output, pushed source.",
         {
             {"How to use it", {
                 "Press Look. Rouster finds projects in ~/Develop (and ~/Projects, ~/src, ~/dev, ~/code) and asks "
@@ -162,15 +162,15 @@ std::vector<Topic> build() {
                 "- every branch's commits are on the remote",
                 "- no branch only here",
                 "- every tag on the remote"}},
-            {"Build output", {
-                "build/ folders with nothing tracked by git can go to the Trash. A project with no remote is shown "
-                "but never offered."}},
-            {"Retire and restore", {
-                "Retire... (only when Backed up) shows every step first: it writes RESTORE.txt with the exact commit, "
-                "then sends the working copy, old backups and all but the newest zip to the Trash. docs/, scripts/ "
-                "and fixes/ stay. A retired project shows Restore..., which clones it back at that commit."}},
-            {"Template lint", {
-                "For workspaces, anything not in the template is listed. Known marks a name as yours; Forget undoes that."}},
+            {"Ready or not", {
+                "Ready means Backed up. A ready project has one checkbox: it cleans every zip in backups/ and "
+                "backups/Old/, the build output (and programs git ignores), and the source -- everything in the repo "
+                "folder but .git and .gitignore. docs/, scripts/ and fixes/ always stay. Hover a project to see each item.",
+                "Not ready: dirty, not pushed, the remote didn't answer, or no git at all. One line says why; no checkbox. "
+                "Push... shows where that's all it needs.",
+                "Clean... shows every step and the total, asks each remote once more (if one isn't still Backed up at "
+                "the same commit, nothing moves), then one step to the Trash. Undo brings it all back; git restore . "
+                "in the repo folder brings a source back any time. A cleaned project shows Already clean."}},
         }});
 
     // ── Safety ──────────────────────────────────────────────────────────────

@@ -828,9 +828,13 @@ void Shell::on_dev_find() {  // handler: find + verify the dev projects (worker)
             lg->info("found {} projects in {} roots, {} unreadable, {} ms{}{}", f.projects.size(), f.roots.size(),
                      f.errors, ms, f.cancelled ? " (cancelled)" : "", f.refused.empty() ? "" : " REFUSED: " + f.refused);
             for (const auto& p : f.projects) {
-                lg->info("  {} [{}] {} -- remote {} ({}), {} build dirs, {} drift", p.rel,
+                lg->info("  {} [{}] {}{} -> {} -- remote {} ({}), {} drift", p.rel,
                          p.kind == core::dev::Kind::Workspace ? "workspace" : "repo",
-                         core::dev::status_name(p.repo.status), p.repo.remote, p.repo.host, p.builds.size(), p.drift.size());
+                         core::dev::status_name(p.repo.status), p.repo.cleaned ? " (source cleaned)" : "",
+                         core::dev::group_name(p.group), p.repo.remote, p.repo.host, p.drift.size());
+                for (const auto& row : p.rows)
+                    lg->info("    {}: {} items, {} bytes{}{}", core::dev::part_name(row.part), row.items.size(), row.bytes,
+                             row.offered ? "" : " (not offered)", row.checked ? " (ticked)" : "");
                 for (const auto& c : p.repo.checks)
                     if (!c.ok) lg->info("    {}: {}", c.name, c.detail);
                 if (!p.repo.error.empty()) lg->info("    error: {}", p.repo.error);
@@ -869,47 +873,11 @@ void Shell::on_dev_found() {  // handler: the worker finished (Dispatcher -> UI 
     m_dv_states.set_visible_child("results");
 }
 
-void Shell::on_dev_run() {  // handler: the checked build dirs -> a plan -> the door
-    if (!m_door || door_busy() || m_dv_worker.joinable()) return;
-    if (m_dv_states.get_visible_child_name() != "results") return;   // the cards are the preview
-    paint_preflight();
-    if (m_pf_red) { dev_gate(); return; }
-
-    core::door::Plan plan = core::dev::plan(m_home, m_dv_shown.projects);
-    if (plan.actions.empty()) return;
-    plan.previewed = true;
-    std::uint64_t bytes = 0;
-    for (const auto& a : plan.actions) bytes += a.bytes;
-
-    const auto r = door_run(plan);
-    if (auto lg = log::get(log::Area::Dev)) {
-        lg->info("run '{}': {} done, {} failed", plan.label, r.done, r.failed);
-        for (const auto& m : r.messages) lg->warn("  {}", m);
-    }
-    if (r.ok) {
-        m_dv_done_big.set_text(core::scan::human_bytes(bytes));
-        m_dv_done_caption.set_text("of build output went to the Trash -- " + std::to_string(r.done) +
-            (r.done == 1 ? " folder" : " folders") + ". The next build makes it again; Undo puts it back now. "
-            "The space returns when you empty the Trash.");
-    } else if (r.done == 0) {
-        m_dv_done_big.set_text("Nothing moved");
-        m_dv_done_caption.set_text(r.messages.empty() ? std::string("The door refused the plan.") : r.messages.front());
-    } else {
-        m_dv_done_big.set_text(std::to_string(r.done) + " of " + std::to_string(plan.actions.size()));
-        m_dv_done_caption.set_text("went to the Trash; " + std::to_string(r.failed) + " could not: " +
-                                   (r.messages.empty() ? std::string("see Activity") : r.messages.front()) +
-                                   ". Undo puts back what moved.");
-    }
-    m_dv_states.set_visible_child("done");
-    dev_gate();
-    paint_activity();
-}
-
-// ── Retire / restore (s007b) ─────────────────────────────────────────────────
-// Card -> the preview (the "confirm" state lists every step of the plan) ->
-// the act button -> a worker: retire asks the remote ONCE MORE (the verdict on
-// screen may be minutes old), then the door runs; restore's clone is the
-// network's time. While the worker owns the door, every other door use waits.
+// ── Clean (s020b) ────────────────────────────────────────────────────────────
+// The ticked rows -> ONE plan -> the preview ("confirm" lists every step, sizes
+// and the total) -> the act button -> a worker: every project whose Source is
+// ticked is asked again (still Backed up, same commit) -- if any isn't, nothing
+// moves -- then the door runs the one step. Undo brings it all back.
 namespace {
 const core::dev::Project* project_at(const core::dev::Found& f, const std::string& rel) {
     for (const auto& p : f.projects) if (p.rel == rel) return &p;
@@ -917,48 +885,94 @@ const core::dev::Project* project_at(const core::dev::Found& f, const std::strin
 }
 }  // namespace
 
-void Shell::on_dev_retire(const std::string& rel) {  // handler: Retire... -> the preview
-    const auto* p = project_at(m_dv_shown, rel);
-    if (!p || door_busy()) return;
-    std::string why;
-    core::dev::RetireView view;
-    m_dv_plan = core::dev::retire_plan(m_home, *p, static_cast<std::int64_t>(std::time(nullptr)), why, &view);
-    if (m_dv_plan.actions.empty()) { m_dv_gate.set_text("Can't retire " + p->name + ": " + why); return; }
-    m_dv_cf_rel = rel;
-    m_dv_cf_retire = true;
+void Shell::on_dev_run() {  // handler: the ticked rows -> a plan -> the preview
+    namespace dv = core::dev;
+    if (!m_door || door_busy() || m_dv_worker.joinable()) return;
+    if (m_dv_states.get_visible_child_name() != "results") return;
+    paint_preflight();
+    if (m_pf_red) { dev_gate(); return; }
+
+    m_dv_plan = dv::clean_plan(m_home, m_dv_shown.projects);
+    if (m_dv_plan.actions.empty()) return;
+    m_dv_cf_rel.clear();
+    m_dv_cf_push = false;
+    std::uint64_t bytes = 0;
+    for (const auto& a : m_dv_plan.actions) bytes += a.bytes;
+
     std::vector<std::string> warn;
-    if (!view.ignored.empty()) {
-        std::string ig;
-        for (const auto& i : view.ignored) ig += (ig.empty() ? "" : ", ") + i;
-        warn.push_back("Git ignores these, so they are NOT on " + p->repo.host +
-                       ", and they leave with the working copy (to the Trash, until you empty it): " + ig);
+    const auto asked = dv::source_ticked(m_dv_shown.projects);
+    for (const auto* p : asked) {
+        const auto* src = dv::row_of(*p, dv::Part::Source);
+        if (src && !src->leaves.empty()) {
+            std::string l;
+            for (const auto& x : src->leaves) l += (l.empty() ? "" : ", ") + x;
+            warn.push_back(p->name + ": git ignores these, so they are NOT on " + p->repo.host +
+                           " and git restore won't bring them back -- they go with the source (Undo still does): " + l);
+        }
     }
-    if (p->fixes_files) warn.push_back("fixes/ stays exactly where it is -- Rouster never touches it.");
-    paint_dev_confirm("Retire " + p->name + "?",
-        "Everything in " + p->app + "/ is on " + p->repo.host + " (" + p->repo.remote + ") at " +
-            p->repo.head.substr(0, 7) + (p->repo.branch.empty() ? "" : " on " + p->repo.branch) +
-            ". Rouster asks the remote once more before anything moves.",
-        "Retire " + p->name, view.keep, warn);
-    if (auto lg = log::get(log::Area::Dev)) lg->info("retire preview '{}': {} steps", rel, m_dv_plan.actions.size());
+    if (!asked.empty()) {
+        std::string names;
+        for (const auto* p : asked) names += (names.empty() ? "" : ", ") + p->name;
+        warn.push_back("Source of " + names + ": Rouster asks the remote once more before anything moves -- "
+                       "if it isn't still Backed up at the same commit, nothing moves.");
+    }
+    std::vector<std::string> keep = {"docs/", "scripts/", "fixes/", ".git", ".gitignore"};
+    for (const auto* p : asked)
+        if (const auto* src = dv::row_of(*p, dv::Part::Source))
+            for (const auto& x : src->stays) keep.push_back(p->name + "/" + x + " (ignored)");
+    const auto n = m_dv_plan.actions.size();
+    paint_dev_confirm(m_dv_plan.label + "?",
+        core::scan::human_bytes(bytes) + " to the Trash -- " + std::to_string(n) + (n == 1 ? " item" : " items") +
+            ", one step. Undo in Activity brings it all back; the space returns when you empty the Trash.",
+        "Clean " + core::scan::human_bytes(bytes), keep, warn);
+    if (auto lg = log::get(log::Area::Dev))
+        lg->info("clean preview: '{}', {} actions, {} bytes, {} asked again", m_dv_plan.label, n, bytes, asked.size());
 }
 
-void Shell::on_dev_restore(const std::string& rel) {  // handler: Restore... -> the preview
+void Shell::on_dev_push(const std::string& rel) {  // handler: s020a -- Push... -> the preview
     const auto* p = project_at(m_dv_shown, rel);
     if (!p || door_busy()) return;
-    std::string why;
-    m_dv_plan = core::dev::restore_plan(m_home, *p, why);
-    if (m_dv_plan.actions.empty()) { m_dv_gate.set_text("Can't restore " + p->name + ": " + why); return; }
+    m_dv_push_plan = core::dev::push_plan(*p);
+    if (!m_dv_push_plan.why_not.empty()) { m_dv_gate.set_text("Can't push " + p->name + ": " + m_dv_push_plan.why_not); return; }
+    m_dv_plan = {};
     m_dv_cf_rel = rel;
-    m_dv_cf_retire = false;
-    paint_dev_confirm("Restore " + p->name + "?",
-        "Clones " + p->restore.url + " into ~/" + p->rel + "/" + p->restore.app + " and checks that commit " +
-            p->restore.commit.substr(0, 7) + " is in its history. Build output and ignored files don't come back -- "
-            "build again after. (If the old copy is still in the Trash, Undo in Activity is the other way back.)",
-        "Restore " + p->name, {}, {});
-    if (auto lg = log::get(log::Area::Dev)) lg->info("restore preview '{}': {}", rel, p->restore.url);
+    m_dv_cf_push = true;
+    std::vector<std::string> warn = m_dv_push_plan.stays;
+    warn.push_back("A push can't be undone from Activity -- it only adds to " + p->repo.remote +
+                   "; nothing of yours on this computer changes. Never forced: if the remote moved on, it's refused.");
+    paint_dev_confirm("Push " + p->name + "?",
+        "Committed work in ~/" + p->rel + (p->app.empty() ? "" : "/" + p->app) + " that isn't on " + p->repo.remote +
+            " yet goes there now. Then Rouster asks the remote again.",
+        "Push " + p->name, m_dv_push_plan.what, warn);
+    if (auto lg = log::get(log::Area::Dev)) lg->info("push preview '{}': {} steps", rel, m_dv_push_plan.steps.size());
 }
 
 void Shell::on_dev_confirm() {  // handler: the preview's act button -> worker
+    if (m_dv_cf_push) {   // s020a: git push on a worker, then verify again
+        if (door_busy() || m_dv_worker.joinable() || m_dv_push_plan.steps.empty()) return;
+        if (m_dv_states.get_visible_child_name() != "confirm") return;
+        if (m_dv_act_worker.joinable()) m_dv_act_worker.join();
+        const auto* p = project_at(m_dv_shown, m_dv_cf_rel);
+        if (!p) return;
+        m_dv_acting = true;
+        if (m_act_dv_find) m_act_dv_find->set_enabled(false);
+        m_dv_run_big.set_text("Pushing");
+        m_dv_run_caption.set_text("To " + p->repo.remote + " (" + p->repo.host + "), then asking it again");
+        if (m_act_dv_cancel) m_act_dv_cancel->set_enabled(false);
+        m_dv_spinner.start();
+        m_dv_states.set_visible_child("running");
+        if (auto lg = log::get(log::Area::Dev)) lg->info("push '{}' -- go", m_dv_cf_rel);
+        const std::string repo_abs = m_home + "/" + p->rel + (p->app.empty() ? "" : "/" + p->app);
+        m_dv_act_worker = std::thread([this, plan = m_dv_push_plan, repo_abs] {
+            auto r = core::dev::push(repo_abs, plan);
+            {
+                std::lock_guard lk(m_dv_act_mx);
+                m_dv_pushed = std::move(r);
+            }
+            m_dev_acted.emit();
+        });
+        return;
+    }
     if (!m_door || door_busy() || m_dv_worker.joinable() || m_dv_plan.actions.empty()) return;
     if (m_dv_states.get_visible_child_name() != "confirm") return;   // only from the preview
     if (m_dv_act_worker.joinable()) m_dv_act_worker.join();
@@ -967,33 +981,36 @@ void Shell::on_dev_confirm() {  // handler: the preview's act button -> worker
         m_dv_cf_sub.set_text("Preflight has a red check -- nothing moves until it clears. See Preflight.");
         return;
     }
-    const auto* p = project_at(m_dv_shown, m_dv_cf_rel);
-    if (!p) return;
+    // Who is asked again: rel, repo folder, the commit on screen.
+    struct Ask { std::string name, abs, head; };
+    std::vector<Ask> asks;
+    for (const auto* p : core::dev::source_ticked(m_dv_shown.projects))
+        asks.push_back({p->name, m_home + "/" + p->repo_rel, p->repo.head});
     m_dv_plan.previewed = true;   // the confirm screen showed every step
     m_dv_acting = true;
     if (m_act_undo_action) m_act_undo_action->set_enabled(false);
     if (m_act_dv_find) m_act_dv_find->set_enabled(false);
-    m_dv_run_big.set_text(m_dv_cf_retire ? "Retiring" : "Restoring");
-    m_dv_run_caption.set_text(m_dv_cf_retire ? "Asking " + p->repo.remote + " once more, then moving"
-                                             : "Cloning from " + p->repo.host);
+    m_dv_run_big.set_text("Cleaning");
+    m_dv_run_caption.set_text(asks.empty() ? std::string("Moving to the Trash")
+                                           : "Asking the remote once more, then moving to the Trash");
     if (m_act_dv_cancel) m_act_dv_cancel->set_enabled(false);   // a half-run plan is the door's to finish
     m_dv_spinner.start();
     m_dv_states.set_visible_child("running");
-    if (auto lg = log::get(log::Area::Dev)) lg->info("{} '{}' -- go", m_dv_cf_retire ? "retire" : "restore", m_dv_cf_rel);
+    if (auto lg = log::get(log::Area::Dev)) lg->info("clean -- go ({} asked again)", asks.size());
 
-    const std::string repo_abs = m_home + "/" + p->rel + "/" + p->app;
-    m_dv_act_worker = std::thread([this, plan = m_dv_plan, retire = m_dv_cf_retire, repo_abs, head = p->repo.head] {
+    m_dv_act_worker = std::thread([this, plan = m_dv_plan, asks] {
         core::door::Result r;
         std::string refused;
-        if (retire) {
-            const auto again = core::dev::verify(repo_abs);
+        for (const auto& a : asks) {
+            const auto again = core::dev::verify(a.abs);
             if (again.status != core::dev::Status::Backed) {
-                refused = std::string("it is no longer backed up (") + core::dev::status_name(again.status) + ")";
+                refused = a.name + " is no longer backed up (" + core::dev::status_name(again.status) + ")";
                 for (const auto& c : again.checks)
                     if (!c.ok) { refused += ": " + c.detail; break; }
-            } else if (again.head != head) {
-                refused = "it changed since you looked (now at " + again.head.substr(0, 7) + ") -- Look again";
+            } else if (again.head != a.head) {
+                refused = a.name + " changed since you looked (now at " + again.head.substr(0, 7) + ") -- Look again";
             }
+            if (!refused.empty()) break;
         }
         if (refused.empty()) r = door_run(plan);
         {
@@ -1005,11 +1022,44 @@ void Shell::on_dev_confirm() {  // handler: the preview's act button -> worker
     });
 }
 
-void Shell::on_dev_acted() {  // handler: retire / restore finished (Dispatcher -> UI thread)
+void Shell::on_dev_acted() {  // handler: clean / push finished (Dispatcher -> UI thread)
     if (m_dv_act_worker.joinable()) m_dv_act_worker.join();
     m_dv_acting = false;
     m_dv_spinner.stop();
     if (m_act_dv_find) m_act_dv_find->set_enabled(true);
+    if (m_dv_cf_push) {   // s020a
+        m_dv_cf_push = false;
+        core::dev::Pushed r;
+        {
+            std::lock_guard lk(m_dv_act_mx);
+            r = m_dv_pushed;
+        }
+        auto* p = const_cast<core::dev::Project*>(project_at(m_dv_shown, m_dv_cf_rel));
+        const std::string name = p ? p->name : m_dv_cf_rel;
+        if (p) p->repo = r.after;   // the card shows what the remote says now
+        std::string said;
+        for (const auto& s : r.said) said += (said.empty() ? "" : "; ") + s;
+        if (auto lg = log::get(log::Area::Dev))
+            lg->info("push '{}': {} -- now {}", m_dv_cf_rel, said, core::dev::status_name(r.after.status));
+        if (r.ok && r.after.status == core::dev::Status::Backed) {
+            m_dv_done_big.set_text("Pushed");
+            m_dv_done_caption.set_text(name + " is on " + r.after.remote + " (" + r.after.host + ") -- asked again, backed up.");
+        } else if (r.ok) {
+            std::string left;
+            for (const auto& c : r.after.checks) if (!c.ok) { left = c.name + ": " + c.detail; break; }
+            m_dv_done_big.set_text("Pushed");
+            m_dv_done_caption.set_text(name + " was pushed (" + said + "), but it still isn't all on " + r.after.remote +
+                                       (left.empty() ? "." : " -- " + left + "."));
+        } else {
+            m_dv_done_big.set_text("Not pushed");
+            m_dv_done_caption.set_text(name + ": " + (said.empty() ? std::string("nothing ran") : said) +
+                                       ". Nothing on this computer changed.");
+        }
+        m_dv_push_plan = {};
+        paint_dev();
+        m_dv_states.set_visible_child("done");
+        return;
+    }
     core::door::Result r;
     std::string refused;
     {
@@ -1017,36 +1067,28 @@ void Shell::on_dev_acted() {  // handler: retire / restore finished (Dispatcher 
         r = m_dv_act_result;
         refused = m_dv_act_refused;
     }
-    const auto* p = project_at(m_dv_shown, m_dv_cf_rel);
-    const std::string name = p ? p->name : m_dv_cf_rel;
+    std::uint64_t bytes = 0;
+    for (const auto& a : m_dv_plan.actions) bytes += a.bytes;
     if (auto lg = log::get(log::Area::Dev)) {
-        lg->info("{} '{}': {} done, {} failed{}", m_dv_cf_retire ? "retire" : "restore", m_dv_cf_rel, r.done, r.failed,
+        lg->info("clean '{}': {} done, {} failed{}", m_dv_plan.label, r.done, r.failed,
                  refused.empty() ? "" : " -- NOT RUN: " + refused);
         for (const auto& m : r.messages) lg->warn("  {}", m);
     }
     if (!refused.empty()) {
-        m_dv_done_big.set_text("Not retired");
-        m_dv_done_caption.set_text(name + " was left exactly as it was: " + refused + ".");
-    } else if (r.ok && m_dv_cf_retire) {
-        std::uint64_t bytes = 0;
-        for (const auto& a : m_dv_plan.actions) bytes += a.bytes;
-        const auto n = m_dv_plan.actions.size() - 2;
-        m_dv_done_big.set_text("Retired");
-        m_dv_done_caption.set_text(name + "'s working copy" + (n ? " and " + std::to_string(n) + " old backups" : std::string()) +
-            " went to the Trash (" + core::scan::human_bytes(bytes) + "); RESTORE.txt is in its place. "
-            "Restore brings it back from " + (p ? p->repo.host : std::string("its remote")) +
-            " in one click; Undo puts everything back now.");
+        m_dv_done_big.set_text("Nothing moved");
+        m_dv_done_caption.set_text("Every project was left exactly as it was: " + refused + ".");
     } else if (r.ok) {
-        m_dv_done_big.set_text("Restored");
-        m_dv_done_caption.set_text(name + " is back" + (p ? " from " + p->repo.host + " at " + p->restore.commit.substr(0, 7) : std::string()) +
-            ". RESTORE.txt went to the Trash. Build it again with build.sh. Undo sends the clone to the Trash.");
+        m_dv_done_big.set_text(core::scan::human_bytes(bytes));
+        m_dv_done_caption.set_text("went to the Trash -- " + std::to_string(r.done) + (r.done == 1 ? " item" : " items") +
+            ". Undo puts it all back now; git restore . brings a cleaned source back any time. "
+            "The space returns when you empty the Trash.");
     } else if (r.done == 0) {
         m_dv_done_big.set_text("Nothing moved");
         m_dv_done_caption.set_text(r.messages.empty() ? std::string("The door refused the plan.") : r.messages.front());
     } else {
         m_dv_done_big.set_text(std::to_string(r.done) + " of " + std::to_string(m_dv_plan.actions.size()));
-        m_dv_done_caption.set_text("steps happened; " + std::to_string(r.failed) + " could not: " +
-            (r.messages.empty() ? std::string("see Activity") : r.messages.front()) + ". Undo takes back what happened.");
+        m_dv_done_caption.set_text("went to the Trash; " + std::to_string(r.failed) + " could not: " +
+            (r.messages.empty() ? std::string("see Activity") : r.messages.front()) + ". Undo takes back what moved.");
     }
     m_dv_plan = {};
     m_dv_states.set_visible_child("done");
@@ -1061,7 +1103,7 @@ void Shell::on_dev_known(const std::string& rel, const std::string& name, bool a
     if (auto lg = log::get(log::Area::Dev)) lg->info("{} '{}' (from {})", add ? "known-optional" : "forgot", name, rel);
     // Re-lint every workspace on screen: a name is known everywhere.
     for (auto& p : m_dv_shown.projects)
-        if (p.kind == core::dev::Kind::Workspace && !p.retired) {
+        if (p.kind == core::dev::Kind::Workspace && !p.repo.cleaned) {
             p.drift = core::dev::lint(m_home + "/" + p.rel, p.app, m_known);
         }
     paint_dev();

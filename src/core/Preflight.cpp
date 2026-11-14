@@ -216,7 +216,7 @@ std::vector<Check> evaluate(const Inputs& in) {
         out.push_back(c);
     }
 
-    // 5. Repos are checked per project when one is retired (s006) -- no row
+    // 5. Repos are checked per project when its source is cleaned (s006; s020b) -- no row
     // until then: a green light for a check that does not run would be a lie.
     return out;
 }

@@ -172,7 +172,12 @@ expander title { color: #ffffff; }
 .dv-unsafe   { background-color: #f87171; }
 .dev-card:hover { background-color: rgba(255,255,255,0.08); }
 .drift-tag { font-size: 0.78em; font-weight: 700; min-width: 132px; }
-.dv-retired  { background-color: #94a3b8; }
+.dv-nogit    { background-color: #94a3b8; }
+/* s020b: Clean's three sections. */
+.dv-section { font-weight: 700; font-size: 0.82em; letter-spacing: 0.06em; margin-top: 10px; }
+.dv-section-clean { color: #4ade80; }
+.dv-section-nogit { color: #94a3b8; }
+.dv-section-red   { color: #f87171; }
 button.ghost.small { padding: 2px 12px; font-size: 0.88em; min-height: 0; }
 
 /* Duplicates (s008): a dot per group kind, the keeper chip, the mode switch. */

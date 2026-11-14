@@ -68,6 +68,11 @@ bool exists(const std::string& p) {
     struct stat st{};
     return ::lstat(p.c_str(), &st) == 0;
 }
+bool is_elf(const std::string& p) {   // a program built here (ELF magic)
+    std::ifstream in(p, std::ios::binary);
+    char m[4] = {};
+    return in.read(m, 4) && m[0] == 0x7f && m[1] == 'E' && m[2] == 'L' && m[3] == 'F';
+}
 std::vector<std::string> children(const std::string& p) {   // sorted names, no . / ..
     std::vector<std::string> v;
     DIR* d = ::opendir(p.c_str());
@@ -111,7 +116,6 @@ const char* status_name(Status s) {
         case Status::Unreachable: return "Can't reach remote";
         case Status::NoRemote:    return "No remote";
         case Status::NotRepo:     return "Not a repo";
-        case Status::Retired:     return "Retired";
     }
     return "?";
 }
@@ -153,10 +157,27 @@ Repo verify(const std::string& abs, const std::atomic<bool>* cancel) {
     {
         const auto st = lines(g({"status", "--porcelain=v1", "--untracked-files=all"}).out);
         std::vector<std::string> names;
-        for (const auto& l : st) names.push_back(l.size() > 3 ? l.substr(3) : l);
-        r.checks.push_back({"committed", st.empty(),
-                            st.empty() ? "nothing uncommitted or untracked"
-                                       : plural(st.size(), "change", "changes") + " not committed: " + listed(names)});
+        bool only_deleted = !st.empty();
+        for (const auto& l : st) {
+            names.push_back(l.size() > 3 ? l.substr(3) : l);
+            only_deleted = only_deleted && l.starts_with(" D ");
+        }
+        // s020b: Clean took the source -- EVERY tracked file deleted in the
+        // working tree (none staged), nothing else changed. Not a change of
+        // yours: the commit holds it all, `git restore .` brings it back.
+        // .gitignore files stay (Clean never takes them -- they keep ignored files ignored).
+        if (only_deleted) {
+            std::size_t kept = 0, n = 0;
+            for (const auto& t : lines(g({"ls-files"}).out)) {
+                ++n;
+                kept += t == ".gitignore" || t.ends_with("/.gitignore");
+            }
+            r.cleaned = n - kept == st.size();
+        }
+        r.checks.push_back({"committed", st.empty() || r.cleaned,
+                            st.empty()  ? "nothing uncommitted or untracked"
+                            : r.cleaned ? "source cleaned -- every file is in the last commit; git restore . brings it back"
+                                        : plural(st.size(), "change", "changes") + " not committed: " + listed(names)});
     }
     // stashes
     {
@@ -258,6 +279,76 @@ Repo verify(const std::string& abs, const std::atomic<bool>* cancel) {
 }
 
 // ── lint ───────────────────────────────────────────────────────────────────
+bool dirty(const Repo& r) {
+    for (const auto& c : r.checks) if (c.name == "committed") return !c.ok;
+    return false;
+}
+
+PushPlan push_plan(const Project& p) {
+    PushPlan pl;
+    const Repo& r = p.repo;
+    pl.remote = r.remote;
+    pl.host = r.host;
+    const auto check = [&](const char* n) -> const Check* {
+        for (const auto& c : r.checks) if (c.name == n) return &c;
+        return nullptr;
+    };
+    if (r.status == Status::Backed) { pl.why_not = "already on " + r.remote; return pl; }
+    if (r.status != Status::NotClean) { pl.why_not = std::string(status_name(r.status)) + (r.error.empty() ? "" : ": " + r.error); return pl; }
+    if (dirty(r)) { pl.why_not = "dirty -- uncommitted or untracked changes; look at it yourself"; return pl; }
+    if (r.branch.empty()) { pl.why_not = "detached HEAD -- check out a branch first"; return pl; }
+    if (r.head.empty()) { pl.why_not = "no commits yet"; return pl; }
+    const Check* pushed = check("pushed");
+    const Check* branches = check("branches");
+    const Check* tags = check("tags");
+    if (!pushed || !branches || !tags) { pl.why_not = "the remote wasn't reached"; return pl; }
+    if (pushed->detail.find("not fetched here") != std::string::npos) {
+        pl.why_not = r.remote + " has commits this copy hasn't fetched -- fetch and merge first";
+        return pl;
+    }
+    if (!pushed->ok || !branches->ok) {
+        pl.steps.push_back({"push", "--porcelain", r.remote, "--all"});
+        pl.what.push_back("Push every branch to " + r.remote + " (" + r.host + ")" +
+                          (pushed->ok ? "" : " -- " + pushed->detail) + (branches->ok ? "" : "; " + branches->detail));
+    }
+    if (!tags->ok) {
+        pl.steps.push_back({"push", "--porcelain", r.remote, "--tags"});
+        pl.what.push_back("Push the tags -- " + tags->detail);
+    }
+    if (const Check* st = check("stashes"); st && !st->ok) pl.stays.push_back(st->detail + " -- they stay here");
+    if (pl.steps.empty()) pl.why_not = "nothing to push";
+    return pl;
+}
+
+Pushed push(const std::string& abs, const PushPlan& plan, const std::atomic<bool>* cancel) {
+    Pushed out;
+    out.ok = !plan.steps.empty() && plan.why_not.empty();
+    for (const auto& s : plan.steps) {
+        if (cancel && cancel->load()) { out.ok = false; out.said.push_back("stopped"); break; }
+        const Run r = git(abs, s, 120, cancel);
+        const std::string what = s.back() == "--tags" ? "tags" : "branches";
+        if (r.code == 0) out.said.push_back(what + ": pushed");
+        else {
+            out.ok = false;
+            std::string why;
+            for (const auto& l : lines(r.out))   // porcelain: "!\t<from>:<to>\t[rejected] (fetch first)"
+                if (l.starts_with("!")) {
+                    const auto f = split(l, '\t');
+                    std::string ref = f.size() > 1 ? f[1].substr(f[1].find(':') + 1) : "";
+                    if (ref.starts_with("refs/heads/")) ref = ref.substr(11);
+                    else if (ref.starts_with("refs/tags/")) ref = "tag " + ref.substr(10);
+                    why = (ref.empty() ? "" : ref + ": ") + (f.size() > 2 ? f[2] : l);
+                    break;
+                }
+            if (r.timed_out) why = "no answer in 120 s";
+            else if (why.empty()) why = first_line(r.err);
+            out.said.push_back(what + ": " + (why.empty() ? "git push failed" : why));
+        }
+    }
+    out.after = verify(abs, cancel);
+    return out;
+}
+
 const char* tier_name(Tier t) {
     switch (t) {
         case Tier::Required: return "missing";
@@ -307,6 +398,7 @@ std::vector<Drift> lint(const std::string& abs, const std::string& app, const st
     for (const auto& c : children(a)) {
         if (c.starts_with(".") || c == "build") continue;
         const bool dir = is_dir(a + "/" + c);
+        if (!dir && is_elf(a + "/" + c)) continue;   // a program built here: build output, not the template's
         if (dir && (in(required_dirs(), c) || in(optional_dirs(), c))) continue;
         if (!dir && (in(required_files(), c) || in(known_files(), c) || c.ends_with(".code-workspace"))) continue;
         if (promoted(app + "/" + c, c, dir)) continue;
@@ -316,7 +408,6 @@ std::vector<Drift> lint(const std::string& abs, const std::string& app, const st
     for (const auto& c : children(abs)) {
         if (c.starts_with(".") || c == app) continue;
         if (c == "docs" || c == "scripts" || c == "backups" || c == "fixes" || c.ends_with(".code-workspace")) continue;
-        if (c == kRestoreFile) continue;
         const bool dir = is_dir(abs + "/" + c);
         if (promoted(c, c, dir)) continue;
         v.push_back({Tier::Unknown, c + (dir ? "/" : ""), c});
@@ -380,7 +471,12 @@ bool is_workspace(const std::string& abs, std::string& app) {
     std::vector<std::string> apps;
     for (const auto& c : children(abs)) {
         if (c.starts_with(".") || c == "docs" || c == "scripts" || c == "backups" || c == "fixes") continue;
-        if (is_dir(abs + "/" + c) && is_file(abs + "/" + c + "/CMakeLists.txt")) apps.push_back(c);
+        if (!is_dir(abs + "/" + c)) continue;
+        if (is_file(abs + "/" + c + "/CMakeLists.txt")) apps.push_back(c);
+        // s020b: its source cleaned -- only .git left, and git still tracks a CMakeLists.txt.
+        else if (exists(abs + "/" + c + "/.git") &&
+                 !trim(git(abs + "/" + c, {"ls-files", "--", "CMakeLists.txt"}, 20).out).empty())
+            apps.push_back(c);
     }
     if (apps.empty()) return false;
     app = apps.front();
@@ -391,8 +487,10 @@ bool is_workspace(const std::string& abs, std::string& app) {
 
 namespace {
 
+struct BuildDir_ { std::uint64_t bytes = 0, files = 0; };
+
 // du, one filesystem, no symlink followed.
-void measure(const std::string& abs, dev_t dev, int depth, BuildDir& b, scan::Progress& prog) {
+void measure(const std::string& abs, dev_t dev, int depth, BuildDir_& b, scan::Progress& prog) {
     if (depth > 24 || prog.cancel.load(std::memory_order_relaxed)) return;
     for (const auto& c : children(abs)) {
         struct stat st{};
@@ -406,41 +504,120 @@ void measure(const std::string& abs, dev_t dev, int depth, BuildDir& b, scan::Pr
     }
 }
 
-// A build-output candidate: a real folder (not a symlink), on the project's
-// filesystem, with nothing in it tracked by git.
-void consider(const std::string& home, const std::string& repo_abs, const std::string& abs, dev_t dev,
-              Project& p, scan::Progress& prog) {
+
+std::uint64_t size_of(const std::string& abs, scan::Progress& prog, std::uint64_t* files = nullptr) {   // du, one fs
     struct stat st{};
-    if (::lstat(abs.c_str(), &st) != 0 || !S_ISDIR(st.st_mode) || st.st_dev != dev) return;
-    if (!repo_abs.empty() && p.repo.status != Status::NotRepo) {
-        const std::string rel_in_repo = abs.substr(repo_abs.size() + 1);
-        const Run t = git(repo_abs, {"ls-files", "--", rel_in_repo}, 20, &prog.cancel);
-        if (t.code != 0 || !trim(t.out).empty()) return;   // tracked (or unknown): not build output
-    }
-    BuildDir b;
-    b.rel = abs.substr(home.size() + 1);
-    measure(abs, dev, 0, b, prog);
-    b.bytes += static_cast<std::uint64_t>(st.st_blocks) * 512u;
-    if (p.repo.status == Status::NoRemote || p.repo.status == Status::NotRepo) {
-        b.offered = b.checked = false;
-        b.note = "not backed up -- left alone";
-    }
-    p.builds.push_back(std::move(b));
+    if (::lstat(abs.c_str(), &st) != 0) return 0;
+    BuildDir_ b;
+    b.bytes = static_cast<std::uint64_t>(st.st_blocks) * 512u;
+    if (S_ISDIR(st.st_mode)) measure(abs, st.st_dev, 0, b, prog);
+    else b.files = 1;
+    if (files) *files += b.files;
+    return b.bytes;
 }
 
-void builds_of(const std::string& home, Project& p, scan::Progress& prog) {
+// A build-output folder: a real folder (not a symlink), on the project's
+// filesystem, with nothing in it tracked by git.
+bool build_dir(const std::string& repo_abs, const std::string& abs, dev_t dev, const Project& p, scan::Progress& prog) {
+    struct stat st{};
+    if (::lstat(abs.c_str(), &st) != 0 || !S_ISDIR(st.st_mode) || st.st_dev != dev) return false;
+    if (p.repo.status != Status::NotRepo) {
+        const std::string rel_in_repo = abs.substr(repo_abs.size() + 1);
+        const Run t = git(repo_abs, {"ls-files", "--", rel_in_repo}, 20, &prog.cancel);
+        if (t.code != 0 || !trim(t.out).empty()) return false;   // tracked (or unknown): not build output
+    }
+    return true;
+}
+
+void add(Row& row, const std::string& home, const std::string& abs, std::string why, scan::Progress& prog) {
+    Item it;
+    it.rel = abs.substr(home.size() + 1);
+    it.bytes = size_of(abs, prog, &row.files);
+    it.why = std::move(why);
+    row.bytes += it.bytes;
+    row.items.push_back(std::move(it));
+}
+
+void rows_of(const std::string& home, Project& p, scan::Progress& prog) {
     const std::string root = home + "/" + p.rel;
+    const std::string repo = home + "/" + p.repo_rel;
     struct stat st{};
     if (::lstat(root.c_str(), &st) != 0) return;
+    // s020c (Scott: "is it ready or not, with only one checkbox if it is"):
+    // only a ready project (Backed up) is offered, and nothing starts ticked.
+    const bool clean = p.group == Group::Clean;
+    const auto finish = [&](Row& r, bool) {
+        r.offered = clean;
+        r.checked = false;
+        if (!r.items.empty()) p.rows.push_back(std::move(r));
+    };
+
+    // Zips: every zip in backups/ and everything in backups/Old/ (workspaces).
     if (p.kind == Kind::Workspace) {
-        const std::string a = root + "/" + p.app;
-        consider(home, a, a + "/build", st.st_dev, p, prog);
-        for (const auto& lib : children(a + "/libs"))
-            consider(home, a, a + "/libs/" + lib + "/build", st.st_dev, p, prog);
-    } else {
-        for (const auto& c : children(root))
-            if (c == "build" || c.starts_with("cmake-build-"))
-                consider(home, root, root + "/" + c, st.st_dev, p, prog);
+        Row z;
+        z.part = Part::Zips;
+        for (const auto& c : children(root + "/backups"))
+            if (c.ends_with(".zip") && is_file(root + "/backups/" + c))
+                add(z, home, root + "/backups/" + c, "a session zip of " + p.name, prog);
+        for (const auto& c : children(root + "/backups/Old"))
+            add(z, home, root + "/backups/Old/" + c, "an old session backup of " + p.name + " (backups/Old)", prog);
+        z.note = plural(z.items.size(), "item", "items") + " in backups/ and backups/Old/";
+        finish(z, true);
+    }
+
+    // Build output: build/ folders, and binaries built here that git ignores.
+    std::vector<std::string> builds;   // relative to the repo
+    {
+        Row b;
+        b.part = Part::Build;
+        std::vector<std::string> cands;
+        if (p.kind == Kind::Workspace) {
+            cands.push_back("build");
+            for (const auto& lib : children(repo + "/libs")) cands.push_back("libs/" + lib + "/build");
+        } else {
+            for (const auto& c : children(repo))
+                if (c == "build" || c.starts_with("cmake-build-")) cands.push_back(c);
+        }
+        for (const auto& c : cands)
+            if (build_dir(repo, repo + "/" + c, st.st_dev, p, prog)) {
+                builds.push_back(c);
+                add(b, home, repo + "/" + c, "build output of " + p.name + " -- the next build makes it again", prog);
+            }
+        std::size_t bins = 0;
+        for (const auto& i : p.repo.ignored) {   // files only (a folder entry ends in '/')
+            if (i.ends_with("/") || !is_file(repo + "/" + i) || !is_elf(repo + "/" + i)) continue;
+            builds.push_back(i);
+            add(b, home, repo + "/" + i, "a program built from " + p.name + " -- git ignores it; the next build makes it again", prog);
+            ++bins;
+        }
+        b.note = plural(b.items.size() - bins, "build folder", "build folders") +
+                 (bins ? ", " + plural(bins, "binary", "binaries") : std::string());
+        finish(b, true);
+    }
+
+    // Source: everything in the repo folder but .git -- only when it is on the remote.
+    if (clean && !p.repo.cleaned) {
+        Row s;
+        s.part = Part::Source;
+        std::vector<std::string> top_ignored;
+        for (const auto& i : p.repo.ignored) {
+            const std::string n = i.ends_with("/") ? i.substr(0, i.size() - 1) : i;
+            if (std::find(builds.begin(), builds.end(), n) != builds.end()) continue;
+            const auto slash = n.find('/');
+            if (slash == std::string::npos) { top_ignored.push_back(n); s.stays.push_back(i); continue; }
+            bool under_build = false;
+            for (const auto& bd : builds) under_build = under_build || n.starts_with(bd + "/");
+            if (!under_build) s.leaves.push_back(i);
+        }
+        for (const auto& c : children(repo)) {
+            if (c == ".git" || c == ".gitignore" || c == "docs" || c == "scripts" || c == "fixes") continue;
+            if (std::find(builds.begin(), builds.end(), c) != builds.end()) continue;
+            if (std::find(top_ignored.begin(), top_ignored.end(), c) != top_ignored.end()) continue;
+            add(s, home, repo + "/" + c, p.name + "'s source -- on " + p.repo.host + " at " +
+                p.repo.head.substr(0, 7) + "; git restore . brings it back", prog);
+        }
+        s.note = "everything in " + (p.app.empty() ? p.name : p.app) + "/ but .git and .gitignore -- git restore . brings it back";
+        finish(s, false);
     }
 }
 
@@ -451,40 +628,29 @@ void walk(const std::string& home, const std::string& rel, dev_t dev, int depth,
     prog.dirs.fetch_add(1, std::memory_order_relaxed);
 
     std::string app;
-    if (RestoreInfo ri; is_retired(abs, ri)) {
-        Project p;
-        p.kind = Kind::Workspace;
-        p.rel = rel;
-        p.app = p.name = ri.app;
-        p.retired = true;
-        p.restore = ri;
-        p.repo.status = Status::Retired;
-        p.repo.url = ri.url;
-        p.repo.host = url_host(ri.url);
-        p.repo.branch = ri.branch;
-        p.repo.head = ri.commit;
-        if (is_dir(abs + "/fixes"))
-            if (const auto n = count_files(abs + "/fixes")) {
-                p.fixes_files = n;
-                p.drift.push_back({Tier::Note, "fixes/ holds " + plural(n, "file", "files") + " -- Rouster never touches it"});
-            }
-        f.projects.push_back(std::move(p));
-        prog.files.fetch_add(1);
-        return;
-    }
     if (is_workspace(abs, app)) {
         Project p;
         p.kind = Kind::Workspace;
         p.rel = rel;
         p.app = app;
         p.name = app;
+        p.repo_rel = rel + "/" + app;
         const std::string a = abs + "/" + app;
         if (exists(a + "/.git")) p.repo = verify(a, &prog.cancel);
         else { p.repo.status = Status::NotRepo; p.repo.error = app + "/ has no .git"; }
-        p.drift = lint(abs, app, known);
-        for (const auto& d : p.drift)
-            if (d.tier == Tier::Note && d.what.starts_with("fixes/")) p.fixes_files = count_files(abs + "/fixes");
-        builds_of(home, p, prog);
+        p.group = group_of(p.repo);
+        if (p.repo.cleaned) {   // nothing to lint: the source is on the remote
+            if (is_dir(abs + "/fixes"))
+                if (const auto n = count_files(abs + "/fixes")) {
+                    p.fixes_files = n;
+                    p.drift.push_back({Tier::Note, "fixes/ holds " + plural(n, "file", "files") + " -- Rouster never touches it"});
+                }
+        } else {
+            p.drift = lint(abs, app, known);
+            for (const auto& d : p.drift)
+                if (d.tier == Tier::Note && d.what.starts_with("fixes/")) p.fixes_files = count_files(abs + "/fixes");
+        }
+        rows_of(home, p, prog);
         f.projects.push_back(std::move(p));
         prog.files.fetch_add(1);
         return;
@@ -494,8 +660,10 @@ void walk(const std::string& home, const std::string& rel, dev_t dev, int depth,
         p.kind = Kind::Repo;
         p.rel = rel;
         p.name = rel.substr(rel.rfind('/') + 1);
+        p.repo_rel = rel;
         p.repo = verify(abs, &prog.cancel);
-        builds_of(home, p, prog);
+        p.group = group_of(p.repo);
+        rows_of(home, p, prog);
         f.projects.push_back(std::move(p));
         prog.files.fetch_add(1);
         return;
@@ -534,190 +702,101 @@ Found find(const std::string& home, scan::Progress& prog, const std::vector<std:
     return f;
 }
 
-door::Plan plan(const std::string& home, const std::vector<Project>& projects) {
+const char* group_name(Group g) {
+    switch (g) {
+        case Group::Clean:    return "Safe to clean";
+        case Group::NoGit:    return "No git -- review";
+        case Group::LookInto: return "Look into";
+    }
+    return "?";
+}
+Group group_of(const Repo& r) {
+    switch (r.status) {
+        case Status::Backed:   return Group::Clean;
+        case Status::NoRemote:
+        case Status::NotRepo:  return Group::NoGit;
+        default:               return Group::LookInto;
+    }
+}
+const char* part_name(Part p) {
+    switch (p) {
+        case Part::Zips:   return "Zips";
+        case Part::Build:  return "Build output";
+        case Part::Source: return "Source";
+    }
+    return "?";
+}
+const Row* row_of(const Project& p, Part part) {
+    for (const auto& r : p.rows) if (r.part == part) return &r;
+    return nullptr;
+}
+Row* row_of(Project& p, Part part) {
+    for (auto& r : p.rows) if (r.part == part) return &r;
+    return nullptr;
+}
+
+std::string why_red(const Project& p) {
+    if (p.group != Group::LookInto) return "";
+    const Repo& r = p.repo;
+    if (r.status == Status::Unreachable)
+        return "Couldn't reach " + r.remote + " (" + r.host + "): " + r.error + " -- unknown, so not offered.";
+    if (dirty(r)) {
+        for (const auto& c : r.checks)
+            if (c.name == "committed") return "Dirty -- " + c.detail + ". Rouster won't commit or push it; it's yours to look at.";
+    }
+    std::string why;
+    for (const auto& c : r.checks)
+        if (!c.ok) why += (why.empty() ? "" : "; ") + c.detail;
+    if (why.empty()) why = r.error.empty() ? std::string(status_name(r.status)) : r.error;
+    if (push_plan(p).why_not.empty()) {
+        bool stash = false;
+        for (const auto& c : r.checks) stash = stash || (c.name == "stashes" && !c.ok);
+        why += stash ? " -- Push... sends the commits; the stash stays here" : " -- Push... is all it needs";
+    }
+    return why + ".";
+}
+
+door::Plan clean_plan(const std::string& home, const std::vector<Project>& projects) {
     door::Plan p;
+    std::vector<std::string> froms;
     std::size_t n = 0;
     for (const auto& pr : projects) {
+        if (pr.group == Group::LookInto) continue;   // red: never, ticked or not
         bool any = false;
-        for (const auto& b : pr.builds) {
-            if (!b.offered || !b.checked) continue;
-            door::Action a;
-            a.verb = door::Verb::Trash;
-            a.from = home + "/" + b.rel;
-            a.reason = "build output of " + pr.name + " -- the next build makes it again";
-            a.bytes = b.bytes;
-            p.actions.push_back(std::move(a));
-            any = true;
+        for (const auto& row : pr.rows) {
+            if (!row.offered || !row.checked) continue;
+            if (row.part == Part::Source && pr.group != Group::Clean) continue;
+            for (const auto& it : row.items) {
+                door::Action a;
+                a.verb = door::Verb::Trash;
+                a.from = home + "/" + it.rel;
+                a.reason = it.why;
+                a.bytes = it.bytes;
+                p.actions.push_back(std::move(a));
+                any = true;
+            }
         }
         if (any) ++n;
     }
-    p.label = "Dev projects: build output of " + plural(n, "project", "projects");
+    // A folder going whole takes what is inside it: the inner action is left out.
+    std::vector<bool> inside(p.actions.size(), false);
+    for (std::size_t i = 0; i < p.actions.size(); ++i)
+        for (std::size_t j = 0; j < p.actions.size(); ++j)
+            if (i != j && p.actions[i].from.starts_with(p.actions[j].from + "/")) inside[i] = true;
+    std::vector<door::Action> kept;
+    for (std::size_t i = 0; i < p.actions.size(); ++i)
+        if (!inside[i]) kept.push_back(std::move(p.actions[i]));
+    p.actions = std::move(kept);
+    p.label = "Clean " + plural(n, "project", "projects");
     return p;
 }
 
-// ── retire / restore (s007b) ────────────────────────────────────────────────
-std::string restore_text(const RestoreInfo& r) {
-    std::string s;
-    s += "Rouster retired this project's working copy on " + r.retired + ".\n";
-    s += "Everything in it is on its remote; Rouster checked before it moved anything.\n";
-    s += "The working copy went to the Trash. To get it back: Rouster -> Dev projects ->\n";
-    s += "Restore (one click), or by hand, in this folder:\n\n";
-    s += "  git clone " + r.url + " " + r.app + (r.branch.empty() ? "" : " && git -C " + r.app + " checkout " + r.branch) + "\n\n";
-    s += "app: " + r.app + "\n";
-    s += "url: " + r.url + "\n";
-    s += "branch: " + r.branch + "\n";
-    s += "commit: " + r.commit + "\n";
-    s += "retired: " + r.retired + "\n";
-    return s;
-}
-
-bool parse_restore(const std::string& text, RestoreInfo& out) {
-    RestoreInfo r;
-    for (const auto& l : lines(text)) {
-        const auto c = l.find(": ");
-        if (c == std::string::npos || l.starts_with(" ")) continue;
-        const std::string k = l.substr(0, c), v = trim(l.substr(c + 2));
-        if (k == "app") r.app = v;
-        else if (k == "url") r.url = v;
-        else if (k == "branch") r.branch = v;
-        else if (k == "commit") r.commit = v;
-        else if (k == "retired") r.retired = v;
-    }
-    if (r.app.empty() || r.url.empty() || r.commit.empty() || r.app.find('/') != std::string::npos ||
-        r.app.starts_with("."))
-        return false;
-    out = r;
-    return true;
-}
-
-bool is_retired(const std::string& abs, RestoreInfo& out) {
-    if (!is_file(abs + "/docs/RULES.md") || !is_file(abs + "/" + kRestoreFile)) return false;
-    bool script = false;
-    for (const auto& c : children(abs + "/scripts")) script = script || c.ends_with("backup.sh");
-    if (!script) return false;
-    std::ifstream in(abs + "/" + kRestoreFile);
-    std::stringstream ss;
-    ss << in.rdbuf();
-    RestoreInfo r;
-    if (!parse_restore(ss.str(), r)) return false;
-    if (exists(abs + "/" + r.app)) return false;   // the app is back: a workspace again
-    out = r;
-    return true;
-}
-
-door::Plan retire_plan(const std::string& home, const Project& p, std::int64_t now, std::string& why_not,
-                       RetireView* view) {
-    door::Plan plan;
-    const std::string ws = home + "/" + p.rel;
-    if (p.kind != Kind::Workspace || p.retired) { why_not = "only a workspace can be retired"; return plan; }
-    if (p.repo.status != Status::Backed) {
-        why_not = std::string("it is not backed up (") + status_name(p.repo.status) + ") -- nothing is retired until it is";
-        return plan;
-    }
-    if (!is_dir(ws + "/" + p.app)) { why_not = p.app + "/ is not there"; return plan; }
-    if (exists(ws + "/" + kRestoreFile)) { why_not = std::string(kRestoreFile) + " is already there"; return plan; }
-
-    RestoreInfo ri;
-    ri.app = p.app;
-    ri.url = p.repo.url;
-    ri.branch = p.repo.branch;
-    ri.commit = p.repo.head;
-    {
-        std::time_t t = static_cast<std::time_t>(now);
-        std::tm tm{};
-        ::localtime_r(&t, &tm);
-        char buf[32];
-        std::strftime(buf, sizeof buf, "%Y-%m-%d %H:%M", &tm);
-        ri.retired = buf;
-    }
-    door::Action w;
-    w.verb = door::Verb::Write;
-    w.to = ws + "/" + kRestoreFile;
-    w.content = restore_text(ri);
-    w.reason = "how to get " + p.app + " back: " + ri.url + " at " + ri.commit.substr(0, 7);
-    w.bytes = w.content.size();
-    plan.actions.push_back(std::move(w));
-
-    door::Action wc;
-    wc.verb = door::Verb::Trash;
-    wc.from = ws + "/" + p.app;
-    wc.reason = "the working copy -- all of it is on " + p.repo.host;
-    {
-        scan::Progress pg;
-        BuildDir b;
-        struct stat st{};
-        if (::lstat(wc.from.c_str(), &st) == 0) measure(wc.from, st.st_dev, 0, b, pg);
-        wc.bytes = b.bytes;
-    }
-    plan.actions.push_back(std::move(wc));
-
-    for (const auto& c : children(ws + "/backups/Old")) {
-        door::Action a;
-        a.verb = door::Verb::Trash;
-        a.from = ws + "/backups/Old/" + c;
-        a.reason = "an old session backup -- the repo is verified clean";
-        struct stat st{};
-        if (::lstat(a.from.c_str(), &st) == 0) a.bytes = static_cast<std::uint64_t>(st.st_blocks) * 512u;
-        plan.actions.push_back(std::move(a));
-    }
-    // backups/: keep the newest zip (Q1), the rest go.
-    std::vector<std::pair<std::int64_t, std::string>> zips;
-    for (const auto& c : children(ws + "/backups")) {
-        struct stat st{};
-        const std::string z = ws + "/backups/" + c;
-        if (c.ends_with(".zip") && ::lstat(z.c_str(), &st) == 0 && S_ISREG(st.st_mode))
-            zips.emplace_back(static_cast<std::int64_t>(st.st_mtim.tv_sec), c);
-    }
-    std::sort(zips.begin(), zips.end(), std::greater<>());
-    for (std::size_t i = 1; i < zips.size(); ++i) {
-        door::Action a;
-        a.verb = door::Verb::Trash;
-        a.from = ws + "/backups/" + zips[i].second;
-        a.reason = "an older session zip -- the newest one stays";
-        struct stat st{};
-        if (::lstat(a.from.c_str(), &st) == 0) a.bytes = static_cast<std::uint64_t>(st.st_blocks) * 512u;
-        plan.actions.push_back(std::move(a));
-    }
-    if (view) {
-        view->keep.clear();
-        for (const auto& c : children(ws)) {
-            if (c == p.app || c == "backups") continue;
-            view->keep.push_back(c + (is_dir(ws + "/" + c) ? "/" : ""));
-        }
-        if (!zips.empty()) view->keep.push_back("backups/" + zips.front().second);
-        view->keep.push_back(std::string(kRestoreFile) + " (new)");
-        view->ignored.clear();
-        for (const auto& i : p.repo.ignored) {
-            const std::string n = i.ends_with("/") ? i.substr(0, i.size() - 1) : i;
-            const std::string last = n.substr(n.rfind('/') + 1);
-            if (last == "build" || last.starts_with("cmake-build-")) continue;
-            view->ignored.push_back(i);
-        }
-    }
-    plan.label = "Retire " + p.name;
-    return plan;
-}
-
-door::Plan restore_plan(const std::string& home, const Project& p, std::string& why_not) {
-    door::Plan plan;
-    if (!p.retired) { why_not = "it is not retired"; return plan; }
-    const std::string ws = home + "/" + p.rel;
-    door::Action c;
-    c.verb = door::Verb::Clone;
-    c.to = ws + "/" + p.restore.app;
-    c.url = p.restore.url;
-    c.branch = p.restore.branch;
-    c.commit = p.restore.commit;
-    c.reason = "clone " + p.restore.url + (p.restore.branch.empty() ? "" : " (" + p.restore.branch + ")") +
-               " -- it must contain " + p.restore.commit.substr(0, 7);
-    plan.actions.push_back(std::move(c));
-    door::Action t;
-    t.verb = door::Verb::Trash;
-    t.from = ws + "/" + kRestoreFile;
-    t.reason = "no longer needed once the working copy is back";
-    plan.actions.push_back(std::move(t));
-    plan.label = "Restore " + p.name;
-    return plan;
+std::vector<const Project*> source_ticked(const std::vector<Project>& projects) {
+    std::vector<const Project*> v;
+    for (const auto& pr : projects)
+        if (const Row* r = row_of(pr, Part::Source); r && pr.group == Group::Clean && r->offered && r->checked && !r->items.empty())
+            v.push_back(&pr);
+    return v;
 }
 
 }  // namespace rouster::core::dev

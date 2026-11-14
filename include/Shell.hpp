@@ -61,7 +61,7 @@
 //   "Where is the Sweep page?"           -> Shell_zones.cpp   (build_sweep_page: start / running / results / done)
 //   "Where does Sweep act?"              -> Shell_handlers.cpp (on_sweep_run -> m_door->run)
 //   "Where is the Dev projects page?"    -> Shell_zones.cpp   (build_dev_page); cards: Shell_helpers.cpp (paint_dev)
-//   "Where does the light clean act?"    -> Shell_handlers.cpp (on_dev_run -> m_door->run)
+//   "Where does Clean act?"              -> Shell_handlers.cpp (on_dev_run -> preview; on_dev_confirm -> worker -> door)
 //   "Where is the Duplicates page?"      -> Shell_zones.cpp   (build_dups_page); groups: Shell_helpers.cpp (paint_dups)
 //   "Where does Duplicates act?"         -> Shell_handlers.cpp (on_dups_run -> worker -> m_door->run)
 //   "Where is the Profile backup page?"  -> Shell_zones.cpp   (build_profile_page); rows: Shell_helpers.cpp (paint_profile)
@@ -113,11 +113,10 @@ private:
     void on_dev_find();                          // category: handler: find + verify the dev projects (worker)
     void on_dev_cancel();                        // category: handler: stop looking
     void on_dev_found();                         // category: handler: the worker finished (Dispatcher, UI thread)
-    void on_dev_run();                           // category: handler: the checked build dirs -> a plan -> the door
-    void on_dev_retire(const std::string& rel);  // category: handler: a card's Retire... -> the preview
-    void on_dev_restore(const std::string& rel); // category: handler: a card's Restore... -> the preview
+    void on_dev_run();                           // category: handler: s020b -- the ticked rows -> a plan -> the preview
+    void on_dev_push(const std::string& rel);    // category: handler: s020a -- a card's Push... -> the preview
     void on_dev_confirm();                       // category: handler: the preview's act button -> worker (verify again, door)
-    void on_dev_acted();                         // category: handler: retire / restore finished (Dispatcher, UI thread)
+    void on_dev_acted();                         // category: handler: clean / push finished (Dispatcher, UI thread)
     void on_dev_known(const std::string& rel, const std::string& name, bool add);  // category: handler: promote / forget a lint name
     void on_dups_find();                         // category: handler: look for duplicates (worker)
     void on_dups_cancel();                       // category: handler: stop looking
@@ -174,7 +173,7 @@ private:
     void paint_dev();                            // category: helper: one card per project: verdict, checks, lint, build rows
     void dev_gate();                             // category: helper: the light-clean button's label + whether it may act
     void paint_dev_confirm(const std::string& title, const std::string& sub, const std::string& go,
-                           const std::vector<std::string>& keep, const std::vector<std::string>& warn);  // category: helper: the retire / restore preview
+                           const std::vector<std::string>& keep, const std::vector<std::string>& warn);  // category: helper: the clean / push preview
     void stop_dups();                            // category: helper: cancel + join (close, dtor)
     bool tick_dups();                            // category: helper: the live counters while looking
     void dups_preset();                          // category: helper: checks for the mode; nothing unshown stays checked
@@ -188,7 +187,7 @@ private:
     void paint_profile_restore();                // category: helper: the restore preview -- files by state, diffs, commands
     void profile_restore_gate();                 // category: helper: the restore button's label + whether it may act                         // category: helper: the act button's label + whether it may act
     core::door::Result door_run(const core::door::Plan& plan);   // category: helper: s019d -- tidylink::guard, then the door (the app's only Door::run)
-    bool door_busy() const;                      // category: helper: a retire / restore owns the door right now
+    bool door_busy() const;                      // category: helper: a clean / duplicates / profile / system run owns the door right now
     void go_to(const std::string& page);         // category: helper: select a module's sidebar row
     void note_recent(const std::string& path);   // category: helper: push onto the list + persist
     void rebuild_recents_menu();                 // category: helper: repaint the submenu
@@ -266,10 +265,10 @@ private:
     widgets::Label   m_dv_run_big;
     widgets::Label   m_dv_run_caption;
     widgets::Button  m_dv_cancel;
-    widgets::Label   m_dv_big;        // the checked build output
+    widgets::Label   m_dv_big;        // the ticked total
     widgets::Label   m_dv_caption;
     widgets::Box     m_dv_list;       // one card per project
-    widgets::Button  m_dv_go;         // "Move 1.2 GB of build output to the Trash"
+    widgets::Button  m_dv_go;         // "Clean 1.2 GB…" -> the preview
     widgets::Label   m_dv_gate;
     widgets::Label   m_dv_done_big;
     widgets::Label   m_dv_done_caption;
@@ -281,15 +280,17 @@ private:
     core::dev::Found                      m_dv_found;   // written by the worker, read after done
     sigc::connection                      m_dv_tick;
     Glib::RefPtr<Gio::SimpleAction>       m_act_dv_find, m_act_dv_cancel, m_act_dv_run;
-    // Retire / restore (s007b): the preview ("confirm" state), then a worker
-    // that owns the door until it is done (a clone takes the network's time).
+    // Clean (s020b) / push (s020a): the preview ("confirm" state), then a worker
+    // that owns the door until it is done (Clean asks the remote once more).
     widgets::Label   m_dv_cf_title;
     widgets::Label   m_dv_cf_sub;
     widgets::Box     m_dv_cf_list;    // the plan, step by step -- the preview
     widgets::Button  m_dv_cf_go;
     core::door::Plan m_dv_plan;       // what the preview shows, and exactly what runs
     std::string      m_dv_cf_rel;     // the project it is for
-    bool             m_dv_cf_retire = true;
+    bool             m_dv_cf_push = false;    // s020a: the preview is a push (git, not the door)
+    core::dev::PushPlan m_dv_push_plan;
+    core::dev::Pushed   m_dv_pushed;          // worker -> UI (m_dv_act_mx)
     bool             m_dv_acting = false;   // UI thread: the act worker owns m_door
     Glib::Dispatcher m_dev_acted;
     std::thread      m_dv_act_worker;

@@ -298,7 +298,7 @@ bool make_dev_fixture(const fs::path& home, const fs::path& remotes) {
     ok &= put(ws, "fixes/patch.diff", 200);
     ok &= put(ws, "rouster/CMakeLists.txt", 0);
     { std::ofstream(ws / "rouster/CMakeLists.txt") << "project(rouster)\nset(APP_ID io.github.scott8420.Rouster)\n"; }
-    { std::ofstream(ws / "rouster/.gitignore") << "build/\n*.local\n"; }
+    { std::ofstream(ws / "rouster/.gitignore") << "build/\n*.local\n/rouster-bin\n"; }
     ok &= put(ws, "rouster/build.sh", 50);
     ok &= put(ws, "rouster/include/a.hpp", 50);
     ok &= put(ws, "rouster/src/main.cpp", 300);
@@ -308,8 +308,9 @@ bool make_dev_fixture(const fs::path& home, const fs::path& remotes) {
     ok &= put(ws, "rouster/build/obj/main.o", 90000);
     ok &= put(ws, "rouster/libs/foo/build/foo.o", 30000);
     ok &= put(ws, "rouster/.secrets.local", 20);                    // ignored, not build output (s007b)
-    ok &= put(ws, "backups/s001_a.zip", 3000);                       // older: retire thins it
-    ok &= put(ws, "backups/s002_b.zip", 3000);                       // newest: retire keeps it (Q1)
+    ok &= put_bytes(ws, "rouster/rouster-bin", std::string("\x7f" "ELF") + std::string(4000, 'x'));   // s020b: an ignored binary
+    ok &= put(ws, "backups/s001_a.zip", 3000);                       // s020b: Clean takes every zip
+    ok &= put(ws, "backups/s002_b.zip", 3000);
     ok &= put(ws, "backups/Old/s000_z.zip", 3000);
     {
         struct timespec ts[2] = {{1700000000, 0}, {1700000000, 0}};
@@ -1756,156 +1757,162 @@ int main(int argc, char** argv) {
               has(bk, dv::Tier::Unknown, "baker/notes/") && has(bk, dv::Tier::Unknown, "stray.txt") &&
               !has(bk, dv::Tier::Unknown, "build"));
 
-        // Build output.
-        const auto build = [](const dv::Project* p, const std::string& rel) -> const dv::BuildDir* {
-            if (!p) return nullptr;
-            for (const auto& b : p->builds) if (b.rel == rel) return &b;
-            return nullptr;
+        // -- Clean (s020b): groups, rows, one plan, asked again, undo ------------
+        const auto row = [](const dv::Project* p, dv::Part part) -> const dv::Row* { return p ? dv::row_of(*p, part) : nullptr; };
+        const auto has_item = [&](const dv::Row* r, const std::string& rel) {
+            if (!r) return false;
+            for (const auto& i : r->items) if (i.rel == rel) return true;
+            return false;
         };
-        const auto* b1 = build(rw, "Develop/rouster_ws/rouster/build");
-        const auto* b2 = build(rw, "Develop/rouster_ws/rouster/libs/foo/build");
-        const auto* b3 = build(sl, "Develop/slate/build");
-        check("dev: build output -- <app>/build and libs/*/build, offered, pre-checked, measured",
-              b1 && b2 && b1->offered && b1->checked && b2->offered && b2->checked && b1->bytes >= 90000 && b2->bytes >= 30000 &&
-              b1->bytes == du(home / "Develop/rouster_ws/rouster/build").bytes,
-              b1 ? std::to_string(b1->bytes) + " vs du " + std::to_string(du(home / "Develop/rouster_ws/rouster/build").bytes) : "");
-        check("dev: no remote -> its build/ is shown, never offered", b3 && !b3->offered && !b3->checked && !b3->note.empty());
-        check("dev: a build/ git tracks is not build output", bk && bk->builds.empty());
+        const std::string WS = "Develop/rouster_ws/";
+        check("clean: groups -- rouster_ws safe to clean; slate no git; baker and the unreachable one look into",
+              rw && rw->group == dv::Group::Clean && sl && sl->group == dv::Group::NoGit && bk &&
+              bk->group == dv::Group::LookInto && sc && sc->group == dv::Group::LookInto && rw->repo_rel == WS + "rouster");
+        const auto *z = row(rw, dv::Part::Zips), *bd = row(rw, dv::Part::Build), *src = row(rw, dv::Part::Source);
+        check("clean: Zips -- every zip in backups/ and everything in backups/Old/; offered, nothing pre-ticked",
+              z && z->items.size() == 3 && has_item(z, WS + "backups/s001_a.zip") && has_item(z, WS + "backups/s002_b.zip") &&
+              has_item(z, WS + "backups/Old/s000_z.zip") && z->offered && !z->checked && z->bytes >= 9000);
+        check("clean: Build output -- build/, libs/*/build and the ignored binary (not the ignored .local); offered; measured",
+              bd && bd->items.size() == 3 && has_item(bd, WS + "rouster/build") && has_item(bd, WS + "rouster/libs/foo/build") &&
+              has_item(bd, WS + "rouster/rouster-bin") && !has_item(bd, WS + "rouster/.secrets.local") && bd->offered && !bd->checked &&
+              bd->items[0].bytes == du(home / "Develop/rouster_ws/rouster/build").bytes,
+              bd ? bd->note : "");
+        {
+            bool ok_items = src && src->items.size() == 7;
+            for (const char* n : {"CMakeLists.txt", "build.sh", "include", "src", "resources", "data", "libs"})
+                ok_items = ok_items && has_item(src, WS + "rouster/" + n);
+            for (const char* n : {".git", ".gitignore", "build", ".secrets.local", "rouster-bin"})
+                ok_items = ok_items && !has_item(src, WS + "rouster/" + n);
+            check("clean: Source -- everything in rouster/ but .git, .gitignore, the build output, the ignored file; offered, NOT ticked",
+                  ok_items && src->offered && !src->checked && src->stays == std::vector<std::string>{".secrets.local"} &&
+                  src->leaves.empty(), src ? std::to_string(src->items.size()) + " items" : "no row");
+        }
+        check("clean: no git -> not ready: listed, nothing offered, never a Source row (s020c)",
+              row(sl, dv::Part::Build) && !row(sl, dv::Part::Build)->offered && !row(sl, dv::Part::Build)->checked &&
+              !row(sl, dv::Part::Source));
+        {
+            bool none = true;
+            for (const auto* p : {bk, sc, st}) if (p) for (const auto& r : p->rows) none = none && !r.offered && !r.checked;
+            check("clean: look into -> nothing offered; one line why", none && bk && dv::why_red(*bk).starts_with("Dirty") &&
+                  sc && dv::why_red(*sc).starts_with("Couldn't reach") && st && dv::why_red(*st).find("fetch") != std::string::npos &&
+                  dv::why_red(*rw).empty(), bk ? dv::why_red(*bk) : "");
+        }
+        check("clean: a build/ git tracks is not build output", !row(bk, dv::Part::Build));
+        {
+            bool never = true;
+            for (const auto& p : f.projects)
+                for (const auto& r : p.rows)
+                    for (const auto& i : r.items)
+                        for (const char* bad : {"/docs", "/scripts", "/fixes", "/.git"})
+                            if (i.rel.ends_with(bad) || i.rel.find(std::string(bad) + "/") != std::string::npos) never = false;
+            check("clean: docs/, scripts/, fixes/ and .git are in no row", never);
+        }
 
-        // Plan, door, undo.
-        dr::Plan p = dv::plan(H, f.projects);
-        bool shape = p.actions.size() == 2 && !p.previewed && p.label == "Dev projects: build output of 1 project";
-        for (const auto& a : p.actions) shape &= a.verb == dr::Verb::Trash && a.from.rfind(H + "/Develop/rouster_ws/rouster/", 0) == 0;
-        check("dev: the plan is the offered + checked build dirs, as Trash, unpreviewed", shape, p.label);
+        check("clean: nothing starts ticked -- the default plan is empty", dv::clean_plan(H, f.projects).actions.empty());
+        // The plan: rouster_ws's zips + build output ticked.
+        dv::Found f0 = f;
+        for (auto& pr : f0.projects)
+            for (auto& rr : pr.rows) rr.checked = rr.offered && pr.rel == "Develop/rouster_ws" && rr.part != dv::Part::Source;
+        dr::Plan p = dv::clean_plan(H, f0.projects);
+        bool shape = p.actions.size() == 6 && !p.previewed && p.label == "Clean 1 project";
+        for (const auto& a : p.actions) shape &= a.verb == dr::Verb::Trash && a.from.rfind(H + "/" + WS, 0) == 0;
+        check("clean: the plan -- the ticked rows as Trash, unpreviewed", shape, p.label + " " + std::to_string(p.actions.size()));
         {
             dv::Found g = f;
-            for (auto& pr : g.projects) for (auto& b : pr.builds) b.checked = true;   // even ticked, slate's stays out
-            check("dev: an un-offered dir never reaches the plan, even checked", dv::plan(H, g.projects).actions.size() == 2);
+            for (auto& pr : g.projects) for (auto& r : pr.rows) r.checked = true;   // tick everything, red too
+            const auto all = dv::clean_plan(H, g.projects);
+            bool red_out = true, nested_out = true, src_in = false;
+            std::set<std::string> seen;
+            for (const auto& a : all.actions) {
+                red_out = red_out && a.from.find("/baker") == std::string::npos && a.from.find("/scratch") == std::string::npos &&
+                          a.from.find("/stale") == std::string::npos;
+                nested_out = nested_out && a.from != H + "/" + WS + "rouster/libs/foo/build" && seen.insert(a.from).second;
+                src_in = src_in || a.from == H + "/" + WS + "rouster/src";
+            }
+            check("clean: all ticked -- not ready never planned; a build folder inside a Source folder isn't planned twice",
+                  red_out && nested_out && src_in && all.actions.size() == 3 + 2 + 7 + 1 && all.label == "Clean 2 projects" &&
+                  std::none_of(all.actions.begin(), all.actions.end(), [](auto& a) { return a.from.find("/slate") != std::string::npos; }),
+                  std::to_string(all.actions.size()));
+            const auto asked = dv::source_ticked(g.projects);
+            check("clean: only safe-to-clean projects' Source is asked again (rouster_ws, behind)",
+                  asked.size() == 2 && asked[0]->rel == "Develop/behind" && asked[1]->rel == "Develop/rouster_ws");
         }
         fs::create_directories(home / ".local/share/Trash/files", ec);   // a real home has one
         fs::create_directories(home / ".local/share/Trash/info", ec);
+        const auto outside_trash = [](const std::string& snap) {
+            std::istringstream in(snap);
+            std::string out;
+            for (std::string l; std::getline(in, l);)
+                if (l.find("/.local/share/Trash") == std::string::npos) out += l + "\n";
+            return out;
+        };
         const std::string files_before = files_snapshot(home);
         dr::Door door(H, H + "/.local/share/rouster");
         door.load();
-        check("dev: the door refuses it unpreviewed", !door.run(p).ok && files_snapshot(home) == files_before);
+        check("clean: the door refuses it unpreviewed", !door.run(p).ok && files_snapshot(home) == files_before);
         p.previewed = true;
         const auto r = door.run(p);
-        check("dev: light clean -- both build dirs in the Trash, the sources stay",
-              r.ok && r.done == 2 && !fs::exists(home / "Develop/rouster_ws/rouster/build") &&
-              !fs::exists(home / "Develop/rouster_ws/rouster/libs/foo/build") &&
-              fs::exists(home / ".local/share/Trash/files/build") && fs::exists(home / "Develop/rouster_ws/rouster/src/main.cpp") &&
-              fs::exists(home / "Develop/rouster_ws/fixes/patch.diff"),
+        check("clean: run -- zips and build output in the Trash; source, docs, scripts, fixes stay",
+              r.ok && r.done == 6 && !fs::exists(home / "Develop/rouster_ws/rouster/build") &&
+              !fs::exists(home / "Develop/rouster_ws/rouster/libs/foo/build") && !fs::exists(home / "Develop/rouster_ws/rouster/rouster-bin") &&
+              !fs::exists(home / "Develop/rouster_ws/backups/s002_b.zip") && fs::is_empty(home / "Develop/rouster_ws/backups/Old") &&
+              fs::exists(home / "Develop/rouster_ws/rouster/src/main.cpp") && fs::exists(home / "Develop/rouster_ws/fixes/patch.diff") &&
+              fs::exists(home / "Develop/rouster_ws/docs/RULES.md") && fs::exists(home / "Develop/rouster_ws/scripts/rouster_backup.sh"),
               r.messages.empty() ? "" : r.messages.front());
         {
             core::scan::Progress pg;
             const dv::Found after = dv::find(H, pg);
             const dv::Project* a = nullptr;
             for (const auto& x : after.projects) if (x.rel == "Develop/rouster_ws") a = &x;
-            check("dev: ...and the repo is still Backed after the clean", a && a->repo.status == dv::Status::Backed && a->builds.empty());
+            check("clean: ...still Backed up; only Source left to offer",
+                  a && a->repo.status == dv::Status::Backed && a->rows.size() == 1 && a->rows[0].part == dv::Part::Source);
         }
         const auto u = door.undo();
-        {
-            const std::string now_s = files_snapshot(home);
-            std::string diff;
-            std::istringstream a(files_before), b(now_s);
-            std::set<std::string> sa, sb;
-            for (std::string l; std::getline(a, l);) sa.insert(l);
-            for (std::string l; std::getline(b, l);) sb.insert(l);
-            for (const auto& l : sa) if (!sb.count(l)) { diff = "-" + l; break; }
-            if (diff.empty()) for (const auto& l : sb) if (!sa.count(l)) { diff = "+" + l; break; }
-            check("dev: undo puts the build output back exactly", u.ok && now_s == files_before,
-                  std::to_string(u.done) + " back " + diff);
-        }
+        check("clean: undo puts it all back exactly", u.ok && files_snapshot(home) == files_before, std::to_string(u.done) + " back");
 
-        // -- Retire / restore (s007b) ------------------------------------------
+        // Source: ticked alone -> only .git (and what git ignores) stays in the app folder.
         {
-            const auto outside_trash = [](const std::string& snap) {
-                std::istringstream in(snap);
-                std::string out;
-                for (std::string l; std::getline(in, l);)
-                    if (l.find("/.local/share/Trash") == std::string::npos) out += l + "\n";
-                return out;
-            };
-            core::scan::Progress pg;
-            const dv::Found f1 = dv::find(H, pg);
-            const dv::Project *rp = nullptr, *bp = nullptr;
-            for (const auto& x : f1.projects) {
-                if (x.rel == "Develop/rouster_ws") rp = &x;
-                if (x.rel == "Develop/baker") bp = &x;
-            }
-            std::string why;
-            check("retire: a workspace that is not clean is never retired",
-                  bp && dv::retire_plan(H, *bp, 2000000000, why).actions.empty() && !why.empty(), why);
-            dv::RetireView view;
-            why.clear();
-            dr::Plan rt = rp ? dv::retire_plan(H, *rp, 2000000000, why, &view) : dr::Plan{};
-            const auto act = [&](std::size_t i) -> const dr::Action* { return i < rt.actions.size() ? &rt.actions[i] : nullptr; };
-            const auto in_view = [](const std::vector<std::string>& v, const std::string& s) {
-                return std::find(v.begin(), v.end(), s) != v.end();
-            };
-            check("retire: the plan -- write RESTORE.txt, Trash the app, backups/Old's items, all zips but the newest",
-                  rt.actions.size() == 4 && act(0)->verb == dr::Verb::Write && act(0)->to == H + "/Develop/rouster_ws/RESTORE.txt" &&
-                  act(1)->verb == dr::Verb::Trash && act(1)->from == H + "/Develop/rouster_ws/rouster" &&
-                  act(2)->from == H + "/Develop/rouster_ws/backups/Old/s000_z.zip" &&
-                  act(3)->from == H + "/Develop/rouster_ws/backups/s001_a.zip" && !rt.previewed && rt.label == "Retire rouster",
-                  why.empty() ? std::to_string(rt.actions.size()) + " actions" : why);
-            check("retire: keeps docs/, scripts/, fixes/, the newest zip; warns of the ignored file, not of build/",
-                  in_view(view.keep, "docs/") && in_view(view.keep, "scripts/") && in_view(view.keep, "fixes/") &&
-                  in_view(view.keep, "backups/s002_b.zip") && in_view(view.ignored, ".secrets.local") &&
-                  !in_view(view.ignored, "build/") && !in_view(view.ignored, "libs/foo/build/"));
-            dv::RestoreInfo ri;
-            check("retire: RESTORE.txt reads back -- app, url, branch, the exact commit",
-                  act(0) && dv::parse_restore(act(0)->content, ri) && ri.app == "rouster" && ri.branch == "main" &&
-                  rp && ri.commit == rp->repo.head && ri.url == rp->repo.url && act(0)->content.find("git clone ") != std::string::npos);
-
             const std::string pre = outside_trash(files_snapshot(home));
+            core::scan::Progress pg;
+            dv::Found g = dv::find(H, pg);
+            for (auto& pr : g.projects)
+                for (auto& rr : pr.rows) rr.checked = pr.rel == "Develop/rouster_ws" && rr.part == dv::Part::Source;
+            dr::Plan sp = dv::clean_plan(H, g.projects);
+            sp.previewed = true;
             dr::Door door2(H, H + "/.local/share/rouster");
             door2.load();
-            rt.previewed = true;
-            const auto r1 = door2.run(rt);
-            check("retire: run -- the app is gone, RESTORE.txt is there, docs / scripts / fixes / newest zip stay",
-                  r1.ok && r1.done == 4 && !fs::exists(home / "Develop/rouster_ws/rouster") &&
-                  fs::exists(home / "Develop/rouster_ws/RESTORE.txt") && fs::exists(home / "Develop/rouster_ws/docs/RULES.md") &&
-                  fs::exists(home / "Develop/rouster_ws/fixes/patch.diff") && fs::exists(home / "Develop/rouster_ws/backups/s002_b.zip") &&
-                  !fs::exists(home / "Develop/rouster_ws/backups/s001_a.zip") && fs::is_empty(home / "Develop/rouster_ws/backups/Old"),
-                  r1.messages.empty() ? "" : r1.messages.front());
+            const auto r2 = door2.run(sp);
+            std::vector<std::string> left;
+            for (const auto& e : fs::directory_iterator(home / "Develop/rouster_ws/rouster")) left.push_back(e.path().filename().string());
+            std::sort(left.begin(), left.end());
+            check("clean: Source -- the app folder keeps .git, .gitignore, build/ and what git ignores; docs, scripts, backups stay",
+                  r2.ok && r2.done == 7 && left == std::vector<std::string>{".git", ".gitignore", ".secrets.local", "build", "rouster-bin"} &&
+                  fs::exists(home / "Develop/rouster_ws/docs/RULES.md") && fs::exists(home / "Develop/rouster_ws/backups/s002_b.zip"),
+                  [&] { std::string o; for (auto& x : left) o += x + " "; return o; }());
             core::scan::Progress pg2;
             const dv::Found f2 = dv::find(H, pg2);
-            const dv::Project* gone = nullptr;
-            for (const auto& x : f2.projects) if (x.rel == "Develop/rouster_ws") gone = &x;
-            check("retire: find sees a Retired workspace, its RESTORE.txt read",
-                  gone && gone->retired && gone->repo.status == dv::Status::Retired && gone->restore.commit == ri.commit &&
-                  gone->name == "rouster" && gone->builds.empty() && gone->fixes_files == 1);
-            why.clear();
-            check("retire: a retired workspace is not retired twice", gone && dv::retire_plan(H, *gone, 0, why).actions.empty());
-
-            why.clear();
-            dr::Plan rs = gone ? dv::restore_plan(H, *gone, why) : dr::Plan{};
-            check("restore: the plan -- Clone into rouster/ at the recorded branch + commit, Trash RESTORE.txt",
-                  rs.actions.size() == 2 && rs.actions[0].verb == dr::Verb::Clone &&
-                  rs.actions[0].to == H + "/Develop/rouster_ws/rouster" && rs.actions[0].commit == ri.commit &&
-                  rs.actions[0].branch == "main" && rs.actions[1].from == H + "/Develop/rouster_ws/RESTORE.txt" &&
-                  rs.label == "Restore rouster", why);
-            rs.previewed = true;
-            const auto r2 = door2.run(rs);
-            const auto head = dv::git(H + "/Develop/rouster_ws/rouster", {"rev-parse", "HEAD"}, 10);
-            check("restore: run -- the working copy is back at the commit, RESTORE.txt gone",
-                  r2.ok && r2.done == 2 && head.out.rfind(ri.commit, 0) == 0 &&
-                  fs::exists(home / "Develop/rouster_ws/rouster/src/main.cpp") && !fs::exists(home / "Develop/rouster_ws/RESTORE.txt"),
-                  r2.messages.empty() ? head.out : r2.messages.front());
-            core::scan::Progress pg3;
-            const dv::Found f3 = dv::find(H, pg3);
-            const dv::Project* back = nullptr;
-            for (const auto& x : f3.projects) if (x.rel == "Develop/rouster_ws") back = &x;
-            check("restore: and it is Backed up again", back && back->repo.status == dv::Status::Backed && !back->retired,
-                  back ? std::string(dv::status_name(back->repo.status)) : "");
+            const dv::Project* c = nullptr;
+            for (const auto& x : f2.projects) if (x.rel == "Develop/rouster_ws") c = &x;
+            check("clean: a cleaned workspace is still found -- Backed up, 'source cleaned', not Dirty, no Source row",
+                  c && c->kind == dv::Kind::Workspace && c->repo.status == dv::Status::Backed && c->repo.cleaned &&
+                  c->group == dv::Group::Clean && !dv::dirty(c->repo) && !row(c, dv::Part::Source) && row(c, dv::Part::Zips),
+                  c ? std::string(dv::status_name(c->repo.status)) : "not found");
             const auto u2 = door2.undo();
-            check("restore: undo -- the clone goes to the Trash, RESTORE.txt comes back",
-                  u2.ok && !fs::exists(home / "Develop/rouster_ws/rouster") && fs::exists(home / "Develop/rouster_ws/RESTORE.txt"),
-                  u2.messages.empty() ? "" : u2.messages.front());
-            const auto u1 = door2.undo();
-            check("retire: undo -- everything back exactly (outside the Trash)",
-                  u1.ok && outside_trash(files_snapshot(home)) == pre, u1.messages.empty() ? "" : u1.messages.front());
+            check("clean: undo -- the source back exactly (outside the Trash)", u2.ok && outside_trash(files_snapshot(home)) == pre);
+
+            // Again, then git restore . -- the other way back.
+            sp = dv::clean_plan(H, g.projects);
+            sp.previewed = true;
+            const auto r3 = door2.run(sp);
+            const bool restored = sh(H + "/Develop/rouster_ws/rouster", "git restore .");
+            const auto back = dv::verify(H + "/Develop/rouster_ws/rouster");
+            check("clean: git restore . brings the source back -- Backed up, not cleaned",
+                  r3.ok && restored && fs::exists(home / "Develop/rouster_ws/rouster/src/main.cpp") &&
+                  back.status == dv::Status::Backed && !back.cleaned);
+            fs::remove(home / "Develop/rouster_ws/rouster/src/main.cpp", ec);
+            const auto one = dv::verify(H + "/Develop/rouster_ws/rouster");
+            check("clean: one file deleted by hand is Dirty, not 'cleaned'", !one.cleaned && dv::dirty(one) && one.status == dv::Status::NotClean);
+            sh(H + "/Develop/rouster_ws/rouster", "git restore .");
         }
         // -- Lint: promote to known-optional (s007b) ---------------------------
         {
@@ -1934,6 +1941,77 @@ int main(int argc, char** argv) {
         fs::remove_all(remotes, ec);
     }
 
+    // -- s020a: Push -- committed work to the remote; dirty is reported, never pushed --
+    {
+        std::cout << "\n-- dev push --\n";
+        namespace dv = core::dev;
+        git_isolate();
+        const fs::path base = fs::temp_directory_path() / ("rouster_push_" + std::to_string(::getpid()));
+        std::error_code ec;
+        fs::remove_all(base, ec);
+        fs::create_directories(base, ec);
+        const std::string B = base.string(), W = B + "/work";
+        const std::string init = "git -c init.defaultBranch=main init -q";
+        bool made = sh(B, init + " --bare remote.git") && sh(B, "git clone -q remote.git work") &&
+                    put_bytes(base, "work/a.txt", "one\n") &&
+                    sh(W, "git add a.txt && git commit -qm one && git push -q origin main");
+        const auto proj = [&] { dv::Project p; p.kind = dv::Kind::Repo; p.rel = "work"; p.name = "work"; p.repo = dv::verify(W); return p; };
+        auto p0 = proj();
+        check("dev push: fixture -- a clone, pushed", made && p0.repo.status == dv::Status::Backed,
+              p0.repo.error);
+        check("dev push: nothing offered when backed up", !dv::push_plan(p0).why_not.empty());
+        // A commit and a new branch and a tag, not pushed.
+        made = put_bytes(base, "work/a.txt", "two\n") && sh(W, "git commit -qam two && git branch side && git tag v1");
+        auto p1 = proj();
+        const auto pl = dv::push_plan(p1);
+        check("dev push: unpushed commit + local-only branch + tag -> offered: --all, then --tags; never --force",
+              made && p1.repo.status == dv::Status::NotClean && !dv::dirty(p1.repo) && pl.why_not.empty() &&
+              pl.steps.size() == 2 && pl.steps[0] == std::vector<std::string>{"push", "--porcelain", "origin", "--all"} &&
+              pl.steps[1].back() == "--tags" &&
+              std::none_of(pl.steps.begin(), pl.steps.end(), [](auto& s) {
+                  return std::find_if(s.begin(), s.end(), [](auto& a) { return a.find("force") != std::string::npos || a == "-f"; }) != s.end(); }),
+              pl.why_not);
+        const auto worktree = [&] {   // your files: everything but git's own .git (a push moves refs/remotes there)
+            std::istringstream in(files_snapshot(base / "work"));
+            std::string o;
+            for (std::string l; std::getline(in, l);) if (l.find("/work/.git") == std::string::npos) o += l + "\n";
+            return o;
+        };
+        const std::string before = worktree();
+        const auto r = dv::push(W, pl);
+        check("dev push: pushed -> asked again, backed up; your files unchanged",
+              r.ok && r.after.status == dv::Status::Backed && worktree() == before,
+              [&] { std::string o; for (auto& x : r.said) o += x + "; "; return o; }());
+        // Dirty: reported, never offered.
+        made = put_bytes(base, "work/new.txt", "x\n") && sh(W, "git commit -q --allow-empty -m three");
+        auto p2 = proj();
+        const auto pl2 = dv::push_plan(p2);
+        check("dev push: dirty (untracked here) -> reported dirty, not offered, even with a commit to push",
+              made && dv::dirty(p2.repo) && !pl2.why_not.empty() && pl2.why_not.find("dirty") == 0 && pl2.steps.empty(),
+              pl2.why_not);
+        fs::remove(base / "work/new.txt", ec);
+        // The remote moved on (another clone pushed): a push would be refused -> not offered, says fetch.
+        made = sh(B, "git clone -q remote.git other") && put_bytes(base, "other/b.txt", "b\n") &&
+               sh(B + "/other", "git add b.txt && git commit -qm other && git push -q origin main");
+        auto p3 = proj();
+        const auto pl3 = dv::push_plan(p3);
+        check("dev push: the remote has commits not fetched here -> not offered, says fetch",
+              made && !pl3.why_not.empty() && pl3.why_not.find("fetch") != std::string::npos, pl3.why_not);
+        // Forced through anyway (a stale plan): git refuses; reported, nothing here changes.
+        dv::PushPlan stale;
+        stale.remote = "origin";
+        stale.steps = {{"push", "--porcelain", "origin", "--all"}};
+        const std::string before2 = worktree();
+        const auto r2 = dv::push(W, stale);
+        check("dev push: a rejected push (remote moved on) is reported, not forced; files unchanged",
+              !r2.ok && !r2.said.empty() && r2.said[0].find("pushed") == std::string::npos &&
+              worktree() == before2, r2.said.empty() ? "" : r2.said[0]);
+        // No remote: never offered.
+        made = sh(B, init + " lonely") && put_bytes(base, "lonely/x", "x") && sh(B + "/lonely", "git add x && git commit -qm x");
+        dv::Project pl4p; pl4p.repo = dv::verify(B + "/lonely");
+        check("dev push: no remote -> not offered", made && !dv::push_plan(pl4p).why_not.empty());
+        fs::remove_all(base, ec);
+    }
     // -- Duplicates: find (read-only) -> keep rules -> plan -> the door (s008) --
     {
         std::cout << "\n-- duplicates --\n";

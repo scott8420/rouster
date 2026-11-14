@@ -10,8 +10,9 @@ what Tidy leaves.
 - **Sweep** -- caches, thumbnails, Trash, old logs, orphaned app folders.
 - **Duplicates** -- files and whole folders; on btrfs, reflink dedupe so
   every path stays put and the space comes back.
-- **Dev projects** -- clean build output; retire workspaces whose repos are
-  verified pushed to GitHub, keeping the docs and a one-click restore.
+- **Dev projects** -- is each repo on GitHub? Push what's committed; clean
+  old zips, build output and -- for verified-pushed repos -- the source
+  (`git restore .` brings it back). docs, scripts and fixes are never touched.
 - **System** -- the package cache, the journal, fstrim (through a small
   polkit helper).
 - **Profile** -- back up and restore the things that make the desktop feel

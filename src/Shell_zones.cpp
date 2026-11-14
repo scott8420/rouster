@@ -857,8 +857,8 @@ void Shell::build_dev_page() {  // zone: Dev projects
     m_dv_sub.set_justify(Gtk::Justification::CENTER);
     m_dv_sub.set_max_width_chars(56);
     m_dv_sub.set_text("Your workspaces and repos under ~/Develop: is each one safely on its remote, "
-                      "does it match the template, and how much build output is lying around. "
-                      "Build folders go to the Trash; Undo brings them back.");
+                      "and what can go -- old zips, build output, and the source of what's pushed. "
+                      "Ticked things go to the Trash in one step; Undo brings them back.");
     start->append(m_dv_sub);
     m_dv_find.set_label("Look");
     m_dv_find.add_css_class("orb");
@@ -964,7 +964,7 @@ void Shell::build_dev_page() {  // zone: Dev projects
     done->append(*btns);
     m_dv_states.add(*done, "done");
 
-    // confirm (s007b): the retire / restore plan, step by step -- its preview.
+    // confirm (s007b; s020b): the Clean or Push plan, step by step -- its preview.
     auto cf_page = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 0);
     auto cf_scroll = Gtk::make_managed<Gtk::ScrolledWindow>();
     cf_scroll->set_policy(Gtk::PolicyType::NEVER, Gtk::PolicyType::AUTOMATIC);

@@ -36,8 +36,10 @@
 // Lint:   a workspace against the template (§4.5): required, known-optional,
 //         unknown; naming drift (backup script, .desktop.in place, app id).
 //
-// Plan:   the light clean -- the checked build-output folders -> Trash
-//         actions, unpreviewed. Retire / restore come with s007b.
+// Clean:  (s020b, replaces the light clean and Retire) each project is put in
+//         one group -- safe to clean (Backed up), no git (review), look into
+//         (red) -- and gets up to three rows: Zips, Build output, Source. The
+//         ticked, offered rows -> ONE plan of Trash actions, unpreviewed.
 // ─────────────────────────────────────────────────────────────────────────────
 namespace rouster::core::dev {
 
@@ -56,7 +58,6 @@ enum class Status {
     Unreachable,   // the remote did not answer: unknown, so treated as not clean
     NoRemote,      // a repo with no remote: not backed up, never touched
     NotRepo,       // a workspace whose app folder has no .git: same
-    Retired,       // s007b: the working copy is gone; RESTORE.txt says where it lives
 };
 const char* status_name(Status s);   // "Backed up", ...
 
@@ -75,6 +76,8 @@ struct Repo {
     std::vector<Check>       checks;
     std::vector<std::string> ignored;   // ignored-but-present, relative to the repo
     std::string error;               // why it couldn't be verified, if it couldn't
+    bool        cleaned = false;     // s020b: every tracked file deleted here, nothing else
+                                     //   changed -- Clean took the source; `git restore .`
 };
 
 // READ-ONLY. abs: the repo's top folder.
@@ -104,12 +107,33 @@ std::vector<Drift> lint(const std::string& abs, const std::string& app,
 // ── find ───────────────────────────────────────────────────────────────────
 enum class Kind { Workspace, Repo };
 
-struct BuildDir {
-    std::string   rel;               // relative to home
+// ── clean (s020b) ──────────────────────────────────────────────────────────
+// Scott (2026-11-14): one view, every project sorted and colored.
+enum class Group {
+    Clean,      // ready: Backed up -- one checkbox takes Zips + Build output + Source
+    NoGit,      // no repo, or a repo with no remote: not ready -- nothing offered
+    LookInto,   // red: dirty, unpushed, unreachable -- nothing offered
+};
+const char* group_name(Group g);     // "Safe to clean", "No git -- review", "Look into"
+Group group_of(const Repo& r);
+
+enum class Part { Zips, Build, Source };
+const char* part_name(Part p);       // "Zips", "Build output", "Source"
+
+struct Item {
+    std::string   rel;               // relative to home -- one Trash action
+    std::uint64_t bytes = 0;
+    std::string   why;               // the action's reason
+};
+struct Row {
+    Part          part = Part::Build;
+    std::vector<Item> items;
     std::uint64_t bytes = 0, files = 0;
-    bool          offered = true;    // false: shown, never planned (no remote)
-    bool          checked = true;    // the pre-check: build output is regenerable
-    std::string   note;              // why not offered, if it isn't
+    bool          offered = false;   // false: never planned, even ticked
+    bool          checked = false;   // the pre-tick
+    std::string   note;              // one line: what it is
+    std::vector<std::string> stays;  // Source: ignored files left in place (not on the remote)
+    std::vector<std::string> leaves; // Source: ignored files inside a folder that goes -- NOT on the remote
 };
 
 struct Project {
@@ -117,16 +141,13 @@ struct Project {
     std::string rel;                 // workspace / repo root, relative to home
     std::string name;                // the app (workspace) or the folder name
     std::string app;                 // workspace: the app folder ("" for a repo)
+    std::string repo_rel;            // the repo's folder, relative to home (workspace: <rel>/<app>)
     Repo        repo;
-    std::vector<BuildDir> builds;
-    std::vector<Drift>    drift;     // workspace only
+    Group       group = Group::NoGit;
+    std::vector<Row>   rows;         // Zips, Build output, Source -- those that have anything
+    std::vector<Drift> drift;        // workspace only
     std::uint64_t fixes_files = 0;   // workspace: files under fixes/ (never touched)
-    bool        retired = false;     // s007b: status Retired; `restore` holds RESTORE.txt
-    struct RestoreInfo {
-        std::string app, url, branch, commit, retired;   // retired: local "YYYY-MM-DD HH:MM"
-    } restore;
 };
-using RestoreInfo = Project::RestoreInfo;
 
 struct Found {
     std::vector<Project>     projects;   // sorted by path
@@ -136,29 +157,37 @@ struct Found {
     std::string   refused;               // home unusable
 };
 
-// ── retire / restore (s007b) ────────────────────────────────────────────────
-inline constexpr const char* kRestoreFile = "RESTORE.txt";
-// RESTORE.txt: a human paragraph, then "key: value" lines Rouster reads back.
-std::string restore_text(const RestoreInfo& r);
-bool        parse_restore(const std::string& text, RestoreInfo& out);   // needs app + url + commit
-// abs: a folder. True when it is a RETIRED workspace: docs/RULES.md +
-// scripts/*backup.sh + a readable RESTORE.txt, and its app folder gone.
-bool is_retired(const std::string& abs, RestoreInfo& out);
+// ── push (s020a) ───────────────────────────────────────────────────────────
+// Scott (2026-11-13): unpushed projects get pushed; dirty ones are reported,
+// never committed or pushed -- he investigates. A push runs git, not the door:
+// it changes no file of yours (only the remote, and git's own refs/remotes),
+// and it can't be undone -- the preview says so. Never --force: a remote that
+// moved on rejects the push, and that is reported.
+//
+// Dirty: anything uncommitted or untracked (the "committed" check failed).
+bool dirty(const Repo& r);
 
-// What retire keeps and what it sends to the Trash (Q1 lean: keep the newest zip).
-struct RetireView {
-    std::vector<std::string> keep;     // relative to the workspace: docs/, scripts/, fixes/, the newest zip ...
-    std::vector<std::string> ignored;  // ignored-but-present files leaving with the working copy (build output left out)
+struct PushPlan {
+    std::string remote, host;
+    std::vector<std::vector<std::string>> steps;   // git args, run in order in the repo
+    std::vector<std::string> what;                 // one line per step, for the preview
+    std::vector<std::string> stays;                // what a push can't carry (stashes)
+    std::string why_not;                           // non-empty: not offered, and why
 };
-// The retire plan: Write RESTORE.txt; Trash <app>/; Trash every item in
-// backups/Old/; Trash every zip in backups/ but the newest. Empty + why_not
-// when it may not: a workspace, Backed up, its app folder present, no
-// RESTORE.txt yet. now: unix seconds (the date in RESTORE.txt). Unpreviewed.
-door::Plan retire_plan(const std::string& home, const Project& p, std::int64_t now,
-                       std::string& why_not, RetireView* view = nullptr);
-// The restore plan: Clone the recorded URL / branch into <app>/ (the commit
-// must be in its history); Trash RESTORE.txt. Only for a Retired project.
-door::Plan restore_plan(const std::string& home, const Project& p, std::string& why_not);
+// Offered for a NotClean repo (not dirty, on a branch) whose
+// pushed / branches / tags check failed and whose remote has nothing this
+// copy hasn't fetched. Steps: `push --porcelain <remote> --all` (branches),
+// `push --porcelain <remote> --tags` (tags).
+PushPlan push_plan(const Project& p);
+
+struct Pushed {
+    bool ok = false;                 // every step's git exited 0
+    std::vector<std::string> said;   // per step: "branches: ok" / the error's first line
+    Repo after;                      // verify() again, against the live remote
+};
+// Runs the steps (120 s each, prompts off -- a push that needs a password
+// fails and says so), then verifies again. abs: the repo's top folder.
+Pushed push(const std::string& abs, const PushPlan& plan, const std::atomic<bool>* cancel = nullptr);
 
 // The dev roots looked for, relative to home.
 const std::vector<std::string>& roots();
@@ -171,8 +200,21 @@ bool is_workspace(const std::string& abs, std::string& app);
 // bytes = build output measured.
 Found find(const std::string& home, scan::Progress& progress, const std::vector<std::string>& known = {});
 
-// The checked + offered build folders as a door plan of Trash actions.
-// previewed stays false -- only the UI, having shown the list, may set it.
-door::Plan plan(const std::string& home, const std::vector<Project>& projects);
+// The row of a part, or nullptr.
+const Row* row_of(const Project& p, Part part);
+Row*       row_of(Project& p, Part part);
+
+// Red's one line: why it needs looking into ("" when it doesn't).
+std::string why_red(const Project& p);
+
+// The ticked + offered rows as ONE door plan of Trash actions -- a Source
+// folder that holds a build folder takes it along (the inner action is left
+// out, never run twice). previewed stays false -- only the UI, having shown
+// the preview, may set it. docs/, scripts/, fixes/ and .git never appear.
+door::Plan clean_plan(const std::string& home, const std::vector<Project>& projects);
+
+// The projects whose Source is ticked: the remote is asked once more for
+// each before anything moves (the verdict on screen may be minutes old).
+std::vector<const Project*> source_ticked(const std::vector<Project>& projects);
 
 }  // namespace rouster::core::dev
