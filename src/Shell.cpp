@@ -123,7 +123,7 @@ void Shell::build_ui() {
     // s019d: ...and Tidy's Hands off (~/.local/share/tidy/settings.ini) -- ONE list for both apps.
     {
         auto owned = core::scan::samson_places(m_home, config_home());
-        const auto tidy = core::tidylink::hands_off(m_home);
+        const auto tidy = core::tidylink::for_rouster(core::tidylink::hands_off(m_home));   // s019d2: not ~/Rouster
         for (const auto& r : tidy) if (std::find(owned.begin(), owned.end(), r) == owned.end()) owned.push_back(r);
         if (auto lg = log::get(log::Area::Shell)) {
             lg->info("hands off (Tidy's): {}", tidy.size());

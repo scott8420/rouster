@@ -32,6 +32,13 @@ std::vector<std::string> hands_off(const std::string& home);
 // The same, from the text of a settings.ini (the parser, for the selftest).
 std::vector<std::string> parse_hands_off(const std::string& home, const std::string& text);
 
+// s019d2: Rouster's own folder (~/Rouster, where its profile backups go). Tidy's
+// Hands off says "Tidy, leave it alone" -- Scott marks ~/Rouster that way -- but
+// read by Rouster it would make Rouster's own folder Protected and the door would
+// refuse its backups. So for_rouster() leaves out ~/Rouster and anything under it.
+inline constexpr const char* kOwnRoot = "Rouster";
+std::vector<std::string> for_rouster(std::vector<std::string> hands_off);
+
 // A name Tidy keeps beside your files: ".tidy-files", ".tidy-project".
 bool is_mark(std::string_view name);
 

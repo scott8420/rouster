@@ -49,6 +49,12 @@ std::vector<std::string> hands_off(const std::string& home) {
     return parse_hands_off(home, ss.str());
 }
 
+std::vector<std::string> for_rouster(std::vector<std::string> list) {
+    const std::string own = kOwnRoot;
+    std::erase_if(list, [&](const std::string& r) { return r == own || r.rfind(own + "/", 0) == 0; });
+    return list;
+}
+
 bool is_mark(std::string_view name) { return name == ".tidy-files" || name == ".tidy-project"; }
 
 std::string guard(const door::Plan& plan) {

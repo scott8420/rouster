@@ -2989,6 +2989,9 @@ int main(int argc, char** argv) {
               ho == std::vector<std::string>{"Documents/Degoo", "Documents/KeePassXC", "Manifest", "Documents/Taxes",
                                              "Pictures/Covers", "Writing"},
               [&] { std::string o; for (const auto& h : ho) o += h + " "; return o; }());
+        check("tidy link: Rouster's own folder is left out of what Rouster takes from Tidy's list (~/Rouster, under it; not a look-alike)",
+              tl::for_rouster({"Rouster", "Rouster/Profile", "RousterOld", "Documents/Rouster", "Manifest"}) ==
+              std::vector<std::string>{"RousterOld", "Documents/Rouster", "Manifest"});
         bool made = put_bytes(home, ".local/share/tidy/settings.ini", ini) &&
                     put(home, "Documents/Taxes/w2.pdf", 4000) && put(home, "Documents/Taxes/.tidy-files", 200) &&
                     put(home, "Downloads/w2.pdf", 0) && put(home, "Documents/Novel/.tidy-project", 100) &&
@@ -3026,6 +3029,27 @@ int main(int argc, char** argv) {
         const auto rt = door.run(pt);
         check("tidy link: the door refuses a step inside a hands-off folder; tree exact",
               !rt.ok && files_snapshot(home) == before, rt.messages.empty() ? "" : rt.messages.front());
+        // s019d2: Scott sets ~/Rouster hands off in Tidy. Taken raw it would lock Rouster out of its
+        // own backups; through for_rouster() the backup folder is made and undone as ever.
+        const auto mk_own = [&] {
+            dr::Plan p;
+            p.label = "own";
+            p.previewed = true;
+            dr::Action m;
+            m.verb = dr::Verb::MakeDir;
+            m.to = H + "/Rouster/Profile";
+            p.actions.push_back(m);
+            return door.run(p);
+        };
+        fs::create_directories(home / "Rouster", ec);
+        sc::set_owned({"Rouster"});
+        const auto raw = mk_own();
+        sc::set_owned(core::tidylink::for_rouster({"Rouster", "Documents/Taxes"}));
+        const auto ok = mk_own();
+        check("tidy link: ~/Rouster hands off in Tidy -- raw, the door refuses Rouster's backups; through for_rouster, it doesn't",
+              !raw.ok && ok.ok && fs::is_directory(home / "Rouster/Profile") && door.undo().ok &&
+              !fs::exists(home / "Rouster/Profile"), ok.messages.empty() ? "" : ok.messages.front());
+        fs::remove(home / "Rouster", ec);
         sc::set_owned({});
         // The marks and the guard.
         check("tidy link: .tidy-files and .tidy-project are Tidy's marks; others aren't",
