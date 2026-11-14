@@ -24,7 +24,6 @@ const std::vector<Group>& credits() {
             {"nlohmann/json", "The Activity record, rules and settings", "MIT", "https://github.com/nlohmann/json", "json.hpp"},
             {"xxHash", "Fast hashing for Duplicates", "BSD-2-Clause", "https://github.com/Cyan4973/xxHash", "xxhash.h"},
             {"SQLite", "The catalog -- Rouster's memory of your files", "Public domain", "https://sqlite.org", ""},
-            {"zlib", "The versions viewer reads an ODT or DOCX's text out of its zip", "zlib License", "https://zlib.net", ""},
             {"polkit", "Asking for your password before root work", "LGPL-2.0-or-later", "https://github.com/polkit-org/polkit", ""},
         }},
         {"Works with", {

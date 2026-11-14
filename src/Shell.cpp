@@ -167,13 +167,13 @@ Shell::Shell()
 
 // The worker must be gone before the members it touches (m_report, the
 // dispatcher). close-request does this too; the dtor is the backstop.
-Shell::~Shell() { m_rl_timer.disconnect(); stop_scan(); stop_sweep(); stop_dev(); stop_dups(); stop_archive(); stop_profile(); stop_preflight(); stop_system(); stop_tidy(); }
+Shell::~Shell() { m_rl_timer.disconnect(); stop_scan(); stop_sweep(); stop_dev(); stop_dups(); stop_archive(); stop_profile(); stop_preflight(); stop_system(); }
 
 void Shell::build_ui() {
     m_home = home_dir();
     core::door::install();   // latch: Rouster's name + its root helper's rules, before any door
     // s017a2: Samson's folder, second home and catalog are Protected -- before any walk or door step.
-    core::scan::set_owned(core::scan::samson_places(m_home, versions_config_home()));
+    core::scan::set_owned(core::scan::samson_places(m_home, config_home()));
     // s017a2: your own bundle list (bundles.json) joins the built-in package kinds.
     core::pkg::set_extra(core::pkg::load_extra(data_dir()));
     m_door = std::make_unique<core::door::Door>(m_home, data_dir());
@@ -196,8 +196,7 @@ void Shell::build_ui() {
     rl_save(false);   // arms the watch timer if it is on; writes nothing
     paint_rules();
 
-    signal_close_request().connect([this] { stop_scan(); stop_sweep(); stop_dev(); stop_dups(); stop_archive(); stop_profile(); stop_preflight(); stop_system(); stop_tidy(); return false; }, false);
-    m_tidy_finished.connect(sigc::mem_fun(*this, &Shell::on_tidy_found));
+    signal_close_request().connect([this] { stop_scan(); stop_sweep(); stop_dev(); stop_dups(); stop_archive(); stop_profile(); stop_preflight(); stop_system(); return false; }, false);
     m_scan_finished.connect(sigc::mem_fun(*this, &Shell::on_scan_done));
     m_sweep_finished.connect(sigc::mem_fun(*this, &Shell::on_sweep_found));
     m_dev_finished.connect(sigc::mem_fun(*this, &Shell::on_dev_found));

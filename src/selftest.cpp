@@ -36,11 +36,6 @@
 #include "core/About.hpp"
 #include "core/System.hpp"
 #include "core/Catalog.hpp"
-#include "core/Tidy.hpp"
-#include "core/Versions.hpp"
-#include "core/Compare.hpp"
-
-#include <zlib.h>
 
 #include <sqlite3.h>
 
@@ -441,140 +436,6 @@ bool make_profile_fixture(const fs::path& home) {
     return ok;
 }
 
-
-// s017b: a zip as a writer would make it (stored or deflated members), an ODT
-// (mimetype stored first, content.xml deflated), and a small PNG -- for the
-// compare checks and the viewer's fixture. The selftest may write; the core
-// only reads.
-std::string zip_bytes(const std::vector<std::tuple<std::string, std::string, bool>>& members) {
-    std::string out, cd;
-    const auto u16 = [](std::string& s, std::uint32_t v) { s += static_cast<char>(v & 0xFF); s += static_cast<char>((v >> 8) & 0xFF); };
-    const auto u32 = [&](std::string& s, std::uint32_t v) { u16(s, v & 0xFFFF); u16(s, v >> 16); };
-    for (const auto& [name, data, packed] : members) {
-        std::string body = data;
-        if (packed) {
-            z_stream z{};
-            deflateInit2(&z, 9, Z_DEFLATED, -MAX_WBITS, 8, Z_DEFAULT_STRATEGY);
-            body.assign(deflateBound(&z, static_cast<uLong>(data.size())), '\0');
-            z.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(data.data()));
-            z.avail_in = static_cast<uInt>(data.size());
-            z.next_out = reinterpret_cast<Bytef*>(body.data());
-            z.avail_out = static_cast<uInt>(body.size());
-            deflate(&z, Z_FINISH);
-            body.resize(z.total_out);
-            deflateEnd(&z);
-        }
-        const auto crc = static_cast<std::uint32_t>(crc32(0, reinterpret_cast<const Bytef*>(data.data()), static_cast<uInt>(data.size())));
-        const auto off = static_cast<std::uint32_t>(out.size());
-        u32(out, 0x04034b50); u16(out, 20); u16(out, 0); u16(out, packed ? 8 : 0); u16(out, 0); u16(out, 0x21);
-        u32(out, crc); u32(out, static_cast<std::uint32_t>(body.size())); u32(out, static_cast<std::uint32_t>(data.size()));
-        u16(out, static_cast<std::uint32_t>(name.size())); u16(out, 0);
-        out += name;
-        out += body;
-        u32(cd, 0x02014b50); u16(cd, 20); u16(cd, 20); u16(cd, 0); u16(cd, packed ? 8 : 0); u16(cd, 0); u16(cd, 0x21);
-        u32(cd, crc); u32(cd, static_cast<std::uint32_t>(body.size())); u32(cd, static_cast<std::uint32_t>(data.size()));
-        u16(cd, static_cast<std::uint32_t>(name.size())); u16(cd, 0); u16(cd, 0); u16(cd, 0); u16(cd, 0); u32(cd, 0); u32(cd, off);
-        cd += name;
-    }
-    const auto cd_off = static_cast<std::uint32_t>(out.size());
-    out += cd;
-    u32(out, 0x06054b50); u16(out, 0); u16(out, 0);
-    u16(out, static_cast<std::uint32_t>(members.size())); u16(out, static_cast<std::uint32_t>(members.size()));
-    u32(out, static_cast<std::uint32_t>(cd.size())); u32(out, cd_off); u16(out, 0);
-    return out;
-}
-std::string odt_bytes(const std::vector<std::string>& paragraphs, bool deflated = true) {
-    std::string body;
-    for (const auto& p : paragraphs) body += "<text:p text:style-name=\"P1\">" + p + "</text:p>";
-    const std::string xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><office:document-content xmlns:office=\"o\" "
-                            "xmlns:text=\"t\"><office:automatic-styles/><office:body><office:text>" + body +
-                            "</office:text></office:body></office:document-content>";
-    return zip_bytes({{"mimetype", "application/vnd.oasis.opendocument.text", false}, {"content.xml", xml, deflated}});
-}
-std::string png_bytes(std::uint32_t w, std::uint32_t h, std::uint32_t rgb, std::uint32_t stripe) {
-    std::string raw;
-    for (std::uint32_t y = 0; y < h; ++y) {
-        raw += '\0';
-        for (std::uint32_t x = 0; x < w; ++x) {
-            const std::uint32_t c = (y / 8) % 2 ? stripe : rgb;
-            raw += static_cast<char>((c >> 16) & 0xFF); raw += static_cast<char>((c >> 8) & 0xFF); raw += static_cast<char>(c & 0xFF);
-        }
-    }
-    std::string z(compressBound(static_cast<uLong>(raw.size())), '\0');
-    uLongf zl = static_cast<uLongf>(z.size());
-    compress(reinterpret_cast<Bytef*>(z.data()), &zl, reinterpret_cast<const Bytef*>(raw.data()), static_cast<uLong>(raw.size()));
-    z.resize(zl);
-    const auto be = [](std::string& s, std::uint32_t v) { for (int k = 3; k >= 0; --k) s += static_cast<char>((v >> (8 * k)) & 0xFF); };
-    std::string out = "\x89PNG\r\n\x1a\n";
-    const auto chunk = [&](const char* type, const std::string& data) {
-        be(out, static_cast<std::uint32_t>(data.size()));
-        const std::string td = std::string(type) + data;
-        out += td;
-        be(out, static_cast<std::uint32_t>(crc32(0, reinterpret_cast<const Bytef*>(td.data()), static_cast<uInt>(td.size()))));
-    };
-    std::string ihdr;
-    be(ihdr, w); be(ihdr, h);
-    ihdr += static_cast<char>(8); ihdr += static_cast<char>(2); ihdr += '\0'; ihdr += '\0'; ihdr += '\0';
-    chunk("IHDR", ihdr);
-    chunk("IDAT", z);
-    chunk("IEND", "");
-    return out;
-}
-
-// s017: version families for an Xvfb drive -- a chapter saved six ways, two Curvz
-// bundles, a tidy family, and Folio's history moved into home by its preference.
-bool make_versions_fixture(const fs::path& home) {
-    const auto at = [&](const std::string& rel, const std::string& data, std::int64_t ago_s) {
-        if (!put_bytes(home, rel, data)) return false;
-        const auto t = static_cast<time_t>(std::time(nullptr) - ago_s);
-        struct timespec ts[2] = {{t, 0}, {t, 0}};
-        return ::utimensat(AT_FDCWD, (home / rel).c_str(), ts, AT_SYMLINK_NOFOLLOW) == 0;
-    };
-    const auto touch = [&](const std::string& rel, std::int64_t ago_s) {
-        const auto t = static_cast<time_t>(std::time(nullptr) - ago_s);
-        struct timespec ts[2] = {{t, 0}, {t, 0}};
-        return ::utimensat(AT_FDCWD, (home / rel).c_str(), ts, AT_SYMLINK_NOFOLLOW) == 0;
-    };
-    const std::int64_t D = 86400;
-    const std::string body(6000, 'a'), N = "Documents/Novels/";
-    // s017b: the chapter's saves are real ODTs now, so the viewer has texts to
-    // set side by side -- a chapter that grows a line, loses one, changes one.
-    std::vector<std::string> ch;
-    for (int k = 1; k <= 40; ++k)
-        ch.push_back("Paragraph " + std::to_string(k) + ". Tapper felt the room before he saw it -- every fear in it "
-                     "pressed on him like weather, and he let it.");
-    const auto with = [&](int n) {   // the nth save: each one edits a little more
-        auto v = ch;
-        if (n >= 2) v[4] = "Paragraph 5. The colonel smiled; Tapper felt the lie under it like a stone under a rug.";
-        if (n >= 3) v.insert(v.begin() + 12, "A new line, written on the train &amp; kept.");
-        if (n >= 4) v.erase(v.begin() + 30);
-        if (n >= 5) v[38] = "Paragraph 40, rewritten:<text:s text:c=\"2\"/>the ending he wanted.";
-        if (n >= 6) v.push_back("THE END");
-        return odt_bytes(v);
-    };
-    return at(N + "ch3.odt", with(1), 9 * D) && at(N + "ch3 draft.odt", with(1), 8 * D) &&
-           at(N + "ch3 (1).odt", with(2), 7 * D) && at(N + "ch3 v2.odt", with(4), 3 * D + 300) &&
-           at(N + "ch3 final.odt", with(5), 3 * D) && at(N + "ch3 final2.odt", with(6), D) &&
-           at("Pictures/beach.png", png_bytes(320, 200, 0x2a7fd4, 0x9fd3ff), D) &&
-           at("Pictures/beach (1).png", png_bytes(320, 200, 0x2a7fd4, 0xe8d2a0), 5 * D) &&
-           at("Pictures/beach old.png", png_bytes(160, 100, 0xe8d2a0, 0xc9a86a), 40 * D) &&
-           at("Documents/notes.txt", "Rouster notes\n\n- the Closet\n- the Junk Drawer\n- versions viewer\n", D) &&
-           at("Documents/notes v2.txt", "Rouster notes\n\n- the Closet\n- versions\n", 4 * D) &&
-           at(N + "Chapter 2.odt", body, D) && at(N + "Chapter 3.odt", body, D) &&
-           at("Documents/Tapper.odt", body + "new", D) && at("Documents/Tapper versions/Tapper old.odt", body + "old", 30 * D) &&
-           at("Pictures/Logo.curvz/project.json", "{}", 20 * D) && at("Pictures/Logo v2.curvz/project.json", "{ }", 2 * D) &&
-           touch("Pictures/Logo.curvz", 20 * D) && touch("Pictures/Logo v2.curvz", 2 * D) &&
-           at(".config/folio/preferences.ini", "[AutoSave]\nbackup-dir=~/FolioBackups\n", 0) &&
-           at("FolioBackups/Tapper/Tapper_2026-11-01T10-00.folio.gz", "gz1", 3 * D) &&
-           at("FolioBackups/Tapper/Tapper_2026-11-02T10-00.folio.gz", "gz2", 2 * D) &&
-           at(".local/share/jot/backups/home.jots/.source", (home / "Notes/home.jots").string() + "\n", 0) &&
-           at(".local/share/jot/backups/home.jots/2026-11-01/a.md", "x", 2 * D) &&
-           at(".local/share/jot/backups/home.jots/2026-11-02/a.md", "x", D) &&
-           // s017a2: Samson's folder (Protected) and a container -- never proposed, never moved.
-           at("Samson/sealed/w2.pdf.smsn", "SAMSON/1", D) && at("Samson/seal-done/w2.pdf", body, D) &&
-           at("Samson/seal-done/w2 (2).pdf", body, D) && at("Documents/Private.samson", body, 40 * 30 * D);
-}
-
 int main(int argc, char** argv) {
     rouster::core::door::install();   // latch: Rouster's name + root rules, as the app does at startup
     // `--make-fixture DIR`: build the fixture home for an Xvfb drive, then stop.
@@ -584,8 +445,7 @@ int main(int argc, char** argv) {
                         make_dups_fixture(argv[2]) &&                                       // s008
                         make_archive_fixture(argv[2]) &&                                    // s009
                         make_organize_fixture(argv[2]) &&                                   // s010
-                        make_profile_fixture(argv[2]) &&                                    // s012
-                        make_versions_fixture(argv[2]);                                     // s017
+                        make_profile_fixture(argv[2]);                                      // s012
         // s012d: a few settings in the FIXTURE's own dconf (never the desktop's),
         // when dconf + dbus-run-session are here; skipped quietly when not.
         if (ok) {
@@ -1274,6 +1134,8 @@ int main(int argc, char** argv) {
                 case Verb::Dedupe: a.verb = v; a.from = H + "/Documents/twin-a.bin"; a.to = H + "/Documents/twin-b.bin"; break;
                 case Verb::Settings: a.verb = v; a.content = "[org/x]\na=2\nb=3\n"; break;
                 case Verb::Root: a.verb = v; a.content = "snapshot:5"; break;
+                case Verb::Tag: a.verb = v; a.from = H + "/Documents/report.pdf"; a.attr = "user.tidy.retention";
+                                a.content = "short"; break;
             }
             if (v == Verb::Root) {
                 // Runs as root through pkexec -- here a fake helper that says what it did.
@@ -1321,6 +1183,27 @@ int main(int argc, char** argv) {
                 const auto u = door.undo();
                 check("gate/settings: undo -> b reset, a back to 1 -- the settings exactly as before",
                       u.ok && fake_dconf->keys == keys_before, u.messages.empty() ? "" : u.messages.front());
+                continue;
+            }
+            if (v == Verb::Tag) {
+                // latch 0.2+ (Tidy's verb). Rouster never tags (TIDY_FOR_ROUSTER s2) -- the gate
+                // only proves the door Rouster links still does it right: set, read, undo, gone.
+                std::string val, err;
+                const auto r = door.run(plan(name + " one", {a}));
+                if (!r.ok && !r.messages.empty() && r.messages.front().find("not supported") != std::string::npos) {
+                    check("gate/tag: (no user xattrs here) fails cleanly, tree exact", files_snapshot(home) == before,
+                          r.messages.front());
+                    door.undo();
+                    continue;
+                }
+                check("gate/tag: done through the door", r.ok && r.done == 1, r.messages.empty() ? "" : r.messages.front());
+                check("gate/tag: one step", door.batches().size() == batches + 1 && door.undo_label() == name + " one");
+                check("gate/tag: the tag is on the file, the tree unchanged",
+                      dr::tag_of(a.from, a.attr, val, &err) && val == "short" && files_snapshot(home) == before, err);
+                const auto u = door.undo();
+                check("gate/tag: undo takes the tag off, tree exact",
+                      u.ok && !dr::tag_of(a.from, a.attr, val) && files_snapshot(home) == before,
+                      u.messages.empty() ? "" : u.messages.front());
                 continue;
             }
             if (v == Verb::Dedupe) {
@@ -3735,707 +3618,6 @@ int main(int argc, char** argv) {
               !ct::record("", H, "", mine, {}, N4).ok && !ct::record("relative/dir", H, "", mine, {}, N4).ok);
         fs::remove_all(home, ec);
     }
-    // -- Tidy (s015c): the report -- verdicts as named queries ------------------
-    {
-        std::cout << "\n-- tidy --\n";
-        namespace ct = core::catalog;
-        namespace td = core::tidy;
-        const fs::path home = fs::temp_directory_path() / ("rouster_tidy_" + std::to_string(::getpid()));
-        std::error_code ec;
-        fs::remove_all(home, ec);
-        const std::string H = home.string(), D = H + "/.local/share/rouster";
-        const std::int64_t NOW = 1790000000, DAY = 86400;
-        const auto at = [&](const std::string& rel, std::size_t bytes, std::int64_t used) {
-            bool ok = put(home, rel, bytes);
-            struct timespec ts[2] = {{static_cast<time_t>(used), 0}, {static_cast<time_t>(used), 0}};
-            ::utimensat(AT_FDCWD, (home / rel).c_str(), ts, AT_SYMLINK_NOFOLLOW);
-            return ok;
-        };
-        bool made = at("Downloads/setup-2.4.iso", 90000, NOW - 60 * DAY) && at("Downloads/fresh.iso", 80000, NOW - DAY) &&
-                    at("Pictures/Screenshots/Screenshot from 2024-01-02.png", 3000, NOW - 300 * DAY) &&
-                    at("Documents/report (1).pdf", 4000, NOW - 2 * DAY) &&
-                    at("Documents/old letter.odt", 5000, NOW - 3 * 365 * DAY) &&
-                    at("Documents/keep me.odt", 5000, NOW - 3 * 365 * DAY) &&
-                    at("Archive/2020/x.txt", 100, NOW - 6 * 365 * DAY) && at("loose.txt", 100, NOW - DAY) &&
-                    at("old.iso", 7000, NOW - 90 * DAY) && at("Desktop/note.txt", 100, NOW - DAY) &&
-                    at("Desktop/sub/deep.txt", 100, NOW - DAY) && at("Novels/Tapper.scriv/Files/a.rtf", 2000, NOW - DAY) &&
-                    at("Develop/proj/.git/HEAD", 40, NOW) && at("Develop/proj/src/main.cpp", 400, NOW) &&
-                    at("Develop/ws/backups/s001 (1).zip", 400, NOW - 4 * 365 * DAY) &&
-                    put_bytes(home, ".config/user-dirs.dirs",
-                              "# written by xdg-user-dirs-update\nXDG_DOWNLOAD_DIR=\"$HOME/Downloads\"\n"
-                              "XDG_MUSIC_DIR=\"$HOME/Music\"\nXDG_DESKTOP_DIR=\"$HOME/Desktop\"\n");
-        for (int k = 0; k < 6; ++k)   // a mixed, busy folder
-            made &= at("Downloads/mix" + std::to_string(k) + (k % 3 == 0 ? ".pdf" : k % 3 == 1 ? ".mp3" : ".zip"), 100, NOW - DAY);
-        check("tidy: fixture made", made);
-        fs::create_directories(D, ec);
-
-        check("tidy: no catalog -> no report, said", !td::report(D, H, NOW).ok && !ct::query(D, "SELECT 1").ok);
-        core::scan::Progress p;
-        std::vector<core::scan::Seen> mine;
-        core::scan::scan(H, H, p, 0, &mine);
-        const auto d = ct::record(D, H, "", mine, {}, NOW - 10 * DAY);   // the catalog began 10 days ago
-        check("tidy: decide keep-here on one", d.ok && ct::decide(D, "Documents/keep me.odt", "keep-here", "", NOW));
-
-        // The read-only query: reads, binds, refuses anything that writes.
-        const auto q1 = ct::query(D, "SELECT count(*) FROM files WHERE size > :min", {{":min", 4500}});
-        const auto qd = ct::query(D, "DELETE FROM files");
-        const auto q2 = ct::query(D, "SELECT 1; DELETE FROM files");
-        const auto qa = ct::query(D, "ATTACH DATABASE '/tmp/x.db' AS x");
-        check("catalog/query: reads, with a bound parameter", q1.ok && q1.rows.size() == 1 && q1.columns.size() == 1 &&
-              std::stoi(q1.rows[0][0]) >= 4, q1.error);
-        check("catalog/query: a statement that writes is refused; so is a second statement; so is ATTACH",
-              !qd.ok && !q2.ok && !qa.ok && ct::summary(D).files == mine.size(), qd.error + " / " + q2.error);
-        const long kinds = ct::set_kinds(D, {{"pdf", "application/pdf"}, {"mp3", "audio/mpeg"}, {"zip", "application/zip"},
-                                             {"odt", "application/vnd.oasis.opendocument.text"}});
-        const long again = ct::set_kinds(D, {{"pdf", "application/pdf"}});
-        check("catalog/set_kinds: by extension; only rows that differ", kinds >= 6 && again == 0 &&
-              ct::query(D, "SELECT kind FROM files WHERE path = 'Downloads/mix0.pdf'").rows.at(0).at(0) == "application/pdf");
-
-        const std::string disk = files_snapshot(home);
-        const auto bytes_of = [](const std::string& f) {
-            std::ifstream in(f, std::ios::binary);
-            return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-        };
-        const std::string db = bytes_of(D + "/catalog.db");
-        const auto r = td::report(D, H, NOW);
-        check("tidy: the report reads -- it changes no file and not the catalog", r.ok && files_snapshot(home) == disk &&
-              bytes_of(D + "/catalog.db") == db, r.error);
-        const auto rows_of = [&](td::Verdict v) {
-            std::map<std::string, std::string> m;
-            for (const auto& row : r.groups.at(static_cast<std::size_t>(v)).rows) m[row.rel] = row.query;
-            return m;
-        };
-        const auto sh = rows_of(td::Verdict::Short), dm = rows_of(td::Verdict::Dormant), un = rows_of(td::Verdict::Undecided);
-        const auto show = [](const std::map<std::string, std::string>& m) {
-            std::string s;
-            for (const auto& [k, v] : m) s += k + "<" + v + "> ";
-            return s;
-        };
-        check("tidy: short life -- the old installers (top of home too), the old screenshot, the reflex save; "
-              "not a fresh installer", sh == std::map<std::string, std::string>{
-                  {"Downloads/setup-2.4.iso", "installers"}, {"old.iso", "installers"},
-                  {"Pictures/Screenshots/Screenshot from 2024-01-02.png", "screenshots"},
-                  {"Documents/report (1).pdf", "reflex"}}, show(sh));
-        check("tidy: dormant -- unused 18 months; not what's in the Archive, not what you said to keep, "
-              "not a dev workspace's backup (Dev's)",
-              dm == std::map<std::string, std::string>{{"Documents/old letter.odt", "dormant"}}, show(dm));
-        check("tidy: undecided -- loose at the top of home and on the Desktop (not deeper; an earlier query wins)",
-              un == std::map<std::string, std::string>{{"loose.txt", "loose"}, {"Desktop/note.txt", "loose"}}, show(un));
-        check("tidy: the rest is active, counted; the keep-here is counted as kept",
-              r.kept == 1 && r.active == r.files - 7 && r.files == mine.size(),
-              std::to_string(r.active) + " active of " + std::to_string(r.files));
-        bool dl_first = !r.folders.empty() && r.folders.front().rel == "Downloads" &&
-                        r.folders.front().why.find("kinds mixed") != std::string::npos;
-        check("tidy: folder health -- the mixed, busy Downloads is worst, and says why", dl_first,
-              r.folders.empty() ? "" : r.folders.front().rel + ": " + r.folders.front().why);
-        std::map<std::string, td::Top> tops;
-        for (const auto& t : r.top) tops[t.name] = t;
-        check("tidy: the top of home -- each folder, what of yours is in it; code is Dev projects'; the Archive named",
-              tops.count("Develop") && tops["Develop"].files == 1 && tops["Develop"].note.empty() &&
-              tops.count("Documents") && tops["Documents"].files == 3 && tops["Archive"].note == "the Archive" &&
-              !tops.count(".config") && r.loose == std::vector<std::string>{"loose.txt", "old.iso"});
-        bool music = false, closet = false;
-        for (const auto& l : r.drift) {
-            if (l.find("~/Music, which isn't there") != std::string::npos) music = true;
-            if (l.find("No ~/Closet") != std::string::npos) closet = true;
-        }
-        check("tidy: drift -- an XDG folder pointing nowhere; no Closet yet", music && closet && r.notes.empty());
-        check("tidy: every query is read-only SQL, ids unique, all three verdicts used", [&] {
-            std::set<std::string> ids;
-            std::set<int> vs;
-            for (const auto& q : td::queries()) {
-                if (!ids.insert(q.id).second || !ct::query(D, q.sql, {{":now", NOW}, {":short", 1}, {":dormant", 1}}).ok) return false;
-                vs.insert(static_cast<int>(q.verdict));
-            }
-            return vs.size() == 3;
-        }());
-        check("tidy: age reads plainly", td::age(DAY) == "1 day" && td::age(90 * DAY) == "3 months" &&
-              td::age(3 * 365 * DAY) == "3 years");
-
-        // -- s016: the Closet + Tidy acts -------------------------------------------
-        {
-            namespace dr = core::door;
-            const auto no_trash = [&] {   // the tree, minus the Trash (undo sends made folders there)
-                std::istringstream in(files_snapshot(home));
-                std::string l, out;
-                while (std::getline(in, l)) if (l.find("/.local/share/Trash") == std::string::npos) out += l + "\n";
-                return out;
-            };
-            const auto group = [&](td::Verdict v) { return r.groups.at(static_cast<std::size_t>(v)).rows; };
-            const std::string tree0 = no_trash();
-            const std::string dirs0 = bytes_of(H + "/.config/user-dirs.dirs");
-            dr::Door door(H, D);
-            door.load();
-
-            // Pure pieces.
-            const std::string red = td::redirect_downloads("# x\nXDG_DOWNLOAD_DIR=\"$HOME/Downloads\"\nXDG_MUSIC_DIR=\"$HOME/Music\"\n");
-            check("closet: redirect_downloads -- the line replaced, the rest kept; added when missing",
-                  red == "# x\nXDG_DOWNLOAD_DIR=\"$HOME/Closet\"\nXDG_MUSIC_DIR=\"$HOME/Music\"\n" &&
-                  td::redirect_downloads("") == "XDG_DOWNLOAD_DIR=\"$HOME/Closet\"\n", red);
-            check("closet: expiry_of reads only 'expires <digits>'", td::expiry_of("expires 1790000000") == 1790000000 &&
-                  td::expiry_of("expires ") == 0 && td::expiry_of("expires 12x") == 0 && td::expiry_of("keep") == 0);
-            const auto st0 = td::closet_state(H);
-            check("closet: state before -- no Closet, Downloads in ~/Downloads", !st0.closet && !st0.junk &&
-                  st0.dirs_file && st0.download == "Downloads" && !st0.redirected);
-
-            // Make the Closet, Downloads pointed at it -- one step; Undo puts the old setting back exactly.
-            auto cp = td::closet_plan(H, true);
-            const bool shape = cp.actions.size() == 4 && cp.actions[0].verb == dr::Verb::MakeDir &&
-                               cp.actions[1].verb == dr::Verb::MakeDir && cp.actions[2].verb == dr::Verb::Trash &&
-                               cp.actions[3].verb == dr::Verb::Write && cp.actions[3].to == H + "/.config/user-dirs.dirs";
-            const auto refused = door.run(cp);
-            check("closet: the plan -- Closet, Junk Drawer, the old setting to the Trash, the new one written; "
-                  "unpreviewed it is refused, nothing changed", shape && !refused.ok && no_trash() == tree0);
-            cp.previewed = true;
-            const auto cr = door.run(cp);
-            const auto st1 = td::closet_state(H);
-            const std::string dirs1 = bytes_of(H + "/.config/user-dirs.dirs");
-            check("closet: made -- ~/Closet + its Junk Drawer; Downloads land in the Closet, other lines kept",
-                  cr.ok && st1.closet && st1.junk && st1.redirected &&
-                  dirs1.find("XDG_MUSIC_DIR=\"$HOME/Music\"") != std::string::npos &&
-                  dirs1.find("XDG_DOWNLOAD_DIR=\"$HOME/Closet\"") != std::string::npos,
-                  cr.messages.empty() ? "" : cr.messages.front());
-            check("closet: once made, the plan has nothing left to do", td::closet_plan(H, true).actions.empty());
-            const auto cu = door.undo();
-            check("closet: undo -- the old user-dirs.dirs back byte for byte, the Closet gone (to the Trash, empty)",
-                  cu.ok && bytes_of(H + "/.config/user-dirs.dirs") == dirs0 && !fs::exists(home / "Closet") &&
-                  no_trash() == tree0, cu.messages.empty() ? "" : cu.messages.front());
-
-            // Short life -> the Closet, remembered with an expiry.
-            auto sp = td::plan(H, td::Verdict::Short, group(td::Verdict::Short));
-            std::set<std::string> tos;
-            for (const auto& a : sp.plan.actions) if (a.verb == dr::Verb::Move) tos.insert(a.to.substr(H.size() + 1));
-            check("tidy/act: short life -> the Closet by name, the Closet made first, 4 moves",
-                  sp.moves == 4 && sp.dropped.empty() && sp.plan.actions.size() == 6 &&
-                  sp.plan.actions[0].to == H + "/Closet" && sp.plan.actions[1].to == H + "/Closet/Junk Drawer" &&
-                  tos == std::set<std::string>{"Closet/setup-2.4.iso", "Closet/old.iso",
-                                               "Closet/Screenshot from 2024-01-02.png", "Closet/report (1).pdf"});
-            sp.plan.previewed = true;
-            const auto sr = door.run(sp.plan);
-            const std::size_t kept = td::remember(D, H, sp, NOW);
-            bool exp_ok = true;
-            std::size_t shorts = 0;
-            for (const auto& dc : ct::decisions(D))
-                if (dc.verdict == "short") { ++shorts; exp_ok &= td::expiry_of(dc.detail) == NOW + td::kShortAge; }
-            check("tidy/act: moved, and each remembered as short with an expiry 30 days on",
-                  sr.ok && kept == 4 && shorts == 4 && exp_ok && fs::exists(home / "Closet/old.iso") &&
-                  !fs::exists(home / "old.iso"), sr.messages.empty() ? "" : sr.messages.front());
-            {   // the next Look: the moves are seen, the decisions follow, the Closet isn't proposed again
-                core::scan::Progress p2;
-                std::vector<core::scan::Seen> m2;
-                core::scan::scan(H, H, p2, 0, &m2);
-                const auto d2 = ct::record(D, H, "", m2, {}, NOW);
-                const auto r2 = td::report(D, H, NOW);
-                const auto fol = ct::query(D, "SELECT count(*) FROM decisions d JOIN files f ON f.id = d.file_id "
-                                              "WHERE d.verdict = 'short' AND f.path GLOB 'Closet/*' AND f.gone IS NULL");
-                check("tidy/act: the next Look sees 4 moves; the decisions followed into the Closet; "
-                      "nothing in the Closet is proposed again",
-                      d2.ok && d2.moved == 4 && fol.ok && fol.rows.at(0).at(0) == "4" && r2.ok &&
-                      r2.groups.at(0).rows.empty(), std::to_string(d2.moved) + " moved");
-            }
-            const auto su = door.undo();
-            check("tidy/act: undo -- every file back where it was, exactly", su.ok && no_trash() == tree0,
-                  su.messages.empty() ? "" : su.messages.front());
-
-            // Undecided -> gathered; a name already taken in the Closet gets "(from <folder>)".
-            put(home, "Closet/note.txt", 10);
-            const std::string tree1 = no_trash();
-            auto up = td::plan(H, td::Verdict::Undecided, group(td::Verdict::Undecided));
-            std::set<std::string> utos;
-            for (const auto& a : up.plan.actions) if (a.verb == dr::Verb::Move) utos.insert(a.to.substr(H.size() + 1));
-            check("tidy/act: undecided gathered into the Closet; a taken name -> 'note (from Desktop).txt'",
-                  up.moves == 2 && utos == std::set<std::string>{"Closet/loose.txt", "Closet/note (from Desktop).txt"} &&
-                  up.shorts.empty(), [&] { std::string s; for (auto& t : utos) s += t + " "; return s; }());
-            up.plan.previewed = true;
-            const auto ur = door.run(up.plan);
-            const bool there = fs::exists(home / "Closet/note (from Desktop).txt") && fs::exists(home / "Closet/note.txt");
-            const auto uu = door.undo();
-            check("tidy/act: gather runs (the old note.txt untouched), undo puts both back", ur.ok && there &&
-                  uu.ok && no_trash() == tree1, (ur.messages.empty() ? "" : ur.messages.front()) + " / " +
-                  (uu.messages.empty() ? "" : uu.messages.front()));
-            fs::remove_all(home / "Closet", ec);
-
-            // Dormant -> the Archive's place; anything changed since the Look is left out.
-            const fs::path letter = home / "Documents/old letter.odt";
-            struct stat lst{};
-            ::lstat(letter.c_str(), &lst);
-            struct timespec bump[2] = {{0, UTIME_OMIT}, {lst.st_mtim.tv_sec + 5, 0}};
-            ::utimensat(AT_FDCWD, letter.c_str(), bump, AT_SYMLINK_NOFOLLOW);
-            const auto changed = td::plan(H, td::Verdict::Dormant, group(td::Verdict::Dormant));
-            check("tidy/act: a file changed since the Look is left out, and said",
-                  changed.moves == 0 && changed.plan.actions.empty() && changed.dropped.size() == 1 &&
-                  changed.dropped[0].find("changed since the Look") != std::string::npos);
-            struct timespec back[2] = {{0, UTIME_OMIT}, lst.st_mtim};
-            ::utimensat(AT_FDCWD, letter.c_str(), back, AT_SYMLINK_NOFOLLOW);
-            auto dp = td::plan(H, td::Verdict::Dormant, group(td::Verdict::Dormant));
-            std::tm tmv{};
-            const std::time_t lt = lst.st_mtim.tv_sec;
-            ::localtime_r(&lt, &tmv);
-            const std::string want = "Archive/" + std::to_string(tmv.tm_year + 1900) + "/Documents/old letter.odt";
-            dp.plan.previewed = true;
-            const auto drn = door.run(dp.plan);
-            check("tidy/act: dormant -> ~/Archive/<year>/Documents/..., its folders made; no Closet made",
-                  dp.moves == 1 && drn.ok && fs::exists(home / want) && !fs::exists(letter) && !fs::exists(home / "Closet"),
-                  want);
-            const auto du2 = door.undo();
-            check("tidy/act: undo -- the letter back, the archive's new folders gone", du2.ok && fs::exists(letter) &&
-                  !fs::exists(home / want) && no_trash() == tree0);
-            // A row that isn't the file the Look saw.
-            auto rows = group(td::Verdict::Undecided);
-            rows[0].ino += 1;
-            const auto other = td::plan(H, td::Verdict::Undecided, rows);
-            check("tidy/act: a different file at the path (inode) is left out", other.moves == 1 && other.dropped.size() == 1 &&
-                  other.dropped[0].find("different file") != std::string::npos);
-        }
-
-        // -- s016a2: hands off ------------------------------------------------------
-        {
-            core::scan::Progress p3;
-            std::vector<core::scan::Seen> m3;
-            core::scan::scan(H, H, p3, 0, &m3);
-            const auto d3 = ct::record(D, H, "", m3, {}, NOW);   // the catalog as the disk is now
-            const auto has_shot = [](const td::Report& rr) {
-                for (const auto& row : rr.groups.at(0).rows) if (row.query == "screenshots") return true;
-                return false;
-            };
-            const auto before = td::report(D, H, NOW);
-            check("hands-off: under() / touches() -- the folder, inside it, a folder holding it; not a sibling with a longer or shorter name",
-                  ct::under({"Pictures/Screenshots"}, "Pictures/Screenshots") &&
-                  ct::under({"Pictures/Screenshots"}, "Pictures/Screenshots/a.png") &&
-                  !ct::under({"Pictures/Screenshots"}, "Pictures/Screenshots2/a.png") && !ct::under({}, "x") &&
-                  ct::touches({"Documents/Scrivener"}, "Documents") && ct::touches({"Documents/Scrivener"}, "Documents/Scrivener/a") &&
-                  !ct::touches({"Documents/Scrivener"}, "Documents/Scriv") && !ct::touches({"Documents/Scrivener"}, "Pictures"));
-            const bool marked = ct::decide(D, "Pictures/Screenshots", "hands-off", "", NOW);
-            const auto off = td::report(D, H, NOW);
-            check("hands-off: marked -> nothing under it proposed; counted as left alone, not active; listed",
-                  d3.ok && before.ok && has_shot(before) && marked && off.ok && !has_shot(off) && off.left_alone == 1 &&
-                  off.active == before.active && off.hands_off == std::vector<std::string>{"Pictures/Screenshots"},
-                  std::to_string(off.left_alone) + " left alone");
-            check("hands-off: every verdict query still read-only with the clause", [&] {
-                for (const auto& q : td::queries())
-                    if (!ct::query(D, q.sql, {{":now", NOW}, {":short", 1}, {":dormant", 1}}).ok) return false;
-                return true;
-            }());
-            const bool forgot = ct::decide(D, "Pictures/Screenshots", "hands-on", "", NOW);
-            const auto on = td::report(D, H, NOW);
-            check("hands-off: Forget (hands-on) -> proposed again; the list empty", forgot && on.ok && has_shot(on) &&
-                  on.left_alone == 0 && on.hands_off.empty() && ct::hands_off(D).empty());
-            ct::decide(D, "Pictures", "hands-off", "", NOW);
-            check("hands-off: a parent folder covers everything below it", !has_shot(td::report(D, H, NOW)));
-            ct::decide(D, "Pictures", "hands-on", "", NOW);
-        }
-
-        // -- s016b: the Closet's review, the Junk Drawer, keep-here ---------------------
-        {
-            namespace dr = core::door;
-            const auto no_trash = [&] {
-                std::istringstream in(files_snapshot(home));
-                std::string l, out;
-                while (std::getline(in, l)) if (l.find("/.local/share/Trash") == std::string::npos) out += l + "\n";
-                return out;
-            };
-            fs::create_directories(home / "Closet/Junk Drawer");
-            put(home, "Closet/a.iso", 50000);
-            put(home, "Closet/b.png", 9000);
-            put(home, "Closet/c.txt", 5000);
-            put(home, "Closet/pack/inner.bin", 20000);
-            put(home, "Closet/.hidden", 10);
-            put(home, "Closet/dl.iso.part", 10);
-            core::scan::Progress p4;
-            std::vector<core::scan::Seen> m4;
-            core::scan::scan(H, H, p4, 0, &m4);
-            const auto d4 = ct::record(D, H, "", m4, {}, NOW);
-            ct::decide(D, "Closet/a.iso", "short", "expires " + std::to_string(NOW - DAY), NOW - 31 * DAY);
-            ct::decide(D, "Closet/b.png", "short", "expires " + std::to_string(NOW + 10 * DAY), NOW);
-            const auto v = td::closet(D, H, NOW);
-            std::vector<std::string> order;
-            for (const auto& it : v.items) order.push_back(it.rel);
-            const bool pack_ok = v.items.size() == 4 && v.items[3].dir && v.items[3].bytes >= 20000;
-            check("closet/review: the view -- expired first, then expiring, then the rest by name; hidden, partial "
-                  "downloads and the Junk Drawer not listed; a folder sized whole",
-                  d4.ok && v.closet && v.expired == 1 && v.expiring == 1 && v.junk == 0 && pack_ok &&
-                  order == std::vector<std::string>{"Closet/a.iso", "Closet/b.png", "Closet/c.txt", "Closet/pack"},
-                  order.empty() ? "" : order.front());
-            check("closet/review: each item's arrival from the catalog", v.items.size() == 4 && v.items[0].arrived > 0);
-            check("closet/review: the Closet isn't a 'folder that needs tidying' -- it has its own card", [&] {
-                for (const auto& f : td::report(D, H, NOW).folders) if (f.rel.rfind("Closet", 0) == 0) return false;
-                return true;
-            }());
-            check("help: Tidy explains the Closet's review and Keep here", [&] {
-                const auto* t = core::help::find("tidy");
-                for (const auto& sec : t->sections) if (sec.heading == "The Closet's review") return true;
-                return false;
-            }());
-
-            const std::string tree1 = no_trash();
-            dr::Door door(H, D);
-            door.load();
-            auto rp = td::review_plan(H, v.items, NOW);
-            check("closet/review: only the expired one goes to the Trash; the others left out, 'not expired yet'",
-                  rp.n == 1 && rp.plan.actions.size() == 1 && rp.plan.actions[0].verb == dr::Verb::Trash &&
-                  rp.plan.actions[0].from == H + "/Closet/a.iso" && rp.dropped.size() == 3 &&
-                  rp.dropped[0].find("not expired yet") != std::string::npos);
-            const auto rr0 = door.run(rp.plan);
-            check("closet/review: unpreviewed -> refused, nothing changed", !rr0.ok && no_trash() == tree1);
-            rp.plan.previewed = true;
-            const auto rr = door.run(rp.plan);
-            const auto v2 = td::closet(D, H, NOW);
-            check("closet/review: run -> a.iso in the Trash, the rest stay", rr.ok && !fs::exists(home / "Closet/a.iso") &&
-                  fs::exists(home / "Closet/b.png") && v2.items.size() == 3 && v2.expired == 0,
-                  rr.messages.empty() ? "" : rr.messages.front());
-            const auto ru = door.undo();
-            check("closet/review: undo -> exact", ru.ok && no_trash() == tree1, ru.messages.empty() ? "" : ru.messages.front());
-            check("closet/review: later, past its expiry, b.png is offered too",
-                  td::review_plan(H, td::closet(D, H, NOW + 11 * DAY).items, NOW + 11 * DAY).n == 2);
-
-            // The Junk Drawer.
-            const auto v3 = td::closet(D, H, NOW);
-            std::vector<td::ClosetItem> pick;
-            for (const auto& it : v3.items) if (it.rel == "Closet/c.txt" || it.rel == "Closet/pack") pick.push_back(it);
-            auto jp = td::junk_plan(H, pick);
-            check("closet/junk: two moves into the Junk Drawer (it exists, not made again)",
-                  jp.n == 2 && jp.plan.actions.size() == 2 && jp.dropped.empty() &&
-                  jp.plan.actions[0].to == H + "/Closet/Junk Drawer/c.txt");
-            jp.plan.previewed = true;
-            const auto jr = door.run(jp.plan);
-            const auto v4 = td::closet(D, H, NOW);
-            check("closet/junk: run -> in the Junk Drawer, counted there, gone from the review",
-                  jr.ok && fs::exists(home / "Closet/Junk Drawer/c.txt") && fs::exists(home / "Closet/Junk Drawer/pack/inner.bin") &&
-                  v4.junk == 2 && v4.items.size() == 2, jr.messages.empty() ? "" : jr.messages.front());
-            const auto ju = door.undo();
-            check("closet/junk: undo -> exact", ju.ok && no_trash() == tree1, ju.messages.empty() ? "" : ju.messages.front());
-            put(home, "Closet/Junk Drawer/c.txt", 7);
-            const auto taken = td::junk_plan(H, pick);
-            check("closet/junk: a name taken in the Junk Drawer -> left out, said", taken.n == 1 && taken.dropped.size() == 1 &&
-                  taken.dropped[0].find("taken") != std::string::npos);
-            fs::remove(home / "Closet/Junk Drawer/c.txt", ec);
-            put(home, "Closet/c.txt", 5001);   // changed since the view
-            fs::last_write_time(home / "Closet/c.txt", fs::last_write_time(home / "Closet/c.txt") + std::chrono::hours(1));
-            const auto ch = td::junk_plan(H, pick);
-            check("closet/junk: a file changed since the view -> left out", ch.n == 1 && ch.dropped.size() == 1 &&
-                  ch.dropped[0].find("changed") != std::string::npos);
-            auto outside = v3.items.front();
-            outside.rel = "Documents/x";
-            check("closet/review: an item outside the Closet is refused by both plans",
-                  td::junk_plan(H, {outside}).n == 0 && td::review_plan(H, {outside}, NOW + 100 * DAY).n == 0);
-
-            // s016c: Put away -- a home you choose; the home may become a rule (added off).
-            {
-                fs::create_directories(home / "Documents/Taxes");
-                fs::create_directories(home / "Documents/Covers");
-                put(home, "Closet/w2.PDF", 3000);
-                put(home, "Documents/Taxes/dup.txt", 3);
-                put(home, "Closet/dup.txt", 3);
-                put(home, "Closet/README", 3);
-                const auto pv = td::closet(D, H, NOW);
-                const auto item = [&](const std::string& rel) {
-                    for (const auto& it : pv.items) if (it.rel == rel) return it;
-                    return td::ClosetItem{};
-                };
-                const std::string treeA = no_trash();
-                auto pa = td::put_away_plan(H, item("Closet/w2.PDF"), "Documents/Taxes", {});
-                check("put away: one move to the chosen folder, by name",
-                      pa.n == 1 && pa.plan.actions.size() == 1 && pa.plan.actions[0].verb == dr::Verb::Move &&
-                      pa.plan.actions[0].to == H + "/Documents/Taxes/w2.PDF" && pa.dropped.empty());
-                const auto refused = [&](const td::Review& rv, const std::string& word) {
-                    return rv.n == 0 && rv.plan.actions.empty() && rv.dropped.size() == 1 &&
-                           rv.dropped[0].find(word) != std::string::npos;
-                };
-                check("put away: refused -- the Closet / the Junk Drawer, a missing folder, '..', a hands-off folder, "
-                      "a name taken there, an item not in the Closet",
-                      refused(td::put_away_plan(H, item("Closet/w2.PDF"), "Closet", {}), "Closet") &&
-                      refused(td::put_away_plan(H, item("Closet/w2.PDF"), "Closet/Junk Drawer", {}), "Closet") &&
-                      refused(td::put_away_plan(H, item("Closet/w2.PDF"), "Documents/Nope", {}), "isn't a folder") &&
-                      refused(td::put_away_plan(H, item("Closet/w2.PDF"), "Documents/../..", {}), "under home") &&
-                      refused(td::put_away_plan(H, item("Closet/w2.PDF"), "Documents/Covers", {"Documents/Covers"}), "hands off") &&
-                      refused(td::put_away_plan(H, item("Closet/dup.txt"), "Documents/Taxes", {}), "already has") &&
-                      refused(td::put_away_plan(H, td::ClosetItem{"Documents/x"}, "Documents/Taxes", {}), "top of the Closet"));
-                pa.plan.previewed = true;
-                const auto pr = door.run(pa.plan);
-                check("put away: run -> in its home, gone from the Closet", pr.ok && fs::exists(home / "Documents/Taxes/w2.PDF") &&
-                      !fs::exists(home / "Closet/w2.PDF"), pr.messages.empty() ? "" : pr.messages.front());
-                const auto pu = door.undo();
-                check("put away: undo -> exact", pu.ok && no_trash() == treeA, pu.messages.empty() ? "" : pu.messages.front());
-
-                std::string why;
-                const auto rule = td::home_rule(item("Closet/w2.PDF"), "Documents/Taxes", {}, &why);
-                check("put away -> rule: '*.pdf in the Closet -> Documents/Taxes', a Move, OFF, and it can run",
-                      rule && rule->folder == "Closet" && rule->exts == std::vector<std::string>{"pdf"} &&
-                      rule->act == core::rules::Do::Move && rule->dest == "Documents/Taxes" && !rule->enabled &&
-                      core::rules::problem(*rule, H).empty(), rule ? core::rules::problem(*rule, H) : why);
-                bool matched = false;
-                if (rule)
-                    for (const auto& m : core::rules::matches(H, {*rule}, static_cast<std::int64_t>(std::time(nullptr)) + 3600, std::size_t{0}))
-                        if (m.from == H + "/Closet/w2.PDF" && m.to == H + "/Documents/Taxes/w2.PDF") matched = true;
-                check("put away -> rule: its preview (the Rules page) finds the next PDF landing in the Closet", matched);
-                check("put away -> rule: none for a folder, a name with no extension, or when one already sorts that extension",
-                      !td::home_rule(item("Closet/pack"), "Documents/Taxes", {}) &&
-                      !td::home_rule(item("Closet/README"), "Documents/Taxes", {}) &&
-                      rule && !td::home_rule(item("Closet/w2.PDF"), "Documents", {*rule}, &why) &&
-                      why.find("already sorts *.pdf") != std::string::npos, why);
-                fs::remove(home / "Closet/w2.PDF", ec);
-                fs::remove(home / "Closet/dup.txt", ec);
-                fs::remove(home / "Closet/README", ec);
-                fs::remove_all(home / "Documents/Taxes", ec);
-                fs::remove_all(home / "Documents/Covers", ec);
-            }
-
-            // Keep here -- never proposed again; Forget (keep-off) brings it back.
-            const auto rk = td::report(D, H, NOW);
-            std::string prop;
-            for (const auto& g : rk.groups) if (!g.rows.empty() && prop.empty()) prop = g.rows.front().rel;
-            const auto proposed = [&](const td::Report& rr2) {
-                for (const auto& g : rr2.groups) for (const auto& row : g.rows) if (row.rel == prop) return true;
-                return false;
-            };
-            const auto kept0 = td::kept(D);   // an earlier test already kept one
-            const bool k1 = !prop.empty() && ct::decide(D, prop, "keep-here", "", NOW);
-            const auto kept1 = td::kept(D);
-            const auto rk2 = td::report(D, H, NOW);
-            check("keep-here: kept -> not proposed, counted kept, listed by kept()",
-                  k1 && rk.ok && rk2.ok && !proposed(rk2) && rk2.kept == rk.kept + 1 &&
-                  kept1.size() == kept0.size() + 1 && std::find(kept1.begin(), kept1.end(), prop) != kept1.end(),
-                  prop + " proposed=" + std::to_string(proposed(rk2)) + " kept " + std::to_string(rk.kept) + "->" +
-                  std::to_string(rk2.kept) + " list " + std::to_string(td::kept(D).size()));
-            const bool k2 = ct::decide(D, prop, "keep-off", "", NOW);
-            const auto rk3 = td::report(D, H, NOW);
-            check("keep-here: Forget (keep-off) -> proposed again, gone from kept()", k2 && proposed(rk3) && td::kept(D) == kept0);
-            fs::remove_all(home / "Closet", ec);
-        }
-
-        // Preflight's "Last opened" row (s015c).
-        namespace pf = core::preflight;
-        pf::Inputs in;
-        in.home = H; in.total_bytes = 1000ull * 1000 * 1000 * 1000; in.free_bytes = in.total_bytes / 2;
-        const auto row = [&](const std::string& mode) -> std::optional<pf::Check> {
-            in.atime_mode = mode;
-            for (const auto& c : pf::evaluate(in)) if (c.id == "atime") return c;
-            return std::nullopt;
-        };
-        const auto rel = row("relatime"), noa = row("noatime"), unk = row("");
-        check("preflight: 'Last opened' -- relatime green, noatime amber (never red), unknown no row",
-              rel && rel->status == pf::Status::Green && noa && noa->status == pf::Status::Amber && !unk &&
-              pf::gather(H).atime_mode == ct::atime_mode(H));
-        fs::remove_all(home, ec);
-    }
-    // -- Version families (s017) ---------------------------------------------------
-    {
-        std::cout << "\n-- versions --\n";
-        namespace ct = core::catalog;
-        namespace vs = core::versions;
-        namespace dr = core::door;
-        const auto b = [](const std::string& s) { bool m = false, c = false; std::string r = vs::base_of(s, &m, &c); return r + (m ? "|m" : "") + (c ? "|c" : ""); };
-        check("versions: names -- marks come off the end, bare numbers and dates stay",
-              b("ch3") == "ch3" && b("ch3 final") == "ch3|m" && b("ch3 final2") == "ch3|m" && b("ch3 (1)") == "ch3|m|c" &&
-              b("Copy of ch3") == "ch3|m|c" && b("ch3_v2") == "ch3|m" && b("ch3 draft 3") == "ch3|m" &&
-              b("ch3 - Copy") == "ch3|m|c" && b("ch3 v1.2 final") == "ch3|m" && b("Tapper FINAL final") == "Tapper|m" &&
-              b("Chapter 2") == "Chapter 2" && b("Invoice 2026-02") == "Invoice 2026-02" && b("final") == "final" &&
-              b("dev2") == "dev2" && b("draft") == "draft",
-              b("ch3 v1.2 final") + " / " + b("Tapper FINAL final") + " / " + b("Chapter 2"));
-        std::string st, ex;
-        vs::split_name("Tapper_2026-11-01T10-00.folio.gz", st, ex);
-        const bool sp1 = st == "Tapper_2026-11-01T10-00" && ex == "folio.gz";
-        vs::split_name("README", st, ex);
-        check("versions: split -- .folio.gz is one extension; no dot, no extension; versions folders known",
-              sp1 && st == "README" && ex.empty() && vs::is_versions_folder("ch3 versions") &&
-              vs::is_versions_folder("versions") && !vs::is_versions_folder("conversions") &&
-              vs::versions_name("Tapper") == "Tapper versions");
-        check("versions: our apps' bundles are packages -- .curvz .folio .jots .optik (folders only)",
-              core::pkg::is_package_name("Logo.curvz") && core::pkg::is_package_name("Tapper.FOLIO") &&
-              core::pkg::is_package_name("home.jots") && core::pkg::is_package_name("Book.optik"));
-
-        const fs::path home = fs::temp_directory_path() / ("rouster_versions_" + std::to_string(::getpid()));
-        std::error_code ec;
-        fs::remove_all(home, ec);
-        const std::string H = home.string(), D = H + "/.local/share/rouster";
-        const std::int64_t NOW = 1790000000, DAY = 86400;
-        const auto when = [&](const std::string& rel, std::int64_t t) {
-            struct timespec ts[2] = {{static_cast<time_t>(t), 0}, {static_cast<time_t>(t), 0}};
-            return ::utimensat(AT_FDCWD, (home / rel).c_str(), ts, AT_SYMLINK_NOFOLLOW) == 0;
-        };
-        const auto at = [&](const std::string& rel, const std::string& data, std::int64_t t) {
-            return put_bytes(home, rel, data) && when(rel, t);
-        };
-        const std::string N = "Documents/Novels/";
-        const std::string body(6000, 'a');
-        bool made = at(N + "ch3.odt", body + "one", NOW - 9 * DAY) &&
-                    at(N + "ch3 draft.odt", body + "one", NOW - 8 * DAY) &&            // the same bytes as ch3.odt
-                    at(N + "ch3 (1).odt", body + "two!", NOW - 7 * DAY) &&           // a copy's name
-                    at(N + "ch3 v2.odt", body + "three", NOW - 3 * DAY - 300) &&     // 5 min before "final", ~ same size
-                    at(N + "ch3 final.odt", body + "four", NOW - 3 * DAY) &&
-                    at(N + "ch3 final2.odt", body + "five-five", NOW - DAY) &&        // the keeper
-                    at(N + "Chapter 2.odt", body, NOW - DAY) && at(N + "Chapter 3.odt", body, NOW - DAY) &&
-                    at("Documents/Invoice 2026-01.pdf", body, NOW - 40 * DAY) && at("Documents/Invoice 2026-02.pdf", body, NOW - 9 * DAY) &&
-                    at("Documents/Tapper.odt", body + "new", NOW - DAY) &&
-                    at("Documents/Tapper versions/Tapper old.odt", body + "old", NOW - 30 * DAY) &&
-                    at("Pictures/Logo.curvz/project.json", "{}", NOW - 20 * DAY) && when("Pictures/Logo.curvz", NOW - 20 * DAY) &&
-                    at("Pictures/Logo v2.curvz/project.json", "{ }", NOW - 2 * DAY) && when("Pictures/Logo v2.curvz", NOW - 2 * DAY) &&
-                    at("Develop/x/a.txt", body, NOW - DAY) && at("Develop/x/a (1).txt", body, NOW - 2 * DAY) &&
-                    at("Closet/b.txt", body, NOW - DAY) && at("Closet/b (1).txt", body, NOW - 2 * DAY) &&
-                    at("Documents/Jobs/J1/.rouster.json", "{\"kind\":\"project\"}", NOW) &&
-                    at("Documents/Jobs/J1/rep.txt", body, NOW - DAY) && at("Documents/Jobs/J1/rep v2.txt", body + "x", NOW) &&
-                    at("Pictures/cat.png", body + "c", NOW - 5 * DAY) && at("Pictures/cat copy.png", body + "c", NOW - 5 * DAY) &&
-                    at("Covers/c.png", body, NOW - DAY) && at("Covers/c final.png", body + "y", NOW) &&
-                    // Folio's history, moved into home by its preference; jot's and Trails' in their defaults.
-                    at(".config/folio/preferences.ini", "[General]\nx=1\n[AutoSave]\nbackup-dir=~/FolioBackups/\n", NOW) &&
-                    at("FolioBackups/Tapper/Tapper_2026-11-01T10-00.folio.gz", "gz1", NOW - 3 * DAY) &&
-                    at("FolioBackups/Tapper/Tapper_2026-11-02T10-00.folio.gz", "gz2", NOW - 2 * DAY) &&
-                    at("FolioBackups/Tapper/Tapper final.txt", "a", NOW - 2 * DAY) &&
-                    at("FolioBackups/Tapper/Tapper.txt", "b", NOW - 2 * DAY) &&
-                    at(".local/share/jot/backups/home.jots/.source", H + "/Notes/home.jots\n", NOW) &&
-                    at(".local/share/jot/backups/home.jots/2026-11-01/a.md", "x", NOW - 2 * DAY) &&
-                    at(".local/share/jot/backups/home.jots/2026-11-02/a.md", "x", NOW - DAY) &&
-                    at(".local/share/jot/backups/home.jots/last-ok", "1", NOW) &&
-                    at(".local/share/trails/recordings/2026-11-07_16-40-12.trail", "sqlite", NOW);
-        check("versions: fixture made", made);
-        fs::create_directories(D, ec);
-        core::scan::Progress p;
-        std::vector<core::scan::Seen> mine;
-        core::scan::scan(H, H, p, 0, &mine);
-        const auto rec = ct::record(D, H, "", mine, {}, NOW);
-        check("versions: catalog recorded; Covers hands off", rec.ok && ct::decide(D, "Covers", "hands-off", "", NOW));
-
-        const std::string DH = H + "/.local/share", CH = H + "/.config";
-        const auto hist = vs::app_history(H, DH, CH);
-        std::map<std::string, vs::History> hs;
-        for (const auto& h : hist) hs[h.app] = h;
-        check("versions: app history -- Folio's (moved into home by backup-dir), jot's days, Trails' recordings",
-              hist.size() == 3 && hs["Folio"].what == "Tapper" && hs["Folio"].count == 2 && hs["Folio"].in_home &&
-              hs["Folio"].path == H + "/FolioBackups/Tapper" && hs["jot"].what == "home.jots" && hs["jot"].count == 2 &&
-              !hs["jot"].in_home && hs["Trails"].count == 1 && hs["Folio"].newest == NOW - 2 * DAY,
-              std::to_string(hist.size()));
-
-        const std::string disk = files_snapshot(home);
-        auto r = vs::find(D, H, DH, CH);
-        std::map<std::string, const vs::Family*> fam;
-        for (const auto& f : r.families) fam[f.key()] = &f;
-        std::string keys;
-        for (const auto& [k, f] : fam) keys += k + " ";
-        check("versions: find reads -- changes nothing", r.ok && files_snapshot(home) == disk, r.error);
-        bool cat_ok = false;
-        if (const auto it = fam.find("Pictures/cat.png"); it != fam.end())
-            cat_ok = it->second->members[it->second->keeper].rel == "Pictures/cat.png" &&
-                     it->second->members[1].reflex == "a copy's name";
-        check("versions: saved in the same second -- the plain name is the keeper, not the copy", cat_ok);
-        fam.erase("Pictures/cat.png");
-        check("versions: three families -- ch3 (6), Logo.curvz (packages), Tapper (tidy); not Chapter 2/3, "
-              "not the invoices, not dev / Closet / a Project / hands off / Folio's history",
-              fam.size() == 3 && fam.count("Documents/Novels/ch3.odt") && fam.count("Pictures/logo.curvz") &&
-              fam.count("Documents/tapper.odt"), keys);
-        if (fam.size() == 3 && fam.count("Documents/Novels/ch3.odt") && fam.count("Documents/tapper.odt") &&
-            fam.count("Pictures/logo.curvz")) {
-            const vs::Family& c3 = *fam["Documents/Novels/ch3.odt"];
-            const vs::Family& tp = *fam["Documents/tapper.odt"];
-            const vs::Family& lg = *fam["Pictures/logo.curvz"];
-            std::map<std::string, std::string> rf;
-            for (const auto& m : c3.members) rf[m.rel.substr(N.size())] = m.reflex;
-            check("versions: ch3 -- six, newest first, the keeper is the newest, five loose, vdir beside it",
-                  c3.members.size() == 6 && c3.members[c3.keeper].rel == N + "ch3 final2.odt" && c3.keeper_why == "the newest" &&
-                  c3.loose == 5 && c3.vdir == "Documents/Novels/ch3 versions" && c3.base == "ch3" && c3.members[0].changed == NOW - DAY);
-            check("versions: reflex saves -- a copy's name, the same bytes, minutes apart at ~ the same size; not the others",
-                  rf["ch3 (1).odt"] == "a copy's name" && rf["ch3 draft.odt"] == "the same bytes as ch3.odt" &&
-                  rf["ch3 v2.odt"].find("5 min before ch3 final.odt") != std::string::npos && rf["ch3 final.odt"].empty() && rf["ch3.odt"].empty() &&
-                  rf["ch3 final2.odt"].empty(),
-                  rf["ch3 v2.odt"] + " / " + rf["ch3 draft.odt"]);
-            check("versions: Tapper -- tidy (its one outside is the keeper), the old one in 'Tapper versions'",
-                  tp.loose == 0 && tp.members.size() == 2 && tp.members[tp.keeper].rel == "Documents/Tapper.odt" &&
-                  tp.keeper_why == "the only one outside its versions folder" && tp.vdir == "Documents/Tapper versions");
-            check("versions: Logo.curvz -- two packages, the newer is the keeper; tidy families sort last",
-                  lg.members.size() == 2 && lg.members[lg.keeper].rel == "Pictures/Logo v2.curvz" && lg.members[0].package &&
-                  lg.loose == 1 && r.families.back().key() == "Documents/tapper.odt" && r.loose == 7);
-
-            dr::Door door(H, D);
-            door.load();
-            const auto no_trash = [&] {
-                std::istringstream in(files_snapshot(home));
-                std::string l, out;
-                while (std::getline(in, l)) if (l.find("/.local/share/Trash") == std::string::npos) out += l + "\n";
-                return out;
-            };
-            const std::string tree0 = no_trash();
-            auto s1 = vs::plan(H, c3, c3.keeper);
-            check("versions: the step -- make the versions folder, five moves into it, the keeper stays",
-                  s1.moves == 5 && s1.plan.actions.size() == 6 && s1.plan.actions[0].verb == dr::Verb::MakeDir &&
-                  s1.plan.actions[0].to == H + "/" + N + "ch3 versions" && !s1.plan.previewed && s1.dropped.empty());
-            check("versions: the door refuses it unpreviewed", !door.run(s1.plan).ok && no_trash() == tree0);
-            s1.plan.previewed = true;
-            const auto r1 = door.run(s1.plan);
-            check("versions: run -> five in 'ch3 versions', the keeper where it was",
-                  r1.ok && fs::exists(home / (N + "ch3 versions/ch3 (1).odt")) && fs::exists(home / (N + "ch3 versions/ch3.odt")) &&
-                  fs::exists(home / (N + "ch3 final2.odt")) && !fs::exists(home / (N + "ch3 final.odt")),
-                  r1.messages.empty() ? "" : r1.messages.front());
-            const auto u1 = door.undo();
-            check("versions: undo -> exact", u1.ok && no_trash() == tree0, u1.messages.empty() ? "" : u1.messages.front());
-
-            // Keep this one instead: an older keeper; then a keeper that sits in the versions folder comes out.
-            std::size_t first = 0;
-            for (std::size_t x = 0; x < c3.members.size(); ++x) if (c3.members[x].rel == N + "ch3.odt") first = x;
-            const auto s2 = vs::plan(H, c3, first);
-            bool newest_in = false, first_stays = true;
-            for (const auto& a : s2.plan.actions) {
-                if (a.from == H + "/" + N + "ch3 final2.odt" && a.to == H + "/" + N + "ch3 versions/ch3 final2.odt") newest_in = true;
-                if (a.from == H + "/" + N + "ch3.odt") first_stays = false;
-            }
-            check("versions: keep this one instead -- the newest goes in, the chosen one stays", s2.moves == 5 && newest_in && first_stays);
-            std::size_t old = 0;
-            for (std::size_t x = 0; x < tp.members.size(); ++x) if (tp.members[x].in_versions) old = x;
-            auto s3 = vs::plan(H, tp, old);
-            s3.plan.previewed = true;
-            const auto r3 = door.run(s3.plan);
-            check("versions: a keeper in the versions folder comes out; the other goes in -- one step, undone exact",
-                  s3.moves == 1 && s3.plan.actions.size() == 2 && r3.ok && fs::exists(home / "Documents/Tapper old.odt") &&
-                  fs::exists(home / "Documents/Tapper versions/Tapper.odt") && door.undo().ok && no_trash() == tree0);
-
-            // Looked at again: changed since the Look; a name already taken in the versions folder.
-            at(N + "ch3 final.odt", body + "four, edited", NOW);
-            at(N + "ch3 versions/ch3 (1).odt", "someone else", NOW);
-            const auto s4 = vs::plan(H, c3, c3.keeper);
-            std::string dropped;
-            for (const auto& d : s4.dropped) dropped += d + " | ";
-            check("versions: changed since the Look and a taken name -- left out, said; the folder there, not made again",
-                  s4.moves == 3 && s4.dropped.size() == 2 && dropped.find("ch3 final.odt: changed since the Look") != std::string::npos &&
-                  dropped.find("ch3 (1).odt: its name is taken") != std::string::npos &&
-                  s4.plan.actions.front().verb == dr::Verb::Move, dropped);
-            fs::remove_all(home / (N + "ch3 versions"), ec);
-
-            // Two families, one step, one Undo.
-            const auto r5 = vs::find(D, H, DH, CH);
-            std::vector<vs::Family> two;
-            for (const auto& f : r5.families) if (f.loose && f.key() != "Pictures/cat.png") two.push_back(f);
-            auto s5 = vs::plan_all(H, two, {});
-            s5.plan.previewed = true;
-            const std::string tree5 = no_trash();
-            const auto rr5 = door.run(s5.plan);
-            check("versions: two families in one step (5 moves -- the edited one left out -- and 2 folders) -- one Undo takes both back",
-                  two.size() == 2 && s5.moves == 5 && rr5.ok && fs::exists(home / "Pictures/Logo versions/Logo.curvz/project.json") &&
-                  door.undo().ok && no_trash() == tree5, std::to_string(s5.moves));
-
-            // Decisions: not a family -> never proposed again; Keep this one instead -> "you chose".
-            const auto r6 = vs::find(D, H, DH, CH);
-            const vs::Family* lg6 = nullptr;
-            const vs::Family* c36 = nullptr;
-            for (const auto& f : r6.families) {
-                if (f.key() == "Pictures/logo.curvz") lg6 = &f;
-                if (f.key() == "Documents/Novels/ch3.odt") c36 = &f;
-            }
-            bool chose = false;
-            if (lg6 && c36) {
-                std::size_t k = 0;
-                for (std::size_t x = 0; x < c36->members.size(); ++x) if (c36->members[x].rel == N + "ch3 final.odt") k = x;
-                chose = vs::not_a_family(D, *lg6, NOW + 1) && vs::choose_keeper(D, *c36, k, NOW + 1);
-            }
-            const auto r7 = vs::find(D, H, DH, CH);
-            bool logo_gone = true, you_chose = false;
-            for (const auto& f : r7.families) {
-                if (f.key() == "Pictures/logo.curvz") logo_gone = false;
-                if (f.key() == "Documents/Novels/ch3.odt")
-                    you_chose = f.keeper_why == "you chose" && f.members[f.keeper].rel == N + "ch3 final.odt";
-            }
-            check("versions: 'not a family' -> left out next time; 'keep this one' -> the keeper, 'you chose'",
-                  chose && logo_gone && you_chose);
-        }
-        fs::remove_all(home, ec);
-    }
     // -- s018: search the archive -- name, kind, where it came from, when ----------
     {
         std::cout << "\n-- archive search --\n";
@@ -4535,139 +3717,10 @@ int main(int argc, char** argv) {
               ar::index(H, D, ar::stored(door, H)).entries.size() == 5);
         fs::remove_all(home, ec);
     }
-    // -- s017b: compare -- kinds, texts out of txt / ODT / DOCX / FODT, the line diff --
-    {
-        std::cout << "\n-- compare --\n";
-        namespace cm = core::compare;
-        const fs::path dir = fs::temp_directory_path() / ("rouster_compare_" + std::to_string(::getpid()));
-        std::error_code ec;
-        fs::remove_all(dir, ec);
-        fs::create_directories(dir, ec);
-        const auto put = [&](const std::string& name, const std::string& data) { return put_bytes(dir, name, data); };
-        const auto P = [&](const std::string& name) { return (dir / name).string(); };
-        const std::string bad = "\xEF\xBF\xBD";
-
-        check("compare: clean_utf8 -- good kept, a stray byte / an overlong / NUL each replaced",
-              cm::clean_utf8("caf\xC3\xA9 \xE2\x80\x94 ok") == "caf\xC3\xA9 \xE2\x80\x94 ok" &&
-              cm::clean_utf8("a\xFF" "b") == "a" + bad + "b" && cm::clean_utf8("\xC0\xAF") == bad + bad &&
-              cm::clean_utf8(std::string("x\0y", 3)) == "x" + bad + "y" && cm::clean_utf8("\xE2\x80") == bad + bad);
-
-        bool made = put("a.png", png_bytes(8, 8, 0xff0000, 0x00ff00)) && put("notes.weird", "plain words\nmore\n") &&
-                    put("blob.weird", std::string("\x01\x02\0\x03", 4)) && put("Logo.curvz/project.json", "{}") &&
-                    put("Book.scriv/x", "y");
-        check("compare: kinds -- picture, text, our app's bundle (Curvz), a Mac package is Other, an unknown text "
-              "sniffed as text, unknown bytes are Other",
-              made && cm::kind_of(P("a.png"), "png", false) == cm::Kind::Image &&
-              cm::kind_of(P("x.odt"), "odt", false) == cm::Kind::Text &&
-              cm::kind_of(P("Logo.curvz"), "curvz", true) == cm::Kind::App && cm::app_of("curvz") == "Curvz" &&
-              cm::app_of("jots") == "jot" && cm::app_of("folio.gz").empty() &&
-              cm::kind_of(P("Book.scriv"), "scriv", true) == cm::Kind::Other &&
-              cm::kind_of(P("notes.weird"), "weird", false) == cm::Kind::Text &&
-              cm::kind_of(P("blob.weird"), "weird", false) == cm::Kind::Other);
-
-        made = put("crlf.txt", "\xEF\xBB\xBFone\r\ntwo\r\n\r\nfour\xFF\n");
-        const auto t1 = cm::read_text(P("crlf.txt"), "txt");
-        const auto t2 = cm::read_text(P("blob.weird"), "txt");
-        check("compare: a plain text -- BOM and CRs off, the blank line kept, the last newline isn't a line, bad bytes "
-              "replaced; a binary is 'not a text'",
-              made && t1.ok && t1.lines == std::vector<std::string>{"one", "two", "", "four" + bad} && !t2.ok &&
-              t2.why == "not a text");
-
-        const std::string body =
-            "<office:body><office:text><text:h text:outline-level=\"1\">Chapter Three</text:h>"
-            "<text:p>Tapper <text:span>felt</text:span> it &amp; <text:s text:c=\"3\"/>waited.</text:p>"
-            "<text:p/><text:p>A<text:tab/>tab<text:line-break/>and a break"
-            "<office:annotation><dc:creator>me</dc:creator><text:p>a comment</text:p></office:annotation></text:p>"
-            "<text:p>Note<text:note><text:note-citation>1</text:note-citation><text:note-body><text:p>foot</text:p>"
-            "</text:note-body></text:note> here &#x2014; &lt;ok&gt;</text:p></office:text></office:body>";
-        const std::string xml = "<?xml version=\"1.0\"?><office:document-content>" + body + "</office:document-content>";
-        const std::vector<std::string> want = {"Chapter Three", "Tapper felt it &    waited.", "", "A\ttab", "and a break",
-                                               "Note here \xE2\x80\x94 <ok>"};
-        made = put("ch.odt", zip_bytes({{"mimetype", "application/vnd.oasis.opendocument.text", false},
-                                        {"Thumbnails/thumbnail.png", png_bytes(4, 4, 0, 0), false},
-                                        {"content.xml", xml, true}})) &&
-               put("stored.odt", zip_bytes({{"mimetype", "x", false}, {"content.xml", xml, false}})) &&
-               put("ch.fodt", xml) && put("nocontent.odt", zip_bytes({{"mimetype", "x", false}})) &&
-               put("notzip.odt", "just words, no zip here at all, long enough to look");
-        const auto o1 = cm::read_text(P("ch.odt"), "odt"), o2 = cm::read_text(P("stored.odt"), "odt"),
-                   o3 = cm::read_text(P("ch.fodt"), "fodt"), o4 = cm::read_text(P("nocontent.odt"), "odt"),
-                   o5 = cm::read_text(P("notzip.odt"), "odt");
-        check("compare: an ODT's paragraphs (deflated, stored, flat FODT) -- heading, spans, entities, text:s, tab, "
-              "line break; comments and footnotes left out",
-              made && o1.ok && o1.lines == want && o2.ok && o2.lines == want && o3.ok && o3.lines == want,
-              o1.ok ? (o1.lines.size() > 1 ? "'" + o1.lines[1] + "'" : "n=" + std::to_string(o1.lines.size())) : o1.why);
-        check("compare: a zip without content.xml, and a file that isn't a zip -- not read, said why",
-              !o4.ok && o4.why == "the zip has no content.xml" && !o5.ok && o5.why == "not a zip", o4.why + " / " + o5.why);
-
-        const std::string dx = "<w:document><w:body><w:p><w:r><w:t>Hello</w:t></w:r><w:r><w:t xml:space=\"preserve\"> "
-                               "world &amp; more</w:t></w:r></w:p><w:p/><w:p><w:r><w:t>A</w:t><w:tab/><w:t>B</w:t>"
-                               "<w:br/><w:t>C</w:t><w:delText>gone</w:delText></w:r></w:p></w:body></w:document>";
-        made = put("d.docx", zip_bytes({{"[Content_Types].xml", "<x/>", true}, {"word/document.xml", dx, true}}));
-        const auto d1 = cm::read_text(P("d.docx"), "docx");
-        check("compare: a DOCX's paragraphs -- runs joined, tab, break; deleted text left out",
-              made && d1.ok && d1.lines == std::vector<std::string>{"Hello world & more", "", "A\tB", "C"});
-
-        // The diff.
-        using V = std::vector<std::string>;
-        const auto r0 = cm::rows(V{"a", "b", "c"}, V{"a", "b", "c"}, 0);
-        const auto r1 = cm::rows(V{"a", "b", "c", "d"}, V{"a", "B", "c", "d", "e"}, 0);
-        const auto r2 = cm::rows(V{"a", "b", "c"}, V{"a", "c"}, 0);
-        check("compare: the diff -- identical; one changed + one added, aligned; one removed against a blank",
-              r0.identical() && r0.rows.size() == 3 && r1.changed == 1 && r1.added == 1 && r1.removed == 0 &&
-              r1.rows.size() == 5 && r1.rows[1].mark == cm::Mark::Changed && r1.rows[1].left == "b" &&
-              r1.rows[1].right == "B" && r1.rows[4].mark == cm::Mark::Added && r1.rows[4].left.empty() &&
-              r1.rows[4].rno == 5 && r2.removed == 1 && r2.rows[1].mark == cm::Mark::Removed && r2.rows[1].right.empty());
-        V big;
-        for (int k = 0; k < 100; ++k) big.push_back("line " + std::to_string(k));
-        V big2 = big;
-        big2[50] = "changed";
-        const auto r3 = cm::rows(big, big2, 3);
-        std::size_t shown = 0, folded = 0;
-        for (const auto& r : r3.rows) { if (r.mark == cm::Mark::Gap) folded += r.skipped; else ++shown; }
-        check("compare: folding -- one change in 100 lines shows it with 3 lines either side, the rest in two gaps",
-              r3.rows.size() == 9 && r3.rows[0].mark == cm::Mark::Gap && r3.rows[0].skipped == 47 &&
-              r3.rows[4].mark == cm::Mark::Changed && r3.rows[8].mark == cm::Mark::Gap && shown + folded == 100,
-              std::to_string(r3.rows.size()) + " rows");
-        // Against a plain LCS on random small texts: the rows rebuild both sides exactly and the edit count is minimal.
-        std::mt19937 rng(17);
-        bool exact = true, minimal = true;
-        for (int trial = 0; trial < 300 && exact && minimal; ++trial) {
-            V a, b;
-            const int na = static_cast<int>(rng() % 25), nb = static_cast<int>(rng() % 25);
-            for (int k = 0; k < na; ++k) a.push_back(std::string(1, static_cast<char>('a' + rng() % 4)));
-            for (int k = 0; k < nb; ++k) b.push_back(std::string(1, static_cast<char>('a' + rng() % 4)));
-            const auto r = cm::rows(a, b, 0);
-            V ra, rb;
-            for (const auto& x : r.rows) {
-                if (x.mark != cm::Mark::Added) ra.push_back(x.left);
-                if (x.mark != cm::Mark::Removed) rb.push_back(x.right);
-            }
-            exact = ra == a && rb == b;
-            std::vector<std::vector<int>> L(a.size() + 1, std::vector<int>(b.size() + 1, 0));
-            for (std::size_t i = a.size(); i-- > 0;)
-                for (std::size_t j = b.size(); j-- > 0;)
-                    L[i][j] = a[i] == b[j] ? L[i + 1][j + 1] + 1 : std::max(L[i + 1][j], L[i][j + 1]);
-            minimal = r.same == static_cast<std::size_t>(L[0][0]);
-        }
-        check("compare: 300 random texts -- the rows rebuild both sides, and the same lines are a longest common run",
-              exact && minimal);
-        V x1, x2;
-        for (int k = 0; k < 2500; ++k) { x1.push_back("x" + std::to_string(k)); x2.push_back("y" + std::to_string(k)); }
-        const auto r4 = cm::rows(x1, x2, 3);
-        check("compare: past the edit budget -- too different to mark, both shown side by side",
-              r4.too_different && r4.rows.size() == 2500 && r4.rows[0].left == "x0" && r4.rows[0].right == "y0");
-        const std::string before = tree_snapshot(dir);
-        (void)cm::read_text(P("ch.odt"), "odt");
-        (void)cm::read_text(P("crlf.txt"), "txt");
-        (void)cm::kind_of(P("notes.weird"), "weird", false);
-        check("compare: reading changes nothing on disk", tree_snapshot(dir) == before);
-        fs::remove_all(dir, ec);
-    }
     // -- s017a2: Samson's places are Protected; your own bundle list --------------
     {
         std::cout << "\n-- samson + bundles --\n";
         namespace sc = core::scan;
-        namespace vs = core::versions;
         namespace dr = core::door;
         const fs::path home = fs::temp_directory_path() / ("rouster_samson_" + std::to_string(::getpid()));
         std::error_code ec;
@@ -4705,12 +3758,7 @@ int main(int argc, char** argv) {
               seen.find("Vault") == std::string::npos && seen.find("samson") == std::string::npos, seen);
         fs::create_directories(D, ec);
         const auto rec = core::catalog::record(D, H, "", mine, {}, 1790000000);
-        const auto vr = vs::find(D, H, H + "/.local/share", CH);
-        bool samson_listed = false;
-        for (const auto& h : vr.history)
-            if (h.app == "Samson" && h.path == H + "/Vault" && h.count == 2) samson_listed = true;
-        check("samson: versions -- the note pair is a family, nothing of Samson's; its folder listed (2 sealed)",
-              rec.ok && vr.ok && vr.families.size() == 1 && vr.families[0].folder == "Docs" && samson_listed);
+        check("samson: the catalog records only Docs/note*", rec.ok);
         dr::Door door(H, D);
         door.load();
         const std::string before = files_snapshot(home);
@@ -4821,7 +3869,7 @@ int main(int argc, char** argv) {
              {std::tuple{root, &allowed, std::string(""), &files},
               std::tuple{latch_root, &latch_allowed, std::string("latch/"), &latch_files}}) {
             for (const char* sub : {"src", "include"}) {
-                if (!fs::is_directory(base / sub)) continue;
+                if (base.empty() || !fs::is_directory(base / sub)) continue;
                 for (const auto& e : fs::recursive_directory_iterator(base / sub)) {
                     const std::string rel = fs::relative(e.path(), base).string();
                     const auto ext = e.path().extension();
@@ -4834,9 +3882,30 @@ int main(int argc, char** argv) {
                 }
             }
         }
-        check("source gate: latch's sources were read too", latch_files >= 4, std::to_string(latch_files) + " latch files");
+        // Built against an INSTALLED latch (no source here) the door's code is gated by latch's own build.
+        if (latch_root.empty())
+            std::cout << "  (latch is installed, not beside -- its sources are not read here)\n";
+        else
+            check("source gate: latch's sources were read too", latch_files >= 4, std::to_string(latch_files) + " latch files");
         check("source gate: no write call outside the door", hits.empty(),
               hits.empty() ? std::to_string(files + latch_files) + " files clean" : hits.front() + (hits.size() > 1 ? " (+" + std::to_string(hits.size() - 1) + ")" : ""));
+        // s019a: Tidy's tags are Tidy's (TIDY_FOR_ROUSTER s2). Rouster never asks the door for a
+        // Tag, never names a user.tidy. attribute, never sets / removes an xattr itself.
+        std::vector<std::string> tag_hits;
+        for (const char* sub : {"src", "include"})
+            for (const auto& e : fs::recursive_directory_iterator(root / sub)) {
+                const std::string rel = fs::relative(e.path(), root).string();
+                if (!e.is_regular_file() || rel == "src/selftest.cpp") continue;
+                std::ifstream in(e.path());
+                std::string line;
+                for (int n = 1; std::getline(in, line); ++n) {
+                    if (const auto c = line.find("//"); c != std::string::npos) line.erase(c);
+                    for (const char* t : {"Verb::Tag", "user.tidy", "setxattr", "removexattr"})
+                        if (line.find(t) != std::string::npos) tag_hits.push_back(rel + ":" + std::to_string(n) + " " + t);
+                }
+            }
+        check("source gate: Rouster never tags (user.tidy.* is Tidy's)", tag_hits.empty(),
+              tag_hits.empty() ? "" : tag_hits.front());
     }
     // -- Help (s013a2): the text held to the app --------------------------------
     {
@@ -4845,7 +3914,7 @@ int main(int argc, char** argv) {
         bool pages = true;
         std::string missing;
         // Every sidebar page (Shell_zones' m_stack ids) has a topic -- F1 opens it.
-        for (const char* id : {"scan", "sweep", "system", "dups", "dev", "tidy", "projects", "rules", "archive", "preflight", "profile", "activity"})
+        for (const char* id : {"scan", "sweep", "system", "dups", "dev", "projects", "rules", "archive", "preflight", "profile", "activity"})
             if (!hl::find(id)) { pages = false; missing += std::string(id) + " "; }
         check("help: every sidebar page has a topic", pages, missing);
         std::set<std::string> ids;

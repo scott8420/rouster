@@ -26,7 +26,7 @@ std::vector<Topic> build() {
                 "- Undo. Every act is one step in Activity, and Undo puts it back."}},
             {"The sidebar", {
                 "- Clean up: Smart Scan, Sweep, System, Duplicates, Dev projects.",
-                "- Organize: Tidy, Projects, Rules, Archive.",
+                "- Organize: Projects, Rules, Archive.",
                 "- Safety: Preflight, Profile backup, Activity."}},
             {"Getting help", {
                 "Press F1 on any page to open its help. Ctrl+? lists the keyboard shortcuts."}},
@@ -166,74 +166,6 @@ std::vector<Topic> build() {
         }});
 
     // ── Organize ────────────────────────────────────────────────────────────
-    t.push_back({"tidy", "Tidy", "Organize",
-        "Reads your whole home, proposes a lifespan for what it finds, and moves what you check -- one step per card, Undo takes it back.",
-        {
-            {"How to use it", {
-                "Press Look. Rouster looks through your home (like Smart Scan), updates its catalog, and reports:",
-                "- Short life -- installers and disk images, screenshots and the like unused for a month, reflex saves "
-                "such as \"report (1).pdf\" or \"Copy of notes\".",
-                "- Dormant -- neither opened nor changed in 18 months: candidates for the Archive.",
-                "- Undecided -- loose at the top of home or on the Desktop: no home yet.",
-                "- Active -- everything else; counted, not listed.",
-                "Each row names the query that proposed it. The first query to claim a file wins."}},
-            {"Acting on it", {
-                "Each card has its own button. Short life and Undecided rows start checked, Dormant rows don't. "
-                "Hover a row to see where it would go.",
-                "- Short life -> ~/Closet, remembered with 30 days to live; after that a review offers it to the Trash. "
-                "Nothing is ever deleted unasked.",
-                "- Undecided -> gathered into ~/Closet, to be sorted.",
-                "- Dormant -> ~/Archive/<year last changed>/, its folders kept (Put back on the Archive page works any time).",
-                "A name already in the Closet gets \"(from Desktop)\" or the like. A file changed since the Look is left "
-                "out and said -- Look again.",
-                "The Closet card makes ~/Closet and ~/Closet/Junk Drawer, and can point Downloads at the Closet "
-                "(~/.config/user-dirs.dirs -- the old one goes to the Trash, so Undo puts it back). Apps started after "
-                "that save there. GNOME's screenshots can't be pointed; the screenshots query gathers the old ones."}},
-            {"The Closet's review", {
-                "Once ~/Closet exists, its own card lists what's in it: short-life files with their expiry (\"expires "
-                "in 11 days\", \"expired 3 days ago\"), the rest waiting to be sorted. Nothing there is checked for you.",
-                "- Move to the Trash -- only expired items go; a checked item that hasn't expired stays put. Undo brings "
-                "them back.",
-                "- To the Junk Drawer -- kept, no home yet; things there never age out.",
-                "Keep here, on any proposed row, leaves that file where it is and it is never proposed again. The "
-                "\"Kept here\" card lists them; Forget lets Tidy propose one again.",
-                "Put away... on a Closet row: choose its home (a folder). The card shows the move first -- Put it "
-                "there, or Cancel. Check \"Also make it a rule\" and the next *.pdf (say) landing in the Closet will go "
-                "there too: the rule is added off, and the Rules page shows what it would move before you turn it on."}},
-            {"Version families", {
-                "Save, save, save: ch3.odt, ch3 final.odt, ch3 final2.odt, ch3 (1).odt -- the same name in one folder "
-                "with a mark on the end (final, v2, draft 3, (1), Copy of, - Copy). A bare number or a date is not a "
-                "mark: Chapter 2 and Chapter 3 are two chapters, two dated invoices are two invoices.",
-                "The newest is the keeper and stays. Check a family and press the button: the older saves go into "
-                "\"ch3 versions\" right beside it, one step, Undo takes it back. Nothing is checked for you.",
-                "Keep this, on any save, makes it the keeper (one in the versions folder comes back out); Rouster "
-                "remembers your choice. Not a family -- never proposed again.",
-                "\"reflex\" marks a save that looks like muscle memory: a copy's name, the same bytes as an older one, "
-                "or saved minutes before the next at nearly the same size.",
-                "Compare opens the viewer: the keeper on the left, one older save on the right, \u25C0 \u25B6 to step "
-                "through them. Pictures are drawn at one scale, so a smaller save looks smaller. Texts (plain text, "
-                "ODT, DOCX) are set side by side with the changed lines tinted -- only the changes, or The whole text. "
-                "Curvz, Folio, jot and Optik files show their date and size, with Open in Curvz (and the like). Keep "
-                "this one instead swaps the keeper; Short life sends the shown save to ~/Closet with 30 days to live, "
-                "one step, Undo takes it back.",
-                "App history -- Folio's backups, jot's daily copies, Trails' recordings -- is the app's own: listed, "
-                "left alone, never a family. Curvz, Folio, jot and Optik projects are folders Rouster keeps whole."}},
-            {"Hands off", {
-                "\"Leave a folder alone...\" marks a folder -- your Scrivener folder, covers, workups. Nothing inside it "
-                "is ever proposed: not by Tidy, not by Archive, not by Duplicates (a duplicate pair with either copy "
-                "inside is left out whole). Forget takes the mark off. The mark lives in the catalog, by path: rename "
-                "the folder and mark it again."}},
-            {"Also in the report", {
-                "Folders that need tidying, worst first (files arriving, kinds mixed, much unused in a year); the top "
-                "of home, folder by folder; and drift -- folders your desktop points at that aren't there, and where "
-                "new files land."}},
-            {"Good to know", {
-                "\"Unused\" is the later of last opened and last changed. If your home is mounted noatime, Rouster "
-                "can't know last opened (Preflight says so) and goes by last change.",
-                "Your own files only: hidden files, code in git repositories and caches are left out; a Scrivener "
-                "project is one item. Nothing in the Closet is proposed again -- it waits there to be sorted."}},
-        }});
-
     t.push_back({"projects", "Projects", "Organize",
         "Starts projects from templates, names files the project's way, and files them where they belong.",
         {
@@ -292,7 +224,7 @@ std::vector<Topic> build() {
                 "- Pika Backup -- green when Pika ran in the last 7 days. Off btrfs, Pika is the only net, so a stale one is red.",
                 "- Free space -- red under 2 GB, a note under 10 GB or 10%.",
                 "- Last opened -- whether your home keeps when files were last opened (relatime does); a note if "
-                "it's mounted noatime, when Tidy can only go by last change. Never stops anything."}},
+                "it's mounted noatime, when Rouster can only go by last change. Never stops anything."}},
             {"Red stops, amber notes", {
                 "A red check turns off every act button until it clears, and the button says why. Amber never blocks."}},
             {"Take snapshot", {

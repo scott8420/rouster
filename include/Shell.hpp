@@ -4,10 +4,8 @@
 #include "widgets/Widgets.hpp"
 #include "core/Scan.hpp"     // s002: the read-only walker
 #include "core/Catalog.hpp"  // s015b: the catalog, recorded after each Look
-#include "core/Tidy.hpp"
 #include <map>
 #include <functional>
-#include "core/Versions.hpp"     // s015c: the Tidy report (read-only)
 #include "core/Door.hpp"     // s004: the one door
 #include "core/Sweep.hpp"    // s006: the first module that acts
 #include "core/Dev.hpp"      // s007: dev projects
@@ -90,7 +88,8 @@ public:
     Shell();
     ~Shell() override;
 
-    void build_ui();                             // category: glue
+    void build_ui();
+    std::string config_home() const;             // category: helper: ~/.config (a fixture's own) -- Samson's settings                             // category: glue
 
 private:
     // ── zones ──────────────────────────────────────────────────────────────
@@ -103,7 +102,6 @@ private:
     void build_dev_page();                       // category: zone: Dev projects (s007)
     void build_dups_page();                      // category: zone: Duplicates (s008)
     void build_archive_page();                   // category: zone: Archive (s009)
-    void build_tidy_page();                      // category: zone: Tidy (s015c) -- the report
     void build_projects_page();                  // category: zone: Projects (s010)
     void build_rules_page();                     // category: zone: Rules (s011)
     void build_profile_page();                   // category: zone: Profile backup (s012a)
@@ -150,20 +148,6 @@ private:
     void on_snapshot_taken();                    // category: handler: the helper answered (Dispatcher, UI thread)
     void stop_preflight();                       // category: helper: join a snapshot in flight (close, dtor)
     void on_archive_find();                      // category: handler: look for old files (worker)
-    void on_tidy_look();                         // category: handler: s015c -- Look at home, record, report (worker)
-    void on_tidy_found();                        // category: handler: the report is ready (Dispatcher, UI thread)
-    void on_tidy_act(core::tidy::Verdict v);     // category: handler: s016 -- a card's checked rows -> one door step
-    void on_versions_act();                      // category: handler: s017 -- the checked families -> one door step
-    void on_versions_not_family(const std::string& key);   // category: handler: s017 -- never proposed again
-    void on_tidy_closet();                       // category: handler: s016 -- make the Closet / point Downloads at it
-    void on_tidy_hands_off();                    // category: handler: s016a2 -- folder chooser -> leave it alone
-    void on_tidy_forget(const std::string& rel); // category: handler: s016a2 -- a hands-off folder's Forget
-    void tidy_rereport(const std::string& said); // category: helper: s016a2 -- the report again from the catalog (no walk)
-    void on_closet_trash();                      // category: handler: s016b -- the review: checked expired items -> the Trash
-    void on_closet_junk();                       // category: handler: s016b -- checked Closet items -> the Junk Drawer
-    void on_tidy_keep(const std::string& rel, bool keep); // category: handler: s016b -- Keep here / its Forget
-    void on_closet_put_away(const std::string& rel); // category: handler: s016c -- Put away...: a folder chooser -> the preview
-    void on_closet_put_go();                     // category: handler: s016c -- Put it there (+ the rule, if checked)
     void on_archive_cancel();                    // category: handler: stop looking
     void on_archive_found();                     // category: handler: the worker finished (Dispatcher, UI thread)
     void on_archive_view(bool stored);           // category: handler: Old files / In the archive
@@ -243,21 +227,6 @@ private:
     void paint_dups();                           // category: helper: mode switch, one card per group, rows with checks
     void dups_gate();                            // category: helper: the act button's label + whether it may act
     void stop_archive();                         // category: helper: cancel + join (close, dtor)
-    void stop_tidy();                            // category: helper: cancel + join (close, dtor)
-    void paint_tidy();                           // category: helper: s015c -- the report's cards
-    void tidy_gate();                            // category: helper: s016 -- each card's act button: label + may it act
-    void paint_versions();                       // category: helper: s017 -- the Version families card + App history
-    void versions_gate();                        // category: helper: s017 -- the families card's button
-    void versions_repaint(const std::function<void()>& change = {});   // category: helper: s017 -- repaint, scroll kept
-    std::size_t versions_keeper(const core::versions::Family& f) const;   // category: helper: s017 -- the keeper on screen
-    std::string versions_data_home() const;      // category: helper: s017 -- ~/.local/share (a fixture's own)
-    std::string versions_config_home() const;    // category: helper: s017 -- ~/.config (a fixture's own)
-    void open_versions_viewer(const std::string& key);   // category: handler: s017b -- a family's Compare -> the viewer
-    void paint_versions_viewer();                // category: helper: s017b -- keeper left, one version right, ◀ ▶
-    void on_versions_short_life();               // category: handler: s017b -- the shown version -> ~/Closet, one door step
-    void versions_open_file(const std::string& rel, const std::string& app);   // category: helper: s017b -- Open / Open in Curvz
-    void closet_gate();                          // category: helper: s016b -- the Closet card's two buttons + Select all
-    void tidy_done(const std::string& big, const std::string& caption);   // category: helper: s016 -- the done state
     bool tick_archive();                         // category: helper: the live counters while looking
     void paint_archive();                        // category: helper: view switch, cards per top folder / the stored list
     void archive_gate();
@@ -451,59 +420,8 @@ private:
     std::vector<int> m_ar_year_list;             // the year dropdown's years (index 0 = any)
     bool             m_ar_dd_quiet = false;
     int              m_ar_months = core::archive::kDefaultMonths;
-    static constexpr std::size_t kTidyShown = 2000;     // s016a3: rows painted per Tidy card (in a scroller); unpainted rows are never checked
     static constexpr std::size_t kArchiveShown = 300;   // rows painted; unpainted rows are never checked
     std::size_t      m_ar_painted = 0;
-    // s015c: Tidy -- start | running | results. Report only.
-    Gtk::Box                              m_td_page{Gtk::Orientation::VERTICAL, 0};
-    Gtk::Stack                            m_td_states;
-    Gtk::Box                              m_td_list{Gtk::Orientation::VERTICAL, 12};
-    Gtk::Label                            m_td_sub, m_td_caption, m_td_run_big, m_td_run_caption;
-    Gtk::Spinner                          m_td_spinner;
-    Glib::Dispatcher                      m_tidy_finished;
-    std::shared_ptr<core::scan::Progress> m_td_progress;
-    std::thread                           m_td_worker;
-    std::mutex                            m_td_mx;
-    core::tidy::Report                    m_td_found;   // written by the worker
-    core::catalog::Delta                  m_td_cat;     // ...with what the Look did to the catalog
-    core::tidy::Report                    m_td_shown;   // UI thread only
-    core::versions::Report                m_vf_found;   // s017: version families -- written by the worker
-    core::versions::Report                m_vf_shown;   // ...UI thread only
-    std::set<std::string>                 m_vf_checked; // family keys checked (painted ones only)
-    std::set<std::string>                 m_vf_painted;
-    std::map<std::string, std::string>    m_vf_keep;    // family key -> the member you made the keeper (on screen)
-    std::string                           m_vf_said;
-    Gtk::Button*                          m_vf_go = nullptr;    // managed; reset each paint
-    Gtk::Label*                           m_vf_gate = nullptr;
-    std::string                           m_vv_key;     // s017b: the family in the viewer ("" = none)
-    std::string                           m_vv_rel;     // ...the version shown on the right (by path: survives a keeper swap)
-    bool                                  m_vv_all = false;   // ...the whole text, not just the changes
-    std::string                           m_vv_said;
-    bool                                  m_vv_moved = false; // the viewer moved a save since the Look -- an Undo makes the card stale
-    Gtk::Box                              m_vv_box{Gtk::Orientation::VERTICAL, 14};
-    core::catalog::Delta                  m_td_cat_shown;
-    std::set<std::string>                 m_td_checked;     // s016: checked rows (painted rows only -- never one unseen)
-    std::set<std::string>                 m_td_painted;     // ...the rows on screen
-    bool                                  m_td_redirect = true;
-    std::string                           m_td_said;        // s016a2: one line on the Hands-off card (what just changed)   // s016: "Downloads land in the Closet" row
-    std::array<Gtk::Button*, 3>           m_td_go{};        // the cards' act buttons (managed; reset each paint)
-    std::array<Gtk::Label*, 3>            m_td_gates{};
-    std::array<Gtk::CheckButton*, 3>      m_td_all{};       // s016a3: each card's "Select all" (managed; reset each paint)
-    std::array<std::vector<Gtk::CheckButton*>, 3> m_td_cbs; // ...and its offered rows' checks
-    bool                                  m_td_bulk = false; // select-all in progress: rows don't re-gate one by one
-    // s016b: the Closet card -- what's in it, the review.
-    core::tidy::ClosetView                m_tc_view;        // UI thread only; read at paint
-    std::set<std::string>                 m_tc_checked;     // nothing pre-checked (the Trash is never pre-checked)
-    std::vector<std::pair<Gtk::CheckButton*, std::string>> m_tc_cbs;
-    Gtk::CheckButton*                     m_tc_all = nullptr;
-    Gtk::Label*                           m_tc_gate = nullptr;
-    Gtk::Button*                          m_tc_trash = nullptr;
-    Gtk::Button*                          m_tc_junk = nullptr;
-    std::optional<std::pair<std::string, std::string>> m_tc_away;   // s016c: (item rel, chosen home rel) -- the preview on the card
-    bool                                  m_tc_away_rule = false;   // ...and "also make it a rule" (unchecked until you check it)
-    std::string                           m_td_keep_said;   // s016b: one line at the top (what Keep here / Forget just did)
-    Gtk::Label                            m_td_done_big, m_td_done_caption;
-    sigc::connection                      m_td_tick;
 
     Glib::Dispatcher                      m_archive_finished;
     std::shared_ptr<core::scan::Progress> m_ar_progress;

@@ -12,9 +12,6 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(GTKMM REQUIRED gtkmm-4.0)
 # s015b: the catalog (Fedora: sqlite-devel; Ubuntu: libsqlite3-dev). Core only.
 pkg_check_modules(SQLITE REQUIRED sqlite3)
-# zlib (s017b): the viewer inflates an ODT / DOCX's text out of its zip.
-# Fedora: zlib-ng-compat-devel (gtk4-devel already pulls it in).
-pkg_check_modules(ZLIB REQUIRED zlib)
 find_package(spdlog REQUIRED)
 
 # ── rouster_core -- the GTK-free core (the model side of the one real seam) ──────
@@ -22,12 +19,24 @@ find_package(spdlog REQUIRED)
 # core/ fails to compile, so the seam is enforced by the build graph and the
 # core stays headless-testable. (docs/two-layer-seam.md.)
 # ── latch -- the shared door (2026-11-10), one repo beside this one ───────────
-# The workspace layout: <dir>/rouster-project/rouster and <dir>/latch-project/latch.
-set(LATCH_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../latch-project/latch" CACHE PATH "the latch library (the shared door)")
-if(NOT EXISTS "${LATCH_DIR}/CMakeLists.txt")
-    message(FATAL_ERROR "latch not found at ${LATCH_DIR} -- unzip latch-project beside rouster-project, or -DLATCH_DIR=...")
+# Two ways (s019a): its SOURCE beside this one (<dir>/latch-project/latch, or
+# -DLATCH_DIR=...) is used first -- the selftest's source gate then reads the
+# door's code too; otherwise the INSTALLED latch (latch's ./install.sh ->
+# find_package(latch)). Installed: rebuild Rouster after reinstalling latch.
+set(LATCH_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../latch-project/latch" CACHE PATH "the latch library's source (the shared door)")
+if(EXISTS "${LATCH_DIR}/CMakeLists.txt")
+    add_subdirectory(${LATCH_DIR} ${CMAKE_BINARY_DIR}/latch)
+    set(ROUSTER_LATCH_SOURCE "${LATCH_DIR}")
+    message(STATUS "latch: from source, ${LATCH_DIR}")
+else()
+    find_package(latch QUIET)
+    if(NOT latch_FOUND)
+        message(FATAL_ERROR "latch not found -- install it (latch-project/latch/install.sh), or unzip latch-project beside rouster-project, or -DLATCH_DIR=...")
+    endif()
+    add_library(latch ALIAS latch::latch)
+    set(ROUSTER_LATCH_SOURCE "")
+    message(STATUS "latch: installed, ${latch_DIR} (version ${latch_VERSION})")
 endif()
-add_subdirectory(${LATCH_DIR} ${CMAKE_BINARY_DIR}/latch)
 
 add_library(rouster_core STATIC
     src/core/Recents.cpp
@@ -35,12 +44,6 @@ add_library(rouster_core STATIC
     # The catalog (s015b): Rouster's memory of your files -- first seen, history,
     # moves, decisions -- in its own catalog.db. The only file that opens a database.
     src/core/Catalog.cpp
-    # Tidy (s015c): the report -- verdicts as named queries over the catalog; read-only.
-    src/core/Tidy.cpp
-    # Version families (s017): families by name, app history recognised; read-only.
-    src/core/Versions.cpp
-    # Compare (s017b): the viewer's kinds, texts (txt / ODT / DOCX) and line diff; read-only.
-    src/core/Compare.cpp
     src/core/Preflight.cpp
     # THE ONE DOOR (s004) lives in latch since 2026-11-10 (with git/child,
     # packages and the never-touch list); include/core/Door.hpp is the shim.
@@ -81,9 +84,9 @@ add_library(rouster_core STATIC
     # the verb table the selftest gate walks. docs/undo.md.
     src/core/Stones.cpp
 )
-target_include_directories(rouster_core PUBLIC include ${SQLITE_INCLUDE_DIRS} ${ZLIB_INCLUDE_DIRS})
-target_link_libraries(rouster_core PUBLIC latch ${SQLITE_LIBRARIES} ${ZLIB_LIBRARIES})
-target_link_directories(rouster_core PUBLIC ${SQLITE_LIBRARY_DIRS} ${ZLIB_LIBRARY_DIRS})
+target_include_directories(rouster_core PUBLIC include ${SQLITE_INCLUDE_DIRS})
+target_link_libraries(rouster_core PUBLIC latch ${SQLITE_LIBRARIES})
+target_link_directories(rouster_core PUBLIC ${SQLITE_LIBRARY_DIRS})
 # Vendored nlohmann/json (header-only, MIT), PRIVATE -- an implementation detail
 # of the pump, no consumer inherits the include (CANON: surprise-free build).
 target_include_directories(rouster_core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
@@ -93,7 +96,7 @@ add_executable(rouster_selftest src/selftest.cpp)
 target_link_libraries(rouster_selftest PRIVATE rouster_core)
 # The source gate reads src/ and include/ at test time.
 target_compile_definitions(rouster_selftest PRIVATE ROUSTER_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
-                                                   LATCH_SOURCE_DIR="${LATCH_DIR}")
+                                                   LATCH_SOURCE_DIR="${ROUSTER_LATCH_SOURCE}")
 
 # ── rouster-helper (s013) -- the small ROOT helper, run only through pkexec ──────
 # Its own tiny link line: libc + the shared, pure Helper.cpp. No GTK, no spdlog,
@@ -144,7 +147,6 @@ add_executable(rouster
     src/Shell_bindings.cpp
     src/Shell_handlers.cpp
     src/Shell_helpers.cpp
-    src/Shell_versions.cpp
     src/AboutWindow.cpp
     src/HelpWindow.cpp
     src/ShortcutsDialog.cpp

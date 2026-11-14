@@ -29,7 +29,6 @@ const char* area_name(Area a) {
         case Area::Profile:  return "profile";
         case Area::System:   return "system";
         case Area::Catalog:  return "catalog";
-        case Area::Tidy:     return "tidy";
     }
     return "?";
 }
