@@ -415,7 +415,7 @@ door::Plan plan(const std::string& home, const Found& found, const std::string& 
         a.reason = why;
         p.actions.push_back(std::move(a));
     };
-    for (const std::string r : {"Archive", "Archive/Profile"}) {
+    for (const std::string r : {"Rouster", "Rouster/Profile"}) {
         struct stat st{};
         if (::lstat((home + "/" + r).c_str(), &st) != 0) mk(home + "/" + r, "where profile backups are kept");
     }
@@ -508,11 +508,12 @@ const char* state_name(State st) {
 
 std::vector<std::string> bundles(const std::string& home) {
     std::vector<std::pair<std::int64_t, std::string>> bs;
-    for (const auto& n : list_dir(home + "/" + kRoot)) {
-        struct stat st{};
-        if (::lstat((home + "/" + kRoot + "/" + n + "/PROFILE.txt").c_str(), &st) == 0 && S_ISREG(st.st_mode))
-            bs.emplace_back(ns(st), n);
-    }
+    for (const std::string root : {kRoot, kOldRoot})
+        for (const auto& n : list_dir(home + "/" + root)) {
+            struct stat st{};
+            if (::lstat((home + "/" + root + "/" + n + "/PROFILE.txt").c_str(), &st) == 0 && S_ISREG(st.st_mode))
+                bs.emplace_back(ns(st), root + "/" + n);
+        }
     std::sort(bs.rbegin(), bs.rend());
     std::vector<std::string> out;
     for (auto& [t, n] : bs) out.push_back(n);
@@ -575,7 +576,8 @@ std::set<std::string> names_of(const std::string& text, std::size_t column) {
 Restore look_back(const std::string& home, const std::string& bundle, const Runner& run) {
     Restore r;
     r.bundle = bundle;
-    const std::string root = home + "/" + kRoot + "/";
+    std::string root = home + "/" + kRoot + "/";
+    if (bundle.rfind(root, 0) != 0) root = home + "/" + kOldRoot + "/";   // a backup from before s019d
     struct stat st{};
     if (bundle.rfind(root, 0) != 0 || bundle.find("/..") != std::string::npos ||
         bundle.find('/', root.size()) != std::string::npos ||

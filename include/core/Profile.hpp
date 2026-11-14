@@ -28,7 +28,7 @@
 // Secrets (ssh keys, gpg, keyrings) are NOT here: s012b, opt-in and encrypted.
 //
 // plan() builds ONE door step that CREATES a bundle folder and nothing else:
-//   ~/Archive/Profile/<host>-<yyyymmdd-hhmm>/   (Q6 lean: ~/Archive)
+//   ~/Rouster/Profile/<host>-<yyyymmdd-hhmm>/   (s019d: Rouster's own name -- ~/Archive is Tidy's)
 //     PROFILE.txt         what is in it, from where, how to put it back by hand
 //     NOTES.md            the notes (if any)
 //     home/<rel>          files, at their place relative to home
@@ -45,7 +45,8 @@ inline constexpr int kGroupCount = 6;
 const char* group_name(Group g);
 const char* group_why(Group g);
 
-inline constexpr const char* kRoot = "Archive/Profile";   // relative to home
+inline constexpr const char* kRoot = "Rouster/Profile";   // relative to home; new backups go here (s019d)
+inline constexpr const char* kOldRoot = "Archive/Profile"; // before s019d: still listed and restorable, never written
 inline constexpr std::uint64_t kFileMax = 64ull * 1024 * 1024;   // a bigger "dotfile" is left out, said why
 
 struct Item {
@@ -69,7 +70,7 @@ struct Found {
     std::string              host;
     std::uint64_t            bytes = 0;
     std::uint64_t            errors = 0;
-    std::vector<std::string> bundles;   // earlier bundles, newest first (names under ~/Archive/Profile)
+    std::vector<std::string> bundles;   // earlier bundles, newest first (relative to home)
     std::string              refused;
     secrets::Found           secrets;   // s012c: listed only; read and encrypted at the click, if opted in
 };
@@ -163,7 +164,8 @@ struct Restore {
     SettingsBack             settings;      // s012d
 };
 
-// Earlier bundles under ~/Archive/Profile (those holding PROFILE.txt), newest first.
+// Earlier bundles (those holding PROFILE.txt) under ~/Rouster/Profile and the old
+// ~/Archive/Profile, newest first -- each relative to home ("Rouster/Profile/<name>").
 std::vector<std::string> bundles(const std::string& home);
 
 Restore look_back(const std::string& home, const std::string& bundle, const Runner& run);

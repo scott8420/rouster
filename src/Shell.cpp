@@ -1,4 +1,5 @@
 #include "Shell.hpp"
+#include <algorithm>
 #include "core/Package.hpp"   // s017a2: bundles.json
 #include "HelpWindow.hpp"      // complete type for ~unique_ptr<HelpWindow>
 #include "AboutWindow.hpp"      // complete type for ~unique_ptr<AboutWindow> in ~Shell()
@@ -119,7 +120,17 @@ void Shell::build_ui() {
     m_home = home_dir();
     core::door::install();   // latch: Rouster's name + its root helper's rules, before any door
     // s017a2: Samson's folder, second home and catalog are Protected -- before any walk or door step.
-    core::scan::set_owned(core::scan::samson_places(m_home, config_home()));
+    // s019d: ...and Tidy's Hands off (~/.local/share/tidy/settings.ini) -- ONE list for both apps.
+    {
+        auto owned = core::scan::samson_places(m_home, config_home());
+        const auto tidy = core::tidylink::hands_off(m_home);
+        for (const auto& r : tidy) if (std::find(owned.begin(), owned.end(), r) == owned.end()) owned.push_back(r);
+        if (auto lg = log::get(log::Area::Shell)) {
+            lg->info("hands off (Tidy's): {}", tidy.size());
+            for (const auto& r : tidy) lg->info("  ~/{}", r);
+        }
+        core::scan::set_owned(std::move(owned));
+    }
     // s017a2: your own bundle list (bundles.json) joins the built-in package kinds.
     core::pkg::set_extra(core::pkg::load_extra(data_dir()));
     m_door = std::make_unique<core::door::Door>(m_home, data_dir());

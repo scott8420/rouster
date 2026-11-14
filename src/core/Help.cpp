@@ -49,7 +49,16 @@ std::vector<Topic> build() {
                 "- ~/.config/dconf, ~/.local/share/gnome-shell/extensions, ~/.local/share/flatpak",
                 "- any folder named fixes, anywhere",
                 "- anything outside your home folder, anything reached through a symlink, anything on another drive",
-                "- Rouster's own records"}},
+                "- Rouster's own records",
+                "- Samson's folder and its containers (*.samson)"}},
+            {"Tidy's things", {
+                "Tidy (a separate app) organizes your files; Rouster leaves its work alone:",
+                "- Tidy's Hands off list (in Tidy's settings) is Rouster's too -- one list. Those folders are never "
+                "looked into, offered or changed. Change the list in Tidy; Rouster reads it when it starts.",
+                "- .tidy-files and .tidy-project (Tidy's id lists) are never moved or trashed on their own; a folder "
+                "holding one may still move whole.",
+                "- Tidy's tags on your files (its extended attributes) are never set or cleared, and a move keeps them.",
+                "- Tidy's own files in ~/.local/share/tidy are read, never written."}},
             {"Packages are one thing", {
                 "A Scrivener project (.scriv) -- and Pages, Numbers, Keynote, .rtfd, .app, a Photos library -- is a "
                 "folder on Linux but one thing to Rouster. It is never looked inside, never split, never swept, "
@@ -172,9 +181,7 @@ std::vector<Topic> build() {
                 "- Filesystem -- green when home is btrfs on its own subvolume, so it can be snapshotted on its own.",
                 "- Snapshot -- green when one of Rouster's snapshots is under a day old.",
                 "- Pika Backup -- green when Pika ran in the last 7 days. Off btrfs, Pika is the only net, so a stale one is red.",
-                "- Free space -- red under 2 GB, a note under 10 GB or 10%.",
-                "- Last opened -- whether your home keeps when files were last opened (relatime does); a note if "
-                "it's mounted noatime, when Rouster can only go by last change. Never stops anything."}},
+                "- Free space -- red under 2 GB, a note under 10 GB or 10%."}},
             {"Red stops, amber notes", {
                 "A red check turns off every act button until it clears, and the button says why. Amber never blocks."}},
             {"Take snapshot", {
@@ -212,7 +219,7 @@ std::vector<Topic> build() {
         {
             {"Back up", {
                 "Look gathers your set-up: dotfiles, GNOME settings, the extension list, autostart, user units, "
-                "fonts, and the package and Flatpak lists. Back up makes one folder in ~/Archive/Profile/ with "
+                "fonts, and the package and Flatpak lists. Back up makes one folder in ~/Rouster/Profile/ with "
                 "PROFILE.txt saying where each file came from and how to put it back by hand."}},
             {"Secrets (optional)", {
                 "Include them, encrypted adds ~/.ssh, ~/.gnupg and your keyrings, encrypted with a passphrase you "
@@ -256,10 +263,7 @@ std::vector<Topic> build() {
         {
             {"", {
                 "- ~/.local/share/rouster -- the Activity record (manifest.jsonl), saved settings for Undo, known names.",
-                "- ~/.local/share/rouster/catalog.db -- the catalog: Rouster's memory of your files (names, sizes, "
-                "when each was first seen, last opened, last changed, moved, gone). Never their contents. "
-                "Delete it and the next Smart Scan of home starts it again -- only the history and your decisions are lost.",
-                "- ~/Archive/Profile -- profile backups.",
+                "- ~/Rouster/Profile -- profile backups (older ones in ~/Archive/Profile are still listed and restorable).",
                 "- ~/.local/share/Trash -- what Rouster (and you) sent to the Trash.",
                 "- /home/.rouster-snapshots -- snapshots (root-owned, read-only).",
                 "Uninstalling Rouster removes the app; --purge also removes its settings. Your backups and "

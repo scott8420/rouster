@@ -8,7 +8,7 @@
 namespace rouster::log {
 
 namespace {
-constexpr int kAreaCount = static_cast<int>(Area::Catalog) + 1;   // the last Area -- keep it last in Log.hpp
+constexpr int kAreaCount = static_cast<int>(Area::System) + 1;   // the last Area -- keep it last in Log.hpp
 
 const char* area_name(Area a) {
     switch (a) {
@@ -25,7 +25,6 @@ const char* area_name(Area a) {
         case Area::Dups:     return "dups";
         case Area::Profile:  return "profile";
         case Area::System:   return "system";
-        case Area::Catalog:  return "catalog";
     }
     return "?";
 }

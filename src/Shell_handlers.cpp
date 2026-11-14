@@ -178,7 +178,7 @@ void Shell::on_sweep_run() {  // handler: the checked items -> a plan -> the doo
     std::uint64_t bytes = 0;
     for (const auto& a : plan.actions) bytes += a.bytes;
 
-    const auto r = m_door->run(plan);
+    const auto r = door_run(plan);
     if (auto lg = log::get(log::Area::Sweep)) {
         lg->info("run '{}': {} done, {} failed", plan.label, r.done, r.failed);
         for (const auto& m : r.messages) lg->warn("  {}", m);
@@ -255,17 +255,8 @@ void Shell::on_dups_found() {  // handler: the worker finished (Dispatcher -> UI
         std::lock_guard lk(m_du_mx);
         m_du_shown = m_du_found;
     }
-    {   // s016a2: a group touching a hands-off folder isn't offered at all
-        const auto off = core::catalog::hands_off(data_dir());
-        auto& g = m_du_shown.groups;
-        const auto before = g.size();
-        g.erase(std::remove_if(g.begin(), g.end(), [&](const core::dups::Group& grp) {
-            for (const auto& m : grp.members) if (core::catalog::touches(off, m.rel)) return true;
-            return false;
-        }), g.end());
-        if (auto lg = log::get(log::Area::Dups); lg && g.size() != before)
-            lg->info("hands off: {} groups left out", before - g.size());
-    }
+    // s016a2 -> s019d: hands-off folders are latch's owned places now (Tidy's list,
+    // read at startup) -- Duplicates never walks into one, and the door refuses them.
     if (!m_du_shown.refused.empty()) {
         m_du_sub.set_text("Not looked: " + m_du_shown.refused);
         m_du_states.set_visible_child("start");
@@ -326,7 +317,7 @@ void Shell::on_dups_run() {  // handler: the checked copies -> a plan -> worker 
         for (const auto& d : m_du_dropped) lg->info("  left out: {}", d);
     }
     m_du_act_worker = std::thread([this, plan] {
-        const auto r = m_door->run(plan);
+        const auto r = door_run(plan);
         {
             std::lock_guard lk(m_du_act_mx);
             m_du_act_result = r;
@@ -372,7 +363,7 @@ void Shell::on_system_run() {  // handler: the checked rows -> a plan -> worker 
         for (const auto& a : plan.actions) lg->info("  {}", a.content);
     }
     m_sy_worker = std::thread([this, plan] {
-        const auto r = m_door->run(plan);
+        const auto r = door_run(plan);
         {
             std::lock_guard lk(m_sy_mx);
             m_sy_result = r;
@@ -437,7 +428,7 @@ void Shell::on_snapshot_take() {  // handler: Preflight's Take snapshot -> worke
     paint_preflight();       // the button reads Waiting… and is off
     if (auto lg = log::get(log::Area::Preflight)) lg->info("snapshot: asking root for {}", a.content);
     m_pf_worker = std::thread([this, plan] {
-        const auto r = m_door->run(plan);
+        const auto r = door_run(plan);
         {
             std::lock_guard lk(m_pf_mx);
             m_pf_result = r;
@@ -550,7 +541,7 @@ void Shell::on_profile_found() {  // handler: the worker finished (Dispatcher ->
         m_pr_shown = m_pr_found;
     }
     m_pr_last.set_text(m_pr_shown.bundles.empty() ? std::string()
-                       : "Newest backup: ~/" + std::string(core::profile::kRoot) + "/" + m_pr_shown.bundles.front() +
+                       : "Newest backup: ~/" + m_pr_shown.bundles.front() +
                              (m_pr_shown.bundles.size() > 1 ? " (" + std::to_string(m_pr_shown.bundles.size()) + " in all)" : ""));
     if (!m_pr_shown.refused.empty()) {
         m_pr_sub.set_text("Not looked: " + m_pr_shown.refused);
@@ -640,7 +631,7 @@ void Shell::profile_backup(std::string secrets, std::size_t secret_files) {  // 
         for (const auto& d : dropped) lg->info("  left out: {}", d);
     }
     plan.previewed = true;   // the list on screen was the preview
-    const auto r = m_door->run(plan);
+    const auto r = door_run(plan);
     if (auto lg = log::get(log::Area::Profile)) {
         lg->info("run: {} done, {} failed", r.done, r.failed);
         for (const auto& m : r.messages) lg->warn("  {}", m);
@@ -685,7 +676,7 @@ void Shell::on_profile_look_back(const std::string& name) {  // handler: a backu
     m_pr_cancel = false;
     m_pr_spinner.start();
     m_pr_states.set_visible_child("running");
-    const std::string bundle = m_home + "/" + core::profile::kRoot + "/" + name;
+    const std::string bundle = m_home + "/" + name;   // s019d: relative to home (new or old root)
     m_pr_sec = {};   // s012c: secrets are opened again for each look
     if (auto lg = log::get(log::Area::Profile)) lg->info("look back at '{}'", bundle);
     m_pr_worker = std::thread([this, home = m_home, bundle] {
@@ -788,7 +779,7 @@ void Shell::on_profile_restore() {  // handler: checked rows -> Trash + Copy pla
         return;
     }
     plan.previewed = true;   // the restore list on screen was the preview
-    const auto r = m_door->run(plan);
+    const auto r = door_run(plan);
     if (auto lg = log::get(log::Area::Profile)) {
         lg->info("restore: {} done, {} failed", r.done, r.failed);
         for (const auto& m : r.messages) lg->warn("  {}", m);
@@ -890,7 +881,7 @@ void Shell::on_dev_run() {  // handler: the checked build dirs -> a plan -> the 
     std::uint64_t bytes = 0;
     for (const auto& a : plan.actions) bytes += a.bytes;
 
-    const auto r = m_door->run(plan);
+    const auto r = door_run(plan);
     if (auto lg = log::get(log::Area::Dev)) {
         lg->info("run '{}': {} done, {} failed", plan.label, r.done, r.failed);
         for (const auto& m : r.messages) lg->warn("  {}", m);
@@ -1004,7 +995,7 @@ void Shell::on_dev_confirm() {  // handler: the preview's act button -> worker
                 refused = "it changed since you looked (now at " + again.head.substr(0, 7) + ") -- Look again";
             }
         }
-        if (refused.empty()) r = m_door->run(plan);
+        if (refused.empty()) r = door_run(plan);
         {
             std::lock_guard lk(m_dv_act_mx);
             m_dv_act_result = r;

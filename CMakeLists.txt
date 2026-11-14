@@ -10,8 +10,6 @@ endif()
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(GTKMM REQUIRED gtkmm-4.0)
-# s015b: the catalog (Fedora: sqlite-devel; Ubuntu: libsqlite3-dev). Core only.
-pkg_check_modules(SQLITE REQUIRED sqlite3)
 find_package(spdlog REQUIRED)
 
 # ── rouster_core -- the GTK-free core (the model side of the one real seam) ──────
@@ -41,9 +39,9 @@ endif()
 add_library(rouster_core STATIC
     src/core/Recents.cpp
     src/core/Scan.cpp
-    # The catalog (s015b): Rouster's memory of your files -- first seen, history,
-    # moves, decisions -- in its own catalog.db. The only file that opens a database.
-    src/core/Catalog.cpp
+    # TidyLink (s019d): Tidy's Hands off (read), its marks never touched, the plan guard.
+    # (The catalog, s015b, retired at s019d -- Tidy keeps its own; SQLite left the build.)
+    src/core/TidyLink.cpp
     src/core/Preflight.cpp
     # THE ONE DOOR (s004) lives in latch since 2026-11-10 (with git/child,
     # packages and the never-touch list); include/core/Door.hpp is the shim.
@@ -78,9 +76,8 @@ add_library(rouster_core STATIC
     # the verb table the selftest gate walks. docs/undo.md.
     src/core/Stones.cpp
 )
-target_include_directories(rouster_core PUBLIC include ${SQLITE_INCLUDE_DIRS})
-target_link_libraries(rouster_core PUBLIC latch ${SQLITE_LIBRARIES})
-target_link_directories(rouster_core PUBLIC ${SQLITE_LIBRARY_DIRS})
+target_include_directories(rouster_core PUBLIC include)
+target_link_libraries(rouster_core PUBLIC latch)
 # Vendored nlohmann/json (header-only, MIT), PRIVATE -- an implementation detail
 # of the pump, no consumer inherits the include (CANON: surprise-free build).
 target_include_directories(rouster_core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party)

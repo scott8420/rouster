@@ -632,7 +632,7 @@ void Shell::build_dups_page() {  // zone: Duplicates
 //   running : spinner; Look asks dconf, dnf (cache only) and flatpak.
 //   results : cards per group with a check per row, what couldn't be
 //             gathered, the notes box. THE PREVIEW. The act bar makes one new
-//             folder under ~/Archive/Profile -- it changes nothing else.
+//             folder under ~/Rouster/Profile -- it changes nothing else.
 //   done    : where it went; Open folder / Undo / Activity / Look again.
 // ─────────────────────────────────────────────────────────────────────────────
 void Shell::build_profile_page() {  // zone: Profile backup
@@ -653,7 +653,7 @@ void Shell::build_profile_page() {  // zone: Profile backup
     m_pr_sub.set_max_width_chars(52);
     m_pr_sub.set_text("How this machine is set up -- dotfiles, GNOME settings, extensions, autostart, user "
                       "services, fonts, and what you installed -- gathered into one folder in "
-                      "~/Archive/Profile. Your own files aren't in it, and nothing else changes.");
+                      "~/Rouster/Profile. Your own files aren't in it, and nothing else changes.");
     start->append(m_pr_sub);
     m_pr_last.add_css_class("dim");
     start->append(m_pr_last);

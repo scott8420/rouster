@@ -14,7 +14,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 namespace rouster::log {
 
-enum class Area { App, Shell, Registry, Recents, Io, Scan, Preflight, Door, Sweep, Dev, Dups, Profile, System, Catalog };   // Catalog stays LAST: Log.cpp counts from it
+enum class Area { App, Shell, Registry, Recents, Io, Scan, Preflight, Door, Sweep, Dev, Dups, Profile, System };   // System stays LAST: Log.cpp counts from it
 
 // The logger for an area (may be null before init()/after shutdown -- callers
 // guard with `if (auto lg = log::get(area))`).

@@ -3,10 +3,10 @@
 #include <set>
 #include "widgets/Widgets.hpp"
 #include "core/Scan.hpp"     // s002: the read-only walker
-#include "core/Catalog.hpp"  // s015b: the catalog, recorded after each Look
 #include <map>
 #include <functional>
 #include "core/Door.hpp"     // s004: the one door
+#include "core/TidyLink.hpp" // s019d: Tidy's hands-off + marks
 #include "core/Sweep.hpp"    // s006: the first module that acts
 #include "core/Dev.hpp"      // s007: dev projects
 #include "core/Dups.hpp"     // s008: duplicates
@@ -187,6 +187,7 @@ private:
     void paint_profile_start();                  // category: helper: the earlier backups, each with Restore...
     void paint_profile_restore();                // category: helper: the restore preview -- files by state, diffs, commands
     void profile_restore_gate();                 // category: helper: the restore button's label + whether it may act                         // category: helper: the act button's label + whether it may act
+    core::door::Result door_run(const core::door::Plan& plan);   // category: helper: s019d -- tidylink::guard, then the door (the app's only Door::run)
     bool door_busy() const;                      // category: helper: a retire / restore owns the door right now
     void go_to(const std::string& page);         // category: helper: select a module's sidebar row
     void note_recent(const std::string& path);   // category: helper: push onto the list + persist
@@ -228,8 +229,6 @@ private:
     std::thread                           m_worker;
     std::mutex                            m_report_mx;
     core::scan::Report                    m_report;     // written by the worker, read after done
-    core::catalog::Delta                  m_cat;        // s015b: what the Look did to the catalog (with m_report)
-    core::catalog::Delta                  m_cat_shown;  // UI thread only
     sigc::connection                      m_tick;
     std::string                           m_home;
 
